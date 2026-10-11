@@ -70,6 +70,7 @@ public final class CombatBench {
 		moduleShip(game, hulls, t);
 		aiBroadside(game, hulls, t);
 		aiRetreat(game, hulls, t);
+		aiOrders(game, hulls, t);
 		aiLoad(game, hulls, t);
 		System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILURE(S)");
 	}
@@ -1903,6 +1904,160 @@ public final class CombatBench {
 		check("AI retreat", -runner.pos.z > expect && speedHome > runner.params.fwdSpeed * 0.8f,
 				String.format("ran %.0f toward home in 40 s (at least %.0f expected), speed toward home %.0f of %.0f",
 						-runner.pos.z, expect, speedHome, runner.params.fwdSpeed));
+	}
+
+	/** An armed hull with its guns taken away and no pilot: something to guard, chase or avoid. */
+	static Ship3D dummy(File game, Map<String, GameData.Hull> hulls, Tuning t, String hullId, String id, int owner, float x, float z) throws Exception {
+		Ship3D d = armed(game, hulls, t, hullId, id, owner);
+		d.weapons.clear();
+		d.pos.set(x, 0f, z);
+		return d;
+	}
+
+	static s3d.core.Order3D order(s3d.core.Order3D.Kind kind, float x, float z, float radius) {
+		s3d.core.Order3D o = new s3d.core.Order3D(kind);
+		o.point.set(x, 0f, z);
+		o.radius = radius;
+		return o;
+	}
+
+	/**
+	 * Orders from the command map: an escort keeps with its ship, ignores an enemy far from it and
+	 * fights one that comes close; a ship told to hold a point goes there and stays, leaving an
+	 * enemy far from the point alone; a capturer ends up inside the objective's ring; an attack
+	 * order goes after the ordered (farther) enemy; a ship told to avoid an area stays out of it and
+	 * leaves the enemy inside alone.
+	 */
+	static void aiOrders(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		s3d.core.PilotInput in = screen();
+		StringBuilder sb = new StringBuilder();
+		boolean ok = true;
+		{ // escort
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D big = armed(game, hulls, t, "dominator", "dominator", 0);
+			big.ai = new s3d.core.ShipAI3D(1);
+			big.order = order(s3d.core.Order3D.Kind.HOLD, 0f, -4000f, 300f);
+			Ship3D esc = armed(game, hulls, t, "wolf", "wolf", 0);
+			esc.pos.set(900f, 0f, 700f);
+			esc.ai = new s3d.core.ShipAI3D(2);
+			esc.order = new s3d.core.Order3D(s3d.core.Order3D.Kind.ESCORT);
+			esc.order.ship = big;
+			Ship3D far = dummy(game, hulls, t, "hound", "far", 1, 6000f, -2500f);
+			for (Ship3D x : new Ship3D[] {big, esc, far}) sim.addShip(x);
+			float sum = 0f, worst = 0f;
+			int n = 0;
+			boolean chasedFar = false;
+			for (float time = 0; time < 40f; time += DT) {
+				sim.update(in, DT, DT);
+				if (esc.ai.target == far) chasedFar = true;
+				if (time > 15f) {
+					float d = esc.pos.distance(big.pos);
+					sum += d;
+					worst = Math.max(worst, d);
+					n++;
+				}
+			}
+			Ship3D near = dummy(game, hulls, t, "hound", "near", 1, big.pos.x + 700f, big.pos.z - 500f);
+			near.hullMax = near.hull = 1e6f;
+			sim.addShip(near);
+			boolean engaged = false;
+			float strayed = 0f;
+			for (float time = 0; time < 20f; time += DT) {
+				sim.update(in, DT, DT);
+				if (esc.ai.target == near) engaged = true;
+				strayed = Math.max(strayed, esc.pos.distance(big.pos));
+			}
+			boolean pass = n > 0 && sum / n < 1200f && !chasedFar && engaged && strayed < 3500f;
+			ok &= pass;
+			sb.append(String.format("escort: mean %.0f / worst %.0f from its ship, chased the far enemy %b, engaged the near one %b (strayed up to %.0f); ",
+					sum / Math.max(1, n), worst, chasedFar, engaged, strayed));
+		}
+		{ // hold a point, an enemy far from it
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D h = armed(game, hulls, t, "hammerhead", "hammerhead", 0);
+			h.ai = new s3d.core.ShipAI3D(3);
+			h.order = order(s3d.core.Order3D.Kind.HOLD, 3000f, -3000f, 400f);
+			Ship3D far = dummy(game, hulls, t, "wolf", "far", 1, -4000f, 3000f);
+			sim.addShip(h);
+			sim.addShip(far);
+			float settled = -1f;
+			boolean chased = false;
+			for (float time = 0; time < 90f; time += DT) {
+				sim.update(in, DT, DT);
+				if (h.ai.target == far) chased = true;
+				float d = h.pos.distance(h.order.point);
+				if (d < h.order.radius + 200f && settled < 0f) settled = time;
+				if (d > h.order.radius + 400f) settled = -1f;
+			}
+			float end = h.pos.distance(h.order.point);
+			boolean pass = settled >= 0f && !chased && end < h.order.radius + 200f;
+			ok &= pass;
+			sb.append(String.format("hold: there from %.0f s, %.0f from the point at the end, chased the far enemy %b; ", settled, end, chased));
+		}
+		{ // capture an objective
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			s3d.core.Objective3D obj = new s3d.core.Objective3D("nav_buoy", "Nav Buoy");
+			obj.pos.set(-2500f, 0f, -2500f);
+			obj.radius = 300f;
+			sim.objectives.add(obj);
+			Ship3D e = armed(game, hulls, t, "eagle", "eagle", 0);
+			e.ai = new s3d.core.ShipAI3D(4);
+			e.order = new s3d.core.Order3D(s3d.core.Order3D.Kind.CAPTURE);
+			e.order.objective = obj;
+			e.order.radius = obj.radius;
+			sim.addShip(e);
+			float on = 0f;
+			for (float time = 0; time < 120f; time += DT) {
+				sim.update(in, DT, DT);
+				if (obj.flatDistance(e.pos) < obj.radius) on += DT;
+			}
+			boolean pass = on > 30f && obj.flatDistance(e.pos) < obj.radius;
+			ok &= pass;
+			sb.append(String.format("capture: %.0f s inside the ring, %.0f from it at the end; ", on, obj.flatDistance(e.pos)));
+		}
+		{ // attack the ordered ship, not the nearest
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D a = armed(game, hulls, t, "lasher", "lasher", 0);
+			a.ai = new s3d.core.ShipAI3D(5);
+			Ship3D near = dummy(game, hulls, t, "wolf", "near", 1, 600f, -800f);
+			Ship3D far = dummy(game, hulls, t, "hound", "far", 1, -2500f, -3500f);
+			a.order = new s3d.core.Order3D(s3d.core.Order3D.Kind.ATTACK);
+			a.order.ship = far;
+			for (Ship3D x : new Ship3D[] {a, near, far}) sim.addShip(x);
+			float d0 = a.pos.distance(far.pos);
+			int onFar = 0, frames = 0;
+			for (float time = 0; time < 30f; time += DT) {
+				sim.update(in, DT, DT);
+				frames++;
+				if (a.ai.target == far) onFar++;
+			}
+			boolean pass = onFar > frames * 0.95f && a.pos.distance(far.pos) < d0 * 0.6f;
+			ok &= pass;
+			sb.append(String.format("attack: on the ordered ship %.0f%% of the time, closed from %.0f to %.0f; ", 100f * onFar / frames, d0, a.pos.distance(far.pos)));
+		}
+		{ // avoid an area with an enemy in it
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D v = armed(game, hulls, t, "enforcer", "enforcer", 0);
+			v.ai = new s3d.core.ShipAI3D(6);
+			v.pos.set(0f, 0f, 1200f);
+			v.order = order(s3d.core.Order3D.Kind.AVOID, 0f, -2000f, 1500f);
+			Ship3D inside = dummy(game, hulls, t, "wolf", "inside", 1, 0f, -2000f);
+			Ship3D outside = dummy(game, hulls, t, "wolf", "outside", 1, 3500f, 1500f);
+			for (Ship3D x : new Ship3D[] {v, inside, outside}) sim.addShip(x);
+			float closest = Float.MAX_VALUE;
+			boolean wentIn = false, foughtOutside = false;
+			for (float time = 0; time < 40f; time += DT) {
+				sim.update(in, DT, DT);
+				closest = Math.min(closest, v.pos.distance(v.order.point));
+				if (v.ai.target == inside) wentIn = true;
+				if (v.ai.target == outside) foughtOutside = true;
+			}
+			boolean pass = closest > v.order.radius * 0.9f && !wentIn && foughtOutside;
+			ok &= pass;
+			sb.append(String.format("avoid: closest %.0f to the area's centre (radius %.0f), targeted the enemy inside %b, fought the one outside %b (destroyed %b)",
+					closest, v.order.radius, wentIn, foughtOutside, outside.destroyed));
+		}
+		check("AI orders", ok, sb.toString());
 	}
 
 	/** Fires continuously at aim for the given seconds; returns the number of hits on target. */

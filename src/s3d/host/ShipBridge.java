@@ -60,6 +60,7 @@ final class ShipBridge {
 	private static final Logger log = Global.getLogger(ShipBridge.class);
 	private static final Map<String, SpriteImage> SPRITES = new HashMap<>();
 	private static final java.util.Set<String> LOGGED_DRIVE_KEYS = new java.util.HashSet<>();
+	private static final java.util.Set<String> LOGGED_SPEED_KEYS = new java.util.HashSet<>();
 	private static final java.util.Set<String> LOGGED_SHIELD_RAW = new java.util.HashSet<>();
 	private static final Map<String, String[]> FIRE_SOUNDS = new HashMap<>();
 
@@ -337,6 +338,7 @@ final class ShipBridge {
 		double a = Math.toRadians(slot.getAngle());
 		Vec3 rest = new Vec3((float) -Math.sin(a), 0f, (float) -Math.cos(a));
 		WeaponMount m = new WeaponMount(slot.getId(), ws, new Vec3(x, y, z), rest, slot.getArc(), slot.isHardpoint());
+		m.hostRef = w;
 		if (!slot.isHidden()) {
 			WeaponSpecAPI spec = w.getSpec();
 			m.modelSource = weaponSprite(slot.isHardpoint() ? spec.getHardpointSpriteName() : spec.getTurretSpriteName(), slot.isHardpoint());
@@ -638,6 +640,38 @@ final class ShipBridge {
 			mult *= e.getValue().getValue();
 		}
 		return (base + base * percent / 100f + flat) * mult;
+	}
+
+	/**
+	 * How much battle objectives raise this ship's top speed right now (vanilla nav buoys / nav
+	 * rating): its top speed with modifiers whose source mentions "nav" over its top speed without
+	 * them; 1 if none. Every top-speed modifier source is logged once, so the real key shows in the
+	 * log if it's something else.
+	 */
+	static float navSpeedMult(ShipAPI ship) {
+		MutableStat stat = ship.getMutableStats().getMaxSpeed();
+		float base = stat.getBaseValue(), flat = 0f, navFlat = 0f, percent = 0f, navPercent = 0f, mult = 1f, navMult = 1f;
+		for (Map.Entry<String, MutableStat.StatMod> e : stat.getFlatMods().entrySet()) {
+			if (isNav(e.getKey())) navFlat += e.getValue().getValue();
+			else flat += e.getValue().getValue();
+		}
+		for (Map.Entry<String, MutableStat.StatMod> e : stat.getPercentMods().entrySet()) {
+			if (isNav(e.getKey())) navPercent += e.getValue().getValue();
+			else percent += e.getValue().getValue();
+		}
+		for (Map.Entry<String, MutableStat.StatMod> e : stat.getMultMods().entrySet()) {
+			if (isNav(e.getKey())) navMult *= e.getValue().getValue();
+			else mult *= e.getValue().getValue();
+		}
+		float without = (base + base * percent / 100f + flat) * mult;
+		float with = (base + base * (percent + navPercent) / 100f + flat + navFlat) * mult * navMult;
+		return without > 1f && with > without ? with / without : 1f;
+	}
+
+	private static boolean isNav(String source) {
+		if (source == null) return false;
+		if (LOGGED_SPEED_KEYS.add(source)) log.info("S3D: top speed modifier source seen: '" + source + "'");
+		return source.toLowerCase().contains("nav");
 	}
 
 	private static boolean isTravelDrive(String source, ShipAPI ship) {

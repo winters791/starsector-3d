@@ -5,6 +5,78 @@ known issues and next steps. Newest status first.
 
 ## Status
 
+- **2026-10-12 — Orders and objectives in 3D (user: "proceed to the next step"); awaiting in-game test.**
+  - Before: 3D pilots ignored every command-map order except retreat, objectives weren't shown, and their
+    bonuses never reached the 3D ships.
+  - Orders (core `Order3D` on `Ship3D.order`, followed by ShipAI3D; null = fight freely). Twice a second the
+    host reads each AI ship's vanilla assignment (`CombatTaskManagerAPI.getAssignmentFor`, ally or not) and
+    maps it by type name:
+    - LIGHT/MEDIUM/HEAVY_ESCORT, DEFEND, RALLY_* on a friendly ship -> ESCORT: a slot off its side
+      (port or starboard by seed, a little aft), matching its speed; fights only enemies within
+      max(1500, 1.2x weapon range) + its radius of the escorted ship.
+    - DEFEND / RALLY_* on a point, and anything else aimed at a point -> HOLD: go there (each ship to its own
+      spot on a ring), wait facing the enemy fleet; fights only within max(2000, 1.5x weapon range) + radius
+      of the point (`battle.holdRadius` 1000 map units).
+    - CAPTURE / CONTROL / ASSAULT on an objective -> CAPTURE: as HOLD, sitting within 0.35 of the capture
+      ring.
+    - ENGAGE / INTERCEPT / HARASS / STRIKE on an enemy ship -> ATTACK: that ship is the target.
+    - AVOID -> keep out of `battle.avoidRadius` 2000 map units round the point (or ship), never chase into it.
+    - Aimed at a station or module -> HOLD round the whole structure. SEARCH_AND_DESTROY, RECON,
+      REPAIR_AND_REFIT, no assignment -> fight freely. A fight that drags a ship 1.4x its leash from its
+      escort/hold/capture ground is dropped. Ordered ships skip the fleet-cohesion pull.
+    - Changes are logged ("S3D: X ordered: ESCORT Y", "has no orders: fights freely").
+  - Objectives (core `Objective3D`, `Sim.objectives`): mirrored from `engine.getObjectives()` at their map
+    position x mapScale; owner followed from vanilla twice a second (toast and log on change). HUD: a square
+    on each (green yours, red enemy, grey nobody), name and distance; a smaller inner square while the other
+    side is alone on it, an amber cross while contested; small squares on the minimap.
+    - Taking one: ships sit on it in 3D, so their puppets sit on it in 2D, for vanilla's own capture.
+      `battle.captureRadius` 600 map units is our guess at vanilla's ring. Fallback: if one side has been
+      alone on it for `battle.captureFallback` 30 s and vanilla hasn't flipped it, `setOwner` (logged WARN).
+    - Bonuses: weapon ranges are re-read from the puppets twice a second (`WeaponAPI.getRange()`, so sensor
+      arrays' ECM penalty and other mid-battle range changes reach 3D; the AI re-profiles). Top speed may now
+      rise past the deployment figure by modifiers whose source mentions "nav" (nav buoys); every top-speed
+      modifier source is logged once ("top speed modifier source seen"), so the real key shows if it's
+      different. Comm relays (command points) are vanilla's own.
+  - Bench (stand-in data, see the next entry): new "AI orders" check: escort mean 566 from its ship, ignores an enemy far from it, engages one
+    that comes close; HOLD reaches a point 4200 away and stays, ignoring an enemy far from it; CAPTURE sits
+    inside the ring; ATTACK picks the ordered (farther) ship 100% of the time; AVOID stays 3000+ from an area
+    of radius 1500 and leaves the enemy inside alone.
+  - Unverified until played: every API call above that's new (`getObjectives`, `BattleObjectiveAPI`
+    getType/getDisplayName/getLocation/getOwner/setOwner, `AssignmentInfo.getTarget`, `AssignmentTargetAPI`,
+    `DeployedFleetMemberAPI.getShip`) -- this was written without the game (see the next entry); whether
+    vanilla captures objectives for puppets with no collision; vanilla's capture ring; the nav key.
+- **2026-10-12 — Stations at twice the scale (user: "the stations need to be 2 times the scale of the
+  original"); awaiting in-game test.**
+  - `scale.station` 2.5 -> 5.0 (modules follow their station). Read as "twice what they are now"; it's one
+    number in the tuning file if 2x vanilla (2.0) was meant.
+  - At 5x a station's sections sit thousands of units out and vanilla's collision circle for the core can be
+    far bigger than the hull, so the AI (1.6x bounding-sphere avoidance, gun range to the target's centre)
+    could hover out of reach. Now, for station sections and modules only (ship v ship unchanged):
+    - Hulls know how far their solid shape reaches in each direction (`HullVolume.reachToward` / `extent`,
+      32 bins; `Ship3D.reachToward` / `surfaceDistance` / `extent`).
+    - Shots count as in range when the near side is (`Sim.nearSide`; autofire, AI, HUD in-range). The AI
+      steers clear of the real shape + its own size + 80, fights at its range from the near side, doesn't
+      flank from inside the structure, and makes no gun runs at an anchored station (the run "past the
+      target" was into the station).
+    - Fleet cohesion uses the centre of ships that fly (`Sim.mobileCentre`): a station's parts put the old
+      centre inside the station and pulled attackers into it. Working on a station within 3x weapon range
+      counts as busy.
+    - `battle.stationSpinDeg` 2 -> 1: the outer sections' speed grows with scale; at 2 deg/s they outran
+      destroyers trying to hold on them.
+    - Host: a station that would poke out of 80% of the battle area is moved in (logged; the command map
+      still shows it where vanilla has it); a ship that arrives inside a station is moved out beside it.
+  - Built in a cloud session without the game: everything type-checks against stand-in API stubs (not in
+    the repo) with -Xlint:all clean, and the benches ran on stand-in hull data (rough shapes and stats,
+    including a made-up 6-section station), so their numbers are indicative only. Not yet run:
+    `./build.sh` / `./build.sh combat` on the real install.
+  - Stand-in results, station assault from 6 directions (old code at 2.5 / new code at 5.0): all stripped in
+    ~150 / ~173 s; attackers lost 12 / 2 of 24; damage to attackers ~9700 / ~2300; no hull contact either way.
+    A 700 px stand-in station at 5x stalled with the old AI (a section left after 300 s) and is stripped in
+    ~200 s now. The attackers stand off instead of running into the station, so stations are much less
+    lethal in the bench; watch for that in game (real station weapons out-range the bench's generic guns).
+    The bench's own single "station assault" layout fails its "> 500 damage to attackers" check on the
+    stand-in data (266); all six batch layouts pass it (757-4812).
+
 - **2026-10-12 — HUD toggle fixed for the vanilla keys (user: F10 and backslash did nothing in 3D); awaiting in-game test.**
   - Cause: F10 was already `handBack` (press twice to finish the battle in vanilla 2D), so in 3D it only
     showed a "press again" toast. Backslash wasn't bound at all. Only `G` hid the HUD.
@@ -608,6 +680,8 @@ Bench (`./build.sh bench`, default tuning):
 
 ## Known gaps after M3
 
+(Historical: most of this is done since; see the status entries and Next steps.)
+
 - Targets don't manoeuvre or fight back (no AI yet), apart from the B missile test.
 - No shields, flux or overload yet; EMP (ion cannon/ion beam) does nothing extra; no fighters.
 - Weapon on-hit/every-frame scripts (special effects) aren't run; missile special behaviours (MIRV
@@ -617,6 +691,8 @@ Bench (`./build.sh bench`, default tuning):
   aim mode.
 
 ## Known gaps after M4 (unverified until the first campaign test)
+
+(Historical: fighters, ship systems, phase, collisions, stations, modules and orders are in now.)
 
 - Untested in game: whether `applyDamage` kills a `CollisionClass.NONE` puppet (fallback: remove
   as destroyed, which may change disabled-vs-destroyed for recovery), whether vanilla counts a
@@ -633,12 +709,14 @@ Bench (`./build.sh bench`, default tuning):
 
 ## Next steps
 
-(Updated 2026-10-12. Done since the last list: ship systems batch 1 + phase, EMP, fighters, collisions,
-missile behaviours, sound, weight/knockback, AI manoeuvring, stations and module ships.)
+(Updated 2026-10-12. Done since the last list: stations at 5x with AI that copes, orders and objectives.)
 
-1. In-game test of stations (attack a pirate or Pather base, or any station).
-2. Gaps by impact: orders and objectives (escort, capture, rally, objective bonuses do nothing in 3D);
-   weapon on-hit / every-frame scripts; remaining ship systems (drone strike, canister flak, entropy
-   amplifier, phase teleporter, reserve wings, mine strike, targeting feed, lidar array, ...); mesh LOD for
-   big battles; other mods' ships.
-3. M5: hull-by-hull pass (OBJ override for hulls the sprite relief doesn't suit; stations would benefit).
+1. On the real install: `./build.sh` and `./build.sh combat` (this round was built without the game; a
+   compile error would most likely be in one of the API calls listed under "Orders and objectives").
+2. In-game test of stations at 5x (attack a pirate or Pather base) and of orders and objectives (a fleet
+   battle with objectives: give escort / capture / defend / engage / avoid orders on the Tab map; watch the
+   `S3D: ... ordered:` and objective log lines, and whether vanilla flips objectives without the fallback).
+3. Gaps by impact: weapon on-hit / every-frame scripts; remaining ship systems (drone strike, canister flak,
+   entropy amplifier, phase teleporter, reserve wings, mine strike, targeting feed, lidar array, ...); mesh
+   LOD for big battles; other mods' ships.
+4. M5: hull-by-hull pass (OBJ override for hulls the sprite relief doesn't suit; stations would benefit).

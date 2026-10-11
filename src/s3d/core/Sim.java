@@ -10,6 +10,8 @@ import s3d.math.Vec3;
 public final class Sim {
 	public Tuning tuning;
 	public final List<Ship3D> ships = new ArrayList<>();
+	/** Battle objectives (campaign battles; the host keeps them in step with vanilla). */
+	public final List<Objective3D> objectives = new ArrayList<>();
 	public Ship3D player;
 	public final ChaseCamera camera = new ChaseCamera();
 	public final ShipControls controls = new ShipControls();

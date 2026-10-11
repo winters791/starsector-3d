@@ -492,7 +492,8 @@ abstract class Session3D {
 	/**
 	 * Re-reads movement stats from the live puppets so the 3D ships follow vanilla's numbers
 	 * (CR changes now; ship systems and hullmod effects later). Skipped while the deployment
-	 * travel drive is running.
+	 * travel drive is running. Top speed may rise above what the ship deployed with only by a
+	 * battle objective's bonus (nav buoys).
 	 */
 	private void refreshFlightParams() {
 		for (Ship3D s : sim.ships) {
@@ -500,7 +501,11 @@ abstract class Session3D {
 			ShipAPI ship = (ShipAPI) s.hostRef;
 			if (ShipBridge.travelDriveActive(ship)) continue;
 			// Lower only: CR loss is real, but zero-flux boost and ship systems on the puppet are not.
-			FlightParams fresh = ShipBridge.readFlightParams(ship).cappedBy(s.baseParams);
+			// Nav buoys are real: their share may lift top speed past the deployment figure.
+			FlightParams cap = s.baseParams;
+			float nav = cap != null ? ShipBridge.navSpeedMult(ship) : 1f;
+			if (nav > 1.001f) cap = new FlightParams(cap.maxSpeed * nav, cap.accel, cap.decel, cap.maxTurnRateDeg, cap.turnAccelDeg);
+			FlightParams fresh = ShipBridge.readFlightParams(ship).cappedBy(cap);
 			if (fresh.sameSource(s.params)) continue;
 			log.info("S3D: flight stats for " + s.name + " updated to " + fresh);
 			s.params = fresh.derive(sim.tuning);

@@ -14,6 +14,8 @@ import org.lwjgl.util.vector.Vector2f;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.combat.ArmorGridAPI;
+import com.fs.starfarer.api.combat.AssignmentTargetAPI;
+import com.fs.starfarer.api.combat.BattleObjectiveAPI;
 import com.fs.starfarer.api.combat.CollisionClass;
 import com.fs.starfarer.api.combat.CombatAssignmentType;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
@@ -26,11 +28,15 @@ import com.fs.starfarer.api.combat.DeployedFleetMemberAPI;
 import com.fs.starfarer.api.combat.FighterLaunchBayAPI;
 import com.fs.starfarer.api.combat.FighterWingAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
+import com.fs.starfarer.api.combat.WeaponAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 
 import s3d.core.ArmorShell;
+import s3d.core.Objective3D;
+import s3d.core.Order3D;
 import s3d.core.Ship3D;
 import s3d.core.ShipAI3D;
+import s3d.core.WeaponMount;
 import s3d.math.Vec3;
 
 /**
@@ -57,6 +63,14 @@ import s3d.math.Vec3;
  * put it, turns slowly (Axial Rotation) and takes no damage (Vast Bulk); its modules take the
  * damage and are killed the vanilla way, and vanilla decides when the station is beaten. Module
  * puppets aren't moved: vanilla keeps them on their parent.
+ *
+ * Orders and objectives: twice a second each AI ship's vanilla assignment (Tab command map, or the
+ * enemy admiral's) becomes its 3D order: escort, defend and rally, capture/control/assault,
+ * engage/intercept/harass/strike, avoid; anything else means fighting freely. Objectives (nav buoys,
+ * sensor arrays, comm relays) are mirrored where vanilla has them; ships take them by sitting on
+ * them, which puts their puppets on them for vanilla's own capture (with a fallback if vanilla
+ * doesn't flip one). Their bonuses reach 3D through the puppets: weapon ranges (sensor arrays' ECM)
+ * are re-read twice a second, top speed may rise by a nav bonus.
  */
 final class BattleSession extends Session3D {
 	private static final Logger log = Global.getLogger(BattleSession.class);
@@ -75,6 +89,10 @@ final class BattleSession extends Session3D {
 	private final Map<ShipAPI, Float> killPending = new IdentityHashMap<>();
 	/** Invulnerable station cores whose sections are all gone; time the last one died. */
 	private final Map<ShipAPI, Float> strippedSince = new IdentityHashMap<>();
+	/** Vanilla objective -> its 3D view; objectives one side holds alone: {side, since}. */
+	private final Map<BattleObjectiveAPI, Objective3D> objectives = new IdentityHashMap<>();
+	private final Map<Objective3D, float[]> holding = new IdentityHashMap<>();
+	private boolean ordersFailed, objectivesFailed;
 	/** Twins made this frame, placed once their whole structure is in: stations, then free ships. */
 	private final List<Ship3D> newStations = new ArrayList<>(), newShips = new ArrayList<>();
 
@@ -122,6 +140,7 @@ final class BattleSession extends Session3D {
 		sim.arenaHalfX = mapW * 0.5f * scale;
 		sim.arenaHalfZ = edgeZ;
 		managePuppets(0f);
+		syncObjectives();
 
 		ShipAPI flag = engine.getPlayerShip();
 		Ship3D player = flag != null ? twins.get(flag) : null;
@@ -452,7 +471,11 @@ final class BattleSession extends Session3D {
 		if (handedBack) return;
 		ordersTimer -= realDt;
 		boolean readOrders = ordersTimer <= 0f;
-		if (readOrders) ordersTimer = 0.5f;
+		if (readOrders) {
+			ordersTimer = 0.5f;
+			syncObjectives();
+			refreshWeaponRanges();
+		}
 		armorTimer -= realDt;
 		boolean writeArmor = armorTimer <= 0f;
 		if (writeArmor) armorTimer = 0.5f;
@@ -487,6 +510,11 @@ final class BattleSession extends Session3D {
 					log.info("S3D: " + s.name + (ordered ? " ordered to retreat" : " retreat order cancelled"));
 					if (ordered && s == sim.player) toast("Retreat ordered: fly to your edge of the battle (behind your start)");
 					s.retreatOrdered = ordered;
+				}
+				Order3D o = s.ai != null ? readOrder(ship, s) : null;
+				if (o == null ? s.order != null : !o.sameAs(s.order)) {
+					log.info("S3D: " + s.name + (o != null ? " ordered: " + o : " has no orders: fights freely"));
+					s.order = o;
 				}
 			}
 			if (s.retreatOrdered && pastOwnEdge(s)) {
@@ -587,6 +615,177 @@ final class BattleSession extends Session3D {
 			return a != null && a.getType() == CombatAssignmentType.RETREAT;
 		} catch (Throwable t) {
 			return false;
+		}
+	}
+
+	/**
+	 * Vanilla's assignment for this ship as a 3D order, or null to fight freely (search and
+	 * destroy, recon, refit, no assignment). Retreat is read separately. An order aimed at a
+	 * station (or a module) means holding the ground round the whole structure.
+	 */
+	private Order3D readOrder(ShipAPI ship, Ship3D s) {
+		if (ordersFailed) return null;
+		try {
+			CombatFleetManagerAPI fm = engine.getFleetManager(ship.getOwner());
+			DeployedFleetMemberAPI dfm = fm.getDeployedFleetMember(ship);
+			CombatTaskManagerAPI tm = fm.getTaskManager(dfm != null && dfm.isAlly());
+			AssignmentInfo a = tm != null ? tm.getAssignmentFor(ship) : null;
+			if (a == null || a.getType() == null) return null;
+			String type = a.getType().name();
+			Object target = a.getTarget();
+			Ship3D twin = null;
+			if (target instanceof DeployedFleetMemberAPI) {
+				ShipAPI ts = ((DeployedFleetMemberAPI) target).getShip();
+				twin = ts != null ? twins.get(ts) : null;
+				if (twin != null && (twin.destroyed || !sim.ships.contains(twin))) twin = null;
+			}
+			Objective3D obj = target instanceof BattleObjectiveAPI ? objectives.get(target) : null;
+			Vec3 at = null;
+			if (target instanceof AssignmentTargetAPI) {
+				Vector2f loc = ((AssignmentTargetAPI) target).getLocation();
+				if (loc != null) at = new Vec3(loc.x * scale, 0f, -loc.y * scale);
+			}
+			float holdR = cfg.tuning.battleHoldRadius * scale;
+			if (twin != null && twin.fixedPart() && !"AVOID".equals(type)) {
+				Ship3D root = twin.root();
+				return order(type, Order3D.Kind.HOLD, root.pos, sim.structureExtent(root) + holdR);
+			}
+			switch (type) {
+				case "LIGHT_ESCORT":
+				case "MEDIUM_ESCORT":
+				case "HEAVY_ESCORT":
+				case "DEFEND":
+				case "RALLY_TASK_FORCE":
+				case "RALLY_CARRIER":
+				case "RALLY_CIVILIAN":
+				case "RALLY_STRIKE_FORCE":
+				case "RALLY_FIGHTERS":
+					if (twin != null && twin.owner == s.owner && twin != s) {
+						Order3D o = new Order3D(Order3D.Kind.ESCORT);
+						o.label = type;
+						o.ship = twin;
+						return o;
+					}
+					return at != null ? order(type, Order3D.Kind.HOLD, at, holdR) : null;
+				case "CAPTURE":
+				case "CONTROL":
+				case "ASSAULT":
+					if (obj != null) {
+						Order3D o = order(type, Order3D.Kind.CAPTURE, obj.pos, obj.radius);
+						o.objective = obj;
+						return o;
+					}
+					return at != null ? order(type, Order3D.Kind.HOLD, at, holdR) : null;
+				case "ENGAGE":
+				case "INTERCEPT":
+				case "HARASS":
+				case "STRIKE":
+					if (twin != null && twin.owner != s.owner) {
+						Order3D o = new Order3D(Order3D.Kind.ATTACK);
+						o.label = type;
+						o.ship = twin;
+						return o;
+					}
+					return at != null ? order(type, Order3D.Kind.HOLD, at, holdR) : null;
+				case "AVOID": {
+					if (twin == null && at == null) return null;
+					Ship3D around = twin != null ? twin.root() : null;
+					Order3D o = order(type, Order3D.Kind.AVOID, around != null ? new Vec3() : at, // round a ship: it moves (Order3D.anchor)
+							cfg.tuning.battleAvoidRadius * scale + (around != null ? sim.structureExtent(around) : 0f));
+					o.ship = around;
+					return o;
+				}
+				default:
+					return null;
+			}
+		} catch (Throwable t) {
+			ordersFailed = true;
+			log.error("S3D: could not read vanilla orders; 3D pilots will fight freely (retreats still work)", t);
+			return null;
+		}
+	}
+
+	private static Order3D order(String label, Order3D.Kind kind, Vec3 at, float radius) {
+		Order3D o = new Order3D(kind);
+		o.label = label;
+		o.point.set(at);
+		o.radius = radius;
+		return o;
+	}
+
+	/**
+	 * Objectives: mirror new ones, follow vanilla's owner (toasting changes), count who's on each.
+	 * If one side has been alone on an objective for battle.captureFallback seconds and vanilla
+	 * still hasn't given it to them, it's given here (logged as a warning).
+	 */
+	private void syncObjectives() {
+		if (objectivesFailed) return;
+		try {
+			List<BattleObjectiveAPI> list = engine.getObjectives();
+			if (list == null) return;
+			for (BattleObjectiveAPI o : list) {
+				Objective3D v = objectives.get(o);
+				int owner = side(o.getOwner());
+				if (v == null) {
+					v = new Objective3D(o.getType(), o.getDisplayName() != null ? o.getDisplayName() : o.getType());
+					v.pos.set(o.getLocation().x * scale, 0f, -o.getLocation().y * scale);
+					v.radius = cfg.tuning.battleCaptureRadius * scale;
+					v.owner = owner;
+					v.hostRef = o;
+					objectives.put(o, v);
+					sim.objectives.add(v);
+					log.info(String.format("S3D: objective %s (%s) in 3D at (%.0f, %.0f), held by %s", v.name, v.type, v.pos.x, v.pos.z, owner < 0 ? "nobody" : "side " + owner));
+				} else if (owner != v.owner) {
+					log.info("S3D: " + v.name + " now held by " + (owner < 0 ? "nobody" : "side " + owner) + " (was " + (v.owner < 0 ? "nobody" : "side " + v.owner) + ")");
+					toast(owner == 0 ? v.name + " taken" : owner == 1 ? "Enemy took the " + v.name : v.name + " lost");
+					v.owner = owner;
+				}
+				v.present[0] = v.present[1] = 0;
+				for (Ship3D s : sim.ships) {
+					if (!s.destroyed && !s.fighter && s.parent == null && v.flatDistance(s.pos) < v.radius) v.present[s.owner == 0 ? 0 : 1]++;
+				}
+				int h = v.holder();
+				if (h < 0 || h == v.owner) {
+					holding.remove(v);
+					continue;
+				}
+				float[] since = holding.get(v);
+				if (since == null || since[0] != h) {
+					holding.put(v, new float[] {h, clock});
+				} else if (clock - since[1] > cfg.tuning.battleCaptureFallback) {
+					log.warn(String.format("S3D: side %d has been alone on %s for %.0f s and vanilla hasn't given it to them; taking it in 3D", h, v.name, clock - since[1]));
+					o.setOwner(h);
+					holding.remove(v);
+				}
+			}
+		} catch (Throwable t) {
+			objectivesFailed = true;
+			log.error("S3D: could not read battle objectives; they won't show or be taken in 3D", t);
+		}
+	}
+
+	private static int side(int owner) {
+		return owner == 0 || owner == 1 ? owner : -1;
+	}
+
+	/**
+	 * Weapon ranges follow vanilla's as the battle goes (sensor arrays' ECM penalty, anything else
+	 * that changes them mid-battle); the AI re-reads its fighting range when they do.
+	 */
+	private void refreshWeaponRanges() {
+		for (Ship3D s : twins.values()) {
+			if (s.destroyed || s.fighter) continue;
+			String example = null;
+			for (WeaponMount m : s.weapons) {
+				if (!(m.hostRef instanceof WeaponAPI)) continue;
+				float r = ((WeaponAPI) m.hostRef).getRange();
+				if (r <= 0f || Math.abs(r - m.spec.range) < 0.5f) continue;
+				if (example == null) example = String.format("%s %.0f -> %.0f", m.spec.name, m.spec.range, r);
+				m.spec.range = r;
+			}
+			if (example == null) continue;
+			log.info("S3D: weapon ranges of " + s.name + " changed in vanilla (" + example + ")");
+			if (s.ai != null) s.ai.profile(s, cfg.tuning);
 		}
 	}
 
@@ -875,8 +1074,9 @@ final class BattleSession extends Session3D {
 	protected String[] sessionHelpLines() {
 		return new String[] {
 				"BATTLE",
-				"  Tab .............. vanilla command map (deploy reinforcements, order retreats)",
-				"                     other orders are ignored by 3D pilots for now",
+				"  Tab .............. vanilla command map (deploy reinforcements, orders)",
+				"                     3D pilots follow escort, defend/rally, capture, engage,",
+				"                     avoid and retreat orders; objectives are taken by sitting on them",
 				"  Retreat .......... ordered ships fly back past their own starting side and leave",
 				"  " + k("wings") + " ................ your fighter wings: engage / regroup",
 				"  " + k("handBack") + " twice ......... finish this battle in vanilla 2D",

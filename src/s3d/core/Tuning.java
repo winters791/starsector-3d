@@ -255,6 +255,14 @@ public final class Tuning {
 	 * enough for ships to keep a section in their sights.
 	 */
 	public float stationSpinDeg = 1f;
+	/**
+	 * Battle objectives, in vanilla map units: how close a ship must be to take one (vanilla's own
+	 * figure isn't exposed, so the 3D pilots sit well inside this), and how long one side may hold
+	 * it alone before 3D flips it itself if vanilla hasn't (seconds).
+	 */
+	public float battleCaptureRadius = 600f, battleCaptureFallback = 30f;
+	/** Command-map orders, vanilla map units: the ground a defend/rally order holds, and the area an avoid order keeps out of. */
+	public float battleHoldRadius = 1000f, battleAvoidRadius = 2000f;
 
 	// ---- AI pilots ----
 	/** AI ships try to fight at this fraction of their main weapons' range. */
@@ -521,6 +529,10 @@ public final class Tuning {
 			t.battleTransferDelay = num(bt, "transferDelay", t.battleTransferDelay);
 			t.battleStations = bt.optBoolean("stations", t.battleStations);
 			t.stationSpinDeg = num(bt, "stationSpinDeg", t.stationSpinDeg);
+			t.battleCaptureRadius = num(bt, "captureRadius", t.battleCaptureRadius);
+			t.battleCaptureFallback = num(bt, "captureFallback", t.battleCaptureFallback);
+			t.battleHoldRadius = num(bt, "holdRadius", t.battleHoldRadius);
+			t.battleAvoidRadius = num(bt, "avoidRadius", t.battleAvoidRadius);
 		}
 		JSONObject ai = root.optJSONObject("ai");
 		if (ai != null) {

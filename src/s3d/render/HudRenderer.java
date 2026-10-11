@@ -100,6 +100,7 @@ public final class HudRenderer {
 		if (p != null) {
 			drawTargets(sim, w, h, texts);
 			drawFleetMarkers(sim, w, h, texts);
+			drawObjectives(sim, w, h, texts);
 			if (!sim.spectating) {
 				if (!sim.camera.tactical) drawFlightMarkers(sim, in, w, h, texts);
 				drawLead(sim, w, h, texts);
@@ -397,6 +398,37 @@ public final class HudRenderer {
 		}
 	}
 
+	/**
+	 * Battle objectives: a square on each (green yours, red the enemy's, grey nobody's) with its
+	 * name and distance. A smaller square inside in the other side's colour: they're alone on it
+	 * and taking it; an amber cross: both sides are on it.
+	 */
+	private void drawObjectives(Sim sim, int w, int h, List<Text> texts) {
+		Ship3D p = sim.viewer();
+		for (s3d.core.Objective3D o : sim.objectives) {
+			float[] sc = project(sim, o.pos.x, o.pos.y, o.pos.z, w, h);
+			if (sc == null || !onScreen(sc, w, h, 20f)) continue; // the minimap shows it
+			float[] col = o.owner < 0 ? GRAY : o.owner == p.owner ? GREEN : RED;
+			square(col, 0.8f, sc[0], sc[1], 9f);
+			int taker = o.holder();
+			if (taker >= 0 && taker != o.owner) square(taker == p.owner ? GREEN : RED, 0.9f, sc[0], sc[1], 4f);
+			else if (o.present[0] > 0 && o.present[1] > 0) {
+				color(AMBER, 0.9f);
+				line(sc[0] - 4f, sc[1] - 4f, sc[0] + 4f, sc[1] + 4f);
+				line(sc[0] - 4f, sc[1] + 4f, sc[0] + 4f, sc[1] - 4f);
+			}
+			texts.add(new Text(o.name.toUpperCase() + "  " + formatDist(o.flatDistance(p.pos)), sc[0], sc[1] - 24f, col, 0.75f, true, 0.75f));
+		}
+	}
+
+	private static void square(float[] col, float a, float x, float y, float k) {
+		color(col, a);
+		line(x - k, y - k, x + k, y - k);
+		line(x + k, y - k, x + k, y + k);
+		line(x + k, y + k, x - k, y + k);
+		line(x - k, y + k, x - k, y - k);
+	}
+
 	/** x for an edge marker at (x, y) that keeps it off the target display (right side), if one is up. */
 	private float clearOfTargetPanel(Sim sim, float x, float y, int w, int h) {
 		Ship3D t = sim.spectating ? null : sim.aimTarget;
@@ -459,8 +491,9 @@ public final class HudRenderer {
 
 	/**
 	 * Top-down map of the battle area, enemy side at the top (like vanilla's command map): every
-	 * ship as a heading arrow, your view cone, the map edges (yours green: that's where retreats
-	 * leave). A tick above or below an icon means the ship is well above or below you.
+	 * ship as a heading arrow, objectives as small squares in their holder's colour, your view
+	 * cone, the map edges (yours green: that's where retreats leave). A tick above or below an
+	 * icon means the ship is well above or below you.
 	 */
 	private void drawMinimap(Sim sim, float x0, float y0, float size, float aspect, List<Text> texts) {
 		Ship3D p = sim.viewer();
@@ -487,6 +520,10 @@ public final class HudRenderer {
 		}
 		float lim = size * 0.5f - 4f, tickScale = Math.max(hx, hz) * 0.08f;
 		Vec3 f = new Vec3();
+		for (s3d.core.Objective3D o : sim.objectives) {
+			float mx = Math.max(-lim, Math.min(lim, (o.pos.x - ox) * k)), my = Math.max(-lim, Math.min(lim, -(o.pos.z - oz) * k));
+			square(o.owner < 0 ? GRAY : o.owner == p.owner ? GREEN : RED, 0.8f, cxm + mx, cym + my, 3.5f);
+		}
 		for (Ship3D s : sim.ships) {
 			if (s.destroyed) continue;
 			float mx = (s.pos.x - ox) * k, my = -(s.pos.z - oz) * k;

@@ -128,6 +128,8 @@ public final class Ship3D {
 	public Ship3D lastHitBy;
 	/** Ordered to leave the battle: AI flies to its own edge; the host removes it once there. */
 	public boolean retreatOrdered;
+	/** Standing order from vanilla's command map (escort, hold, capture, attack, avoid); null = fight freely. */
+	public Order3D order;
 
 	// ---- stations and modules ----
 	/**
