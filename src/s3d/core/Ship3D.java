@@ -128,6 +128,8 @@ public final class Ship3D {
 	public Ship3D lastHitBy;
 	/** Ordered to leave the battle: AI flies to its own edge; the host removes it once there. */
 	public boolean retreatOrdered;
+	/** Standing order from vanilla's command map (escort, hold, capture, attack, avoid); null = fight freely. */
+	public Order3D order;
 
 	// ---- stations and modules ----
 	/**
@@ -154,6 +156,38 @@ public final class Ship3D {
 	/** Part of a structure that doesn't fly by itself: a module, or an anchored station core. */
 	public boolean fixedPart() {
 		return parent != null || anchored;
+	}
+
+	/**
+	 * How far the hull really reaches from its centre toward world direction dir (unit), scaled:
+	 * its solid shape, not vanilla's collision circle (a station core's circle can be much bigger).
+	 * Radius if it has no shape.
+	 */
+	public float reachToward(Vec3 dir) {
+		if (volume == null) return radius;
+		Vec3 l = rot.inverseRotate(dir, new Vec3());
+		float flat = (float) Math.hypot(l.x, l.z);
+		float across = volume.reachToward(l.x, l.z) * scale;
+		float up = Math.max(1f, Math.max(volume.maxY, -volume.minY) * scale);
+		if (across <= 0f) return up;
+		float k = (flat / across) * (flat / across) + (l.y / up) * (l.y / up); // ellipse through both
+		return k > 1e-8f ? (float) (1.0 / Math.sqrt(k)) : across;
+	}
+
+	/** Furthest the hull reaches from its centre (3D units), from its solid shape; radius if it has none. */
+	public float extent() {
+		return volume != null ? volume.extent() * scale : radius;
+	}
+
+	/**
+	 * Distance from point p to the near side of this hull: centre distance less how far the hull
+	 * reaches toward p.
+	 */
+	public float surfaceDistance(Vec3 p) {
+		Vec3 d = new Vec3(p).sub(pos);
+		float len = d.length();
+		if (len < 1e-3f) return 0f;
+		return len - reachToward(d.scale(1f / len));
 	}
 
 	public void resetDamage() {

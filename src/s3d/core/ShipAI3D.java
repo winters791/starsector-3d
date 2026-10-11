@@ -25,6 +25,11 @@ import s3d.math.Vec3;
  * near it vents. Overloaded or venting, it faces the fight and backs off slowly. Enemies that are
  * overloaded or venting are the preferred targets, and get fired on even at high flux.
  *
+ * Orders (vanilla's command map, via {@link Order3D}): escorts stay with their ship and fight only
+ * what comes near it; HOLD and CAPTURE go to their point and fight only round it (capturers sit
+ * inside the capture ring); ATTACK goes after its ship; AVOID keeps out of its area and doesn't
+ * chase into it. A fight that draws a ship too far from its order's ground is dropped.
+ *
  * Station sections and ship modules don't fly (see turretStep): they pick a target, manage flux and
  * shields, and fire. A station's invulnerable core is never picked as a target.
  *
@@ -145,6 +150,17 @@ public final class ShipAI3D {
 			return;
 		}
 		retarget -= dt;
+		Order3D order = currentOrder(sim, s);
+		if (order != lastOrder && (order == null || !order.sameAs(lastOrder))) {
+			retarget = 0f; // new orders: pick again now
+			planLeft = 0f;
+		}
+		lastOrder = order;
+		// A fight that has drawn us too far from where the order wants us is dropped.
+		if (target != null && order != null && strayed(s, order)) {
+			target = null;
+			move = Move.HOLD;
+		}
 		boolean onRun = move == Move.PASS && target != null && !target.destroyed; // finish the run on the same target
 		if (target == null || target.destroyed || !sim.ships.contains(target) || !onRun && (retarget <= 0f || helplessEnemyNear(sim, s))) {
 			retarget = t.aiRetargetTime;
@@ -161,6 +177,8 @@ public final class ShipAI3D {
 		if (s.retreatOrdered) {
 			want.set(homeDir);
 			throttle = 1f;
+		} else if (target == null && order != null) {
+			throttle = followOrder(sim, s, order, want);
 		} else if (target == null) {
 			want.set(s.rot.forward(tB));
 			throttle = 0.2f;
@@ -175,12 +193,136 @@ public final class ShipAI3D {
 		} else {
 			throttle = fightCourse(sim, s, want, dt);
 		}
-		if (!s.retreatOrdered) stayWithFight(sim, s, want);
+		if (!s.retreatOrdered) stayWithFight(sim, s, want, order);
+		if (!s.retreatOrdered && order != null && order.kind == Order3D.Kind.AVOID) keepOut(s, order, want);
 		avoidCollisions(sim, s, want);
 		steer(s, want);
 		s.throttle = FlightModel.approach(s.throttle, throttle, 1.5f * dt);
 		FlightModel.step(s, c, t, dt);
 		fireWeapons(sim, s, dt);
+	}
+
+	// ---- orders ------------------------------------------------------------------------------
+
+	private Order3D lastOrder;
+	private static final Vec3 STILL = new Vec3();
+
+	/** The ship's order, or null if there is none or what it refers to is gone. */
+	private static Order3D currentOrder(Sim sim, Ship3D s) {
+		Order3D o = s.order;
+		if (o == null) return null;
+		switch (o.kind) {
+			case ESCORT:
+				return gone(sim, o.ship) || o.ship == s || o.ship.owner != s.owner ? null : o;
+			case ATTACK:
+				return gone(sim, o.ship) || o.ship.owner == s.owner || o.ship.invulnerable ? null : o;
+			case AVOID:
+				return o.ship != null && gone(sim, o.ship) ? null : o;
+			default:
+				return o;
+		}
+	}
+
+	private static boolean gone(Sim sim, Ship3D x) {
+		return x == null || x.destroyed || !sim.ships.contains(x);
+	}
+
+	/**
+	 * How far from the order's anchor an enemy may be and still be ours to fight: escorts guard
+	 * the ship they're with, holders and capturers the ground round their point.
+	 */
+	private float leash(Order3D o) {
+		switch (o.kind) {
+			case ESCORT: return Math.max(1500f, weaponRange * 1.2f) + (o.ship != null ? o.ship.radius : 0f);
+			case HOLD:
+			case CAPTURE: return Math.max(2000f, weaponRange * 1.5f) + o.radius;
+			default: return Float.MAX_VALUE;
+		}
+	}
+
+	/** An enemy this order lets us pick (escorts and holders guard their ground, avoiders don't go in). */
+	private boolean allowedTarget(Order3D o, Ship3D e) {
+		switch (o.kind) {
+			case ESCORT:
+			case HOLD:
+			case CAPTURE:
+				return e.pos.distance(o.anchor()) - Sim.nearSide(e, o.anchor()) <= leash(o);
+			case AVOID:
+				return e.pos.distance(o.anchor()) > o.radius;
+			default:
+				return true;
+		}
+	}
+
+	/** Chasing has taken us well beyond the order's ground. */
+	private boolean strayed(Ship3D s, Order3D o) {
+		if (o.kind != Order3D.Kind.ESCORT && o.kind != Order3D.Kind.HOLD && o.kind != Order3D.Kind.CAPTURE) return false;
+		return s.pos.distance(o.anchor()) > leash(o) * 1.4f;
+	}
+
+	/**
+	 * No enemy to fight: do what the order says. Escorts keep a slot off the escorted ship's side
+	 * (port or starboard, a little behind), matching its speed; holders and capturers go to their
+	 * point (each to its own spot round it, capturers well inside the capture ring) and wait there
+	 * facing the enemy. Returns the throttle.
+	 */
+	private float followOrder(Sim sim, Ship3D s, Order3D o, Vec3 want) {
+		Vec3 enemy = sim.mobileCentre(s.owner == 0 ? 1 : 0);
+		Vec3 face = enemy != null ? tE.set(enemy).sub(s.pos) : tE.set(homeDir).scale(-1f);
+		if (face.lengthSq() < 1f) face.set(homeDir).scale(-1f);
+		face.normalize();
+		switch (o.kind) {
+			case ESCORT: {
+				Ship3D e = o.ship;
+				float off = e.radius * 1.6f + s.radius * 2f + 150f;
+				Vec3 slot = e.rot.rotate(strafeSign * off, (phase > 3.14f ? 1f : -1f) * s.radius * 0.5f, e.radius * 0.6f + s.radius, tD).add(e.pos);
+				return moveTo(s, slot, e.vel, s.radius + 60f, e.rot.forward(tE), want);
+			}
+			case HOLD:
+			case CAPTURE: {
+				float ring = o.kind == Order3D.Kind.CAPTURE ? o.radius * 0.35f : o.radius * 0.6f;
+				Vec3 spot = tD.set((float) Math.cos(phase) * ring, ((phase * 3f) % 2f - 1f) * 60f, (float) Math.sin(phase) * ring).add(o.anchor());
+				return moveTo(s, spot, STILL, Math.max(60f, ring * 0.5f), face, want);
+			}
+			default:
+				want.set(s.rot.forward(tB));
+				return 0.2f;
+		}
+	}
+
+	/**
+	 * Fly to goal (moving at goalVel) and stop there, closing no faster than the ship can brake;
+	 * within `arrive` of it, hold position facing `face`. Returns the throttle.
+	 */
+	private float moveTo(Ship3D s, Vec3 goal, Vec3 goalVel, float arrive, Vec3 face, Vec3 want) {
+		FlightParams p = s.params;
+		Vec3 to = tB.set(goal).sub(s.pos);
+		float d = to.length();
+		Vec3 fwd = s.rot.forward(tC);
+		if (d > arrive) {
+			want.set(to).scale(1f / d);
+			float e = d - arrive * 0.5f;
+			float rate = Math.min(p.fwdSpeed, Math.min((float) Math.sqrt(2f * Math.max(1f, p.fwdDecel) * e) * 0.8f, e * 0.6f + 10f));
+			float along = goalVel.dot(want) + rate;
+			float lined = FlightModel.clamp((fwd.dot(want) + 0.3f) / 1.3f, 0.15f, 1f); // ease off while turning toward it
+			return FlightModel.clamp(along / Math.max(1f, p.fwdSpeed), -0.5f, 1f) * lined;
+		}
+		// There: face the way the order wants, and drift back onto the spot with the thrusters.
+		want.set(face);
+		Vec3 local = s.rot.inverseRotate(to.scale(1f / Math.max(1f, arrive)), tD);
+		c.strafeX = FlightModel.clamp(local.x, -0.6f, 0.6f);
+		c.strafeY = FlightModel.clamp(local.y, -0.6f, 0.6f);
+		return FlightModel.clamp((goalVel.dot(fwd) - local.z * 20f) / Math.max(1f, p.fwdSpeed), -0.4f, 1f);
+	}
+
+	/** AVOID: turn away from the area while inside it or close to its edge. */
+	private void keepOut(Ship3D s, Order3D o, Vec3 want) {
+		Vec3 away = tB.set(s.pos).sub(o.anchor());
+		float d = away.length(), edge = o.radius * 1.15f;
+		if (d >= edge) return;
+		if (d < 1f) away.set(homeDir);
+		else away.scale(1f / d);
+		want.addScaled(away, FlightModel.clamp((edge - d) / Math.max(1f, o.radius * 0.3f), 0.3f, 2.5f)).normalize();
 	}
 
 	/** A station section, module or station core: no flying, just targets, flux, shields and guns. */
@@ -247,7 +389,19 @@ public final class ShipAI3D {
 		ShieldFlux tf = target.flux;
 		if (tf != null && tf.disabled()) r *= 0.6f; // overloaded or venting: move in for the kill
 		else if (tf != null && tf.level() > 0.8f && fluxLevel < 0.4f) r *= 0.8f; // flux-locked: press
+		if (target.fixedPart()) {
+			// A station section or module: the range counts from its near side (where the shots land),
+			// clear of its real shape (its collision circle can be far bigger than the hull).
+			Vec3 out = tF.set(s.pos).sub(target.pos);
+			float reach = out.lengthSq() > 1f ? target.reachToward(out.normalize()) : target.radius;
+			return Math.max(reach + s.radius * 1.6f + 100f, Math.max(s.radius * 2.5f, r) + reach * 0.85f);
+		}
 		return Math.max(s.radius + target.radius + 100f, Math.max(s.radius * 2.5f, r));
+	}
+
+	/** Distance to the target, counted to its near side for a station section or module. */
+	private float gap(Ship3D s) {
+		return target.pos.distance(s.pos) - Sim.nearSide(target, s.pos);
 	}
 
 	/** 1 for frigates down to 0.3 for capitals: how often and how hard a hull manoeuvres. */
@@ -286,7 +440,8 @@ public final class ShipAI3D {
 		boolean covered = onUs && guns.dot(fromTarget) > 0.3f;
 		boolean helpless = target.flux != null && target.flux.disabled();
 		boolean bigger = agility(target) < ag - 0.2f;
-		if (ag >= 0.75f && faster && fit && near && (!covered || helpless || bigger) && rng.nextFloat() < t.aiPassChance * ag) {
+		boolean station = target.root().anchored; // a run past a station section ends in the station
+		if (ag >= 0.75f && faster && fit && near && !station && (!covered || helpless || bigger) && rng.nextFloat() < t.aiPassChance * ag) {
 			move = Move.PASS;
 			passStage = 0;
 			passTime = 0f;
@@ -313,6 +468,11 @@ public final class ShipAI3D {
 		float best = stationScore(bearing, guns) + 0.15f; // a little inertia: moving costs firing time
 		boolean moved = false;
 		Vec3 cand = tD, axisV = tE, bestDir = tF.set(bearing);
+		// A module: not from inside its structure (between it and the core or the ship it's on).
+		Vec3 outward = target.parent != null ? new Vec3(target.pos).sub(target.root().pos) : null;
+		if (outward != null) outward.y = 0f;
+		if (outward != null && outward.lengthSq() > 1f) outward.normalize();
+		else outward = null;
 		for (int i = 0; i < 6; i++) {
 			randomPerpendicular(bearing, axisV);
 			float ang = (float) Math.toRadians(50f + 60f * rng.nextFloat());
@@ -320,6 +480,7 @@ public final class ShipAI3D {
 			cand.set(axisV).cross(bearing).scale((float) Math.sin(ang)).addScaled(bearing, (float) Math.cos(ang));
 			cand.y = FlightModel.clamp(cand.y, -0.55f, 0.55f);
 			cand.normalize();
+			if (outward != null && cand.dot(outward) < 0f) continue;
 			float score = stationScore(cand, guns) + rng.nextFloat() * 0.4f;
 			if (score > best) {
 				best = score;
@@ -546,15 +707,19 @@ public final class ShipAI3D {
 
 	/**
 	 * Keeps the fight together: a ship far from its own fleet with nothing in range drifts back
-	 * toward it; nobody leaves the battle area or the altitude band around the fight.
+	 * toward it (unless it's been ordered somewhere); nobody leaves the battle area or the altitude
+	 * band around the fight.
 	 */
-	private void stayWithFight(Sim sim, Ship3D s, Vec3 want) {
+	private void stayWithFight(Sim sim, Ship3D s, Vec3 want, Order3D order) {
 		Tuning t = sim.tuning;
 		Vec3 pull = tB.set(0f, 0f, 0f);
-		Vec3 home = sim.fleetCentre(s.owner);
-		if (home != null) {
+		Vec3 home = sim.mobileCentre(s.owner);
+		boolean sent = order != null && order.kind != Order3D.Kind.AVOID; // ordered somewhere: that's where it belongs
+		if (home != null && !sent) {
 			float d = home.distance(s.pos);
-			boolean busy = target != null && target.pos.distance(s.pos) < weaponRange;
+			// Busy: something in range, or working on a station (its attackers spread round it, so
+			// their centre can be inside it).
+			boolean busy = target != null && (gap(s) < weaponRange || target.fixedPart() && gap(s) < weaponRange * 3f);
 			if (!busy && d > t.aiCohesion) pull.add(tC.set(home).sub(s.pos).normalize().scale(Math.min(1.5f, (d - t.aiCohesion) / t.aiCohesion + 0.5f)));
 		}
 		if (sim.arenaHalfX > 0f) {
@@ -593,7 +758,7 @@ public final class ShipAI3D {
 	}
 
 	private boolean wantSystem(Sim sim, Ship3D s, ShipSystem3D sys) {
-		float dist = target != null ? target.pos.distance(s.pos) : Float.MAX_VALUE;
+		float dist = target != null ? gap(s) : Float.MAX_VALUE;
 		float level = s.flux != null ? s.flux.level() : 0f;
 		boolean inRange = dist < weaponRange;
 		boolean helpless = s.flux != null && s.flux.disabled();
@@ -646,12 +811,15 @@ public final class ShipAI3D {
 
 	/** Nearest live enemy, slightly preferring whoever is shooting at us and the current target (no flip-flopping). */
 	private Ship3D pickTarget(Sim sim, Ship3D s) {
+		Order3D order = currentOrder(sim, s);
+		if (order != null && order.kind == Order3D.Kind.ATTACK) return order.ship;
 		Ship3D best = null;
 		float bestScore = Float.MAX_VALUE;
 		for (Ship3D o : sim.ships) {
 			if (o.destroyed || o.owner == s.owner || o.fighter || o.invulnerable) continue; // ships fight ships; PD handles fighters
+			if (order != null && !allowedTarget(order, o)) continue;
 			// Distance from us, plus half the distance from our fleet, so a fleet tends to engage together.
-			Vec3 home = sim.fleetCentre(s.owner);
+			Vec3 home = sim.mobileCentre(s.owner);
 			float d = o.pos.distance(s.pos) + (home != null ? 0.5f * o.pos.distance(home) : 0f);
 			if (o == target) d *= 0.75f;
 			if (o == s.lastHitBy) d *= 0.8f;
@@ -815,7 +983,11 @@ public final class ShipAI3D {
 			if (o.fighter && !s.fighter) continue; // ships don't swerve for fighters
 			Vec3 away = tC.set(s.pos).sub(o.pos);
 			float d = away.length();
-			float clear = (s.radius + o.radius) * 1.6f;
+			// A station section or core doesn't move: keep clear of its real shape plus our own size
+			// (its collision circle can be far bigger than the hull, and at station scale a margin
+			// proportional to it would keep us out of gun range).
+			float clear = !o.fixedPart() ? (s.radius + o.radius) * 1.6f
+					: (d > 1e-3f ? o.reachToward(tE.set(away).scale(1f / d)) : o.radius) + s.radius * 1.6f + 80f;
 			if (d >= clear || d < 1e-3f) continue;
 			float k = (clear - d) / clear;
 			push.addScaled(away.scale(1f / d), k * 2.5f);

@@ -10,6 +10,8 @@ import s3d.math.Vec3;
 public final class Sim {
 	public Tuning tuning;
 	public final List<Ship3D> ships = new ArrayList<>();
+	/** Battle objectives (campaign battles; the host keeps them in step with vanilla). */
+	public final List<Objective3D> objectives = new ArrayList<>();
 	public Ship3D player;
 	public final ChaseCamera camera = new ChaseCamera();
 	public final ShipControls controls = new ShipControls();
@@ -33,11 +35,22 @@ public final class Sim {
 	/** Centre of each side's live ships (owner 0 / 1), updated every frame; count 0 = none. */
 	private final Vec3[] fleetCentres = {new Vec3(), new Vec3()};
 	private final int[] fleetCounts = new int[2];
+	private final Vec3[] mobileCentres = {new Vec3(), new Vec3()};
+	private final int[] mobileCounts = new int[2];
 
 	/** Centre of a side's live ships, or null if it has none. */
 	public Vec3 fleetCentre(int owner) {
 		int i = owner == 0 ? 0 : 1;
 		return fleetCounts[i] > 0 ? fleetCentres[i] : null;
+	}
+
+	/**
+	 * Centre of a side's live ships that fly (no fighters, station sections or modules), or null.
+	 * AI pilots keep together around this one: a station's parts would put it inside the station.
+	 */
+	public Vec3 mobileCentre(int owner) {
+		int i = owner == 0 ? 0 : 1;
+		return mobileCounts[i] > 0 ? mobileCentres[i] : null;
 	}
 
 	/** Altitude the fight is happening at (mean of all live ships). */
@@ -50,13 +63,22 @@ public final class Sim {
 		fleetCentres[0].set(0f, 0f, 0f);
 		fleetCentres[1].set(0f, 0f, 0f);
 		fleetCounts[0] = fleetCounts[1] = 0;
+		mobileCentres[0].set(0f, 0f, 0f);
+		mobileCentres[1].set(0f, 0f, 0f);
+		mobileCounts[0] = mobileCounts[1] = 0;
 		for (Ship3D s : ships) {
 			if (s.destroyed || s.fighter) continue; // fighters swarm; the fleet is where its ships are
 			int i = s.owner == 0 ? 0 : 1;
 			fleetCentres[i].add(s.pos);
 			fleetCounts[i]++;
+			if (s.fixedPart()) continue;
+			mobileCentres[i].add(s.pos);
+			mobileCounts[i]++;
 		}
-		for (int i = 0; i < 2; i++) if (fleetCounts[i] > 0) fleetCentres[i].scale(1f / fleetCounts[i]);
+		for (int i = 0; i < 2; i++) {
+			if (fleetCounts[i] > 0) fleetCentres[i].scale(1f / fleetCounts[i]);
+			if (mobileCounts[i] > 0) mobileCentres[i].scale(1f / mobileCounts[i]);
+		}
 	}
 
 	/**
@@ -427,6 +449,19 @@ public final class Sim {
 	}
 
 	/**
+	 * How far a whole structure (a station with its sections, a ship with its modules) reaches from
+	 * its root's centre in the horizontal plane, from the parts' real hull shapes.
+	 */
+	public float structureExtent(Ship3D root) {
+		float ext = root.extent();
+		for (Ship3D s : ships) {
+			if (s == root || s.parent == null || s.root() != root) continue;
+			ext = Math.max(ext, (float) Math.hypot(s.pos.x - root.pos.x, s.pos.z - root.pos.z) + s.extent());
+		}
+		return ext;
+	}
+
+	/**
 	 * Puts a module where it belongs on its parent, moving with it (a spinning station's modules get
 	 * the speed of the spin, so shots can lead them).
 	 */
@@ -577,7 +612,7 @@ public final class Sim {
 			if (hasLead) {
 				Vec3 mw = new Vec3();
 				for (WeaponMount m : sel.mounts) {
-					if (m.spec.supported && m.worldPos(player, mw).distance(leadPoint) <= m.spec.range * tuning.weaponRangeMult) leadInRange = true;
+					if (m.spec.supported && m.worldPos(player, mw).distance(leadPoint) - nearSide(aimTarget, mw) <= m.spec.range * tuning.weaponRangeMult) leadInRange = true;
 				}
 				// Lock when the reticle is inside the lead circle as drawn (screen pixels); a little
 				// stickiness once locked so it doesn't flicker at the edge while you track.
@@ -690,7 +725,7 @@ public final class Sim {
 				if (s.phased || s.invulnerable) continue; // shots would pass straight through / do nothing
 				if (pass == 0 && !self.fighter && s.fighter != anti) continue;
 				if (!Combat.interceptCurved(mw, self.vel, s.pos, s.vel, s.accel, speed, lead)) continue;
-				if (!Combat.canReach(self, m, lead, tuning)) continue;
+				if (!Combat.canReach(self, m, lead, nearSide(s, mw), tuning)) continue;
 				float d = s == preferred ? -1f : s.pos.distance(mw);
 				if (d < bestDist) {
 					bestDist = d;
@@ -723,6 +758,18 @@ public final class Sim {
 		Vec3 toShooter = target.rot.inverseRotate(new Vec3(shooter.pos).sub(target.pos), new Vec3());
 		float len = toShooter.length();
 		return len > 1e-3f && toShooter.dot(f.facing) / len < (float) Math.cos(f.halfAngle()); // shield faces away
+	}
+
+	/**
+	 * How much nearer than its centre a station section or module's hull is, seen from `from`
+	 * (a little less, to be safe). Shots at it are aimed at the centre and meet the hull that much
+	 * sooner, so they're in range sooner; at station scale that's a lot. 0 for ships.
+	 */
+	public static float nearSide(Ship3D target, Vec3 from) {
+		if (!target.fixedPart()) return 0f;
+		Vec3 d = new Vec3(from).sub(target.pos);
+		float len = d.length();
+		return len < 1e-3f ? 0f : 0.85f * Math.min(len, target.reachToward(d.scale(1f / len)));
 	}
 
 	/** Speed used for leading: projectile speed, beam extension speed, or missile top speed. */

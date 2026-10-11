@@ -41,6 +41,8 @@ public final class WeaponMount {
 
 	/** Render-side models (ShipModel.Source / ShipModel), owned by the renderer. */
 	public Object modelSource, model;
+	/** Back-reference for the host (the vanilla weapon). Never read by core code. */
+	public Object hostRef;
 	public Object gunModelSource, gunModel;
 
 	public WeaponMount(String slotId, WeaponSpec3D spec, Vec3 localPos, Vec3 restDir, float arcDeg, boolean hardpoint) {

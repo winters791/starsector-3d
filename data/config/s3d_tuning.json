@@ -78,7 +78,7 @@
 		"destroyer":1.0,
 		"cruiser":1.4,
 		"capital":2.5,
-		"station":2.5
+		"station":5.0
 	},
 	"mesh":{
 		"cellsAcross":110,
@@ -179,7 +179,11 @@
 		"deployAltitude":250,
 		"transferDelay":3,
 		"stations":true,
-		"stationSpinDeg":2
+		"stationSpinDeg":1,
+		"captureRadius":600,
+		"captureFallback":30,
+		"holdRadius":1000,
+		"avoidRadius":2000
 	},
 	"ai":{
 		"rangeFrac":0.75,

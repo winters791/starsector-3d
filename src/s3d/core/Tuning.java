@@ -249,8 +249,20 @@ public final class Tuning {
 	public float battleTransferDelay = 3f;
 	/** Station battles (and ships with modules) in 3D; false = those battles stay vanilla 2D. */
 	public boolean battleStations = true;
-	/** How fast stations with Axial Rotation turn in 3D, degrees per second. */
-	public float stationSpinDeg = 2f;
+	/**
+	 * How fast stations with Axial Rotation turn in 3D, degrees per second. The outer sections' speed
+	 * grows with the station scale: 1 at scale 5 moves them as fast as 2 did at scale 2.5, slow
+	 * enough for ships to keep a section in their sights.
+	 */
+	public float stationSpinDeg = 1f;
+	/**
+	 * Battle objectives, in vanilla map units: how close a ship must be to take one (vanilla's own
+	 * figure isn't exposed, so the 3D pilots sit well inside this), and how long one side may hold
+	 * it alone before 3D flips it itself if vanilla hasn't (seconds).
+	 */
+	public float battleCaptureRadius = 600f, battleCaptureFallback = 30f;
+	/** Command-map orders, vanilla map units: the ground a defend/rally order holds, and the area an avoid order keeps out of. */
+	public float battleHoldRadius = 1000f, battleAvoidRadius = 2000f;
 
 	// ---- AI pilots ----
 	/** AI ships try to fight at this fraction of their main weapons' range. */
@@ -282,7 +294,7 @@ public final class Tuning {
 		hullScale.put("destroyer", 1.0f);
 		hullScale.put("cruiser", 1.4f);
 		hullScale.put("capital", 2.5f);
-		hullScale.put("station", 2.5f);
+		hullScale.put("station", 5.0f); // user (2026-10-12): twice the first station scale (2.5)
 		keys.put("throttleUp", "W");
 		keys.put("throttleDown", "S");
 		keys.put("allStop", "X");
@@ -517,6 +529,10 @@ public final class Tuning {
 			t.battleTransferDelay = num(bt, "transferDelay", t.battleTransferDelay);
 			t.battleStations = bt.optBoolean("stations", t.battleStations);
 			t.stationSpinDeg = num(bt, "stationSpinDeg", t.stationSpinDeg);
+			t.battleCaptureRadius = num(bt, "captureRadius", t.battleCaptureRadius);
+			t.battleCaptureFallback = num(bt, "captureFallback", t.battleCaptureFallback);
+			t.battleHoldRadius = num(bt, "holdRadius", t.battleHoldRadius);
+			t.battleAvoidRadius = num(bt, "avoidRadius", t.battleAvoidRadius);
 		}
 		JSONObject ai = root.optJSONObject("ai");
 		if (ai != null) {
