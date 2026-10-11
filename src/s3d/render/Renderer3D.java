@@ -1,0 +1,798 @@
+package s3d.render;
+
+import static org.lwjgl.opengl.EXTFramebufferObject.GL_FRAMEBUFFER_EXT;
+import static org.lwjgl.opengl.EXTFramebufferObject.glBindFramebufferEXT;
+
+import java.util.Random;
+
+import org.apache.log4j.Logger;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL13;
+import org.lwjgl.opengl.GL14;
+import org.lwjgl.opengl.GL20;
+
+import com.fs.starfarer.api.Global;
+
+import s3d.core.ChaseCamera;
+import s3d.core.Effect;
+import s3d.core.Missile3D;
+import s3d.core.EngineMount;
+import s3d.core.Projectile;
+import s3d.core.WeaponMount;
+import s3d.core.WeaponSpec3D;
+import s3d.core.ShieldFlux;
+import s3d.core.Ship3D;
+import s3d.core.Sim;
+import s3d.core.Tuning;
+import s3d.math.Mat4;
+import s3d.math.Quat;
+import s3d.math.Vec3;
+
+/**
+ * Draws one frame of the 3D scene into its own render target, then composites it full-screen
+ * onto the caller's framebuffer. Pass order: sky, stars, opaque hulls, additive effects.
+ */
+public final class Renderer3D {
+	private static final Logger log = Global.getLogger(Renderer3D.class);
+
+	private Shader shipShader, fxShader, skyShader, starShader, shieldShader, holoShader;
+	private Mesh stars;
+	private int starsBuiltFor = -1;
+	private final SceneTarget target = new SceneTarget();
+	private float[] dust;
+	private int dustBuiltFor = -1;
+	private GlyphFont font;
+	private int whiteTex;
+	private HudRenderer hud;
+	private boolean initialized;
+
+	private final Mat4 model = new Mat4(), mvp = new Mat4(), vpRot = new Mat4(), identity = new Mat4();
+	private final Vec3 tmpA = new Vec3(), tmpB = new Vec3(), tmpC = new Vec3();
+
+	// Stats for the perf HUD
+	public int lastTriangles, lastShips;
+
+	public void init() {
+		if (initialized) return;
+		GLCaps.detect();
+		if (!GLCaps.shaders) throw new IllegalStateException("OpenGL 2.0 shaders unavailable: " + GLCaps.summary());
+		if (!GLCaps.fbo) throw new IllegalStateException("EXT_framebuffer_object unavailable: " + GLCaps.summary());
+		shipShader = Shader.build("ship", Shaders.SHIP_VS, Shaders.SHIP_FS, "a_pos", "a_nrm", "a_uv", "a_side");
+		fxShader = Shader.build("fx", Shaders.FX_VS, Shaders.FX_FS);
+		skyShader = Shader.build("sky", Shaders.SKY_VS, Shaders.SKY_FS);
+		starShader = Shader.build("stars", Shaders.STAR_VS, Shaders.STAR_FS, "a_dir", "a_col");
+		shieldShader = Shader.build("shield", Shaders.SHIELD_VS, Shaders.SHIELD_FS);
+		holoShader = Shader.build("holo", Shaders.HOLO_VS, Shaders.HOLO_FS, "a_pos", "a_nrm");
+		try {
+			font = GlyphFont.create(13);
+		} catch (Throwable t) {
+			log.warn("S3D: HUD font unavailable, text disabled", t);
+		}
+		hud = new HudRenderer(fxShader, font);
+		whiteTex = TextureUtil.upload(new int[] {0xFFFFFFFF}, 1, 1, false, 1f);
+		initialized = true;
+		log.info("S3D: renderer initialised");
+	}
+
+	/** HUD overlay, then the target hologram the HUD asked for (it needs the 3D mesh). */
+	public void renderHud(Sim sim, s3d.core.PilotInput in, HudRenderer.Info info, int w, int h) {
+		hud.render(sim, in, info, w, h);
+		if (hud.holoShip != null) renderHologram(hud.holoShip, sim.tuning, hud.holoX, hud.holoY, hud.holoW, hud.holoH, sim.time, w, h);
+		hud.holoShip = null;
+	}
+
+	private final Mat4 holoProj = new Mat4(), holoModel = new Mat4(), holoMvp = new Mat4();
+	private final float[] holoArmor = new float[s3d.core.ArmorShell.AZ * s3d.core.ArmorShell.EL];
+
+	/**
+	 * The target as a slowly turning hologram in a screen box: its own mesh, additive, cyan where the
+	 * armor is whole and amber to red where it's gone (by direction), dimmer as hull drops.
+	 */
+	private void renderHologram(Ship3D s, Tuning t, float x, float y, float bw, float bh, float time, int w, int h) {
+		ShipModel m = modelFor(s, t);
+		if (m == null) return;
+		GL11.glViewport((int) x, (int) y, (int) bw, (int) bh);
+		GL11.glDisable(GL11.GL_DEPTH_TEST);
+		GL11.glDisable(GL11.GL_CULL_FACE);
+		GL11.glEnable(GL11.GL_BLEND);
+		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
+		float r = Math.max(5f, s.baseRadius);
+		float fov = (float) Math.toRadians(30);
+		float dist = r / (float) Math.tan(fov * 0.5f) * 0.85f;
+		holoProj.perspective(fov, bw / Math.max(1f, bh), dist * 0.2f, dist * 3f);
+		// Seen from well above (the silhouette is what identifies a hull), turning slowly.
+		Quat q = new Quat().setAxisAngle(1, 0, 0, 0.95f).mulLocal(new Quat().setAxisAngle(0, 1, 0, time * 0.5f));
+		holoModel.fromRotationTranslation(q, 0f, 0f, -dist);
+		holoMvp.mul(holoProj, holoModel);
+		if (s.armor != null) System.arraycopy(s.armor.frac, 0, holoArmor, 0, holoArmor.length);
+		else java.util.Arrays.fill(holoArmor, 1f);
+		holoShader.use().set("u_mvp", holoMvp).set("u_model", holoModel).set("u_time", time)
+				.set("u_hull", s.hullMax > 0f ? Math.max(0f, s.hull / s.hullMax) : 0f).set("u_col", 0.35f, 0.85f, 1f)
+				.setArray("u_armor", holoArmor);
+		m.mesh.draw(GL11.GL_TRIANGLES);
+		GL20.glUseProgram(0);
+		GL11.glViewport(0, 0, w, h);
+		GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+		GL11.glDisable(GL11.GL_BLEND);
+	}
+
+	public HudRenderer hud() {
+		return hud;
+	}
+
+	public int msaaSamples() {
+		return target.samples();
+	}
+
+	/** Renders the scene and leaves outputFbo bound with a full-screen viewport. */
+	public void renderScene(Sim sim, int screenW, int screenH, int outputFbo) {
+		Tuning t = sim.tuning;
+		ChaseCamera cam = sim.camera;
+		if (!target.ensure(screenW, screenH, t.msaaSamples)) throw new IllegalStateException("scene render target unavailable");
+		ensureStars(t.starCount);
+		ensureDust(t.dustCount, t.dustRange);
+		lastTriangles = 0;
+		lastShips = 0;
+
+		target.begin();
+		GL11.glClearColor(0f, 0f, 0f, 1f);
+		GL11.glClearDepth(1.0);
+		GL11.glDepthMask(true);
+		GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
+
+		GL11.glDisable(GL11.GL_DEPTH_TEST);
+		GL11.glDepthMask(false);
+		GL11.glDisable(GL11.GL_CULL_FACE);
+		GL11.glDisable(GL11.GL_BLEND);
+		drawSky(cam, t, screenW / (float) screenH);
+
+		GL11.glEnable(GL11.GL_BLEND);
+		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
+		drawStars(cam);
+
+		GL11.glDisable(GL11.GL_BLEND);
+		GL11.glEnable(GL11.GL_DEPTH_TEST);
+		GL11.glDepthFunc(GL11.GL_LEQUAL);
+		GL11.glDepthMask(true);
+		GL11.glEnable(GL11.GL_CULL_FACE);
+		GL11.glCullFace(GL11.GL_BACK);
+		GL11.glFrontFace(GL11.GL_CCW);
+		drawShips(sim);
+		drawMissileBodies(sim);
+
+		GL11.glDisable(GL11.GL_CULL_FACE);
+		GL11.glDepthMask(false);
+		GL11.glEnable(GL11.GL_BLEND);
+		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex); // keeps the fx sampler bound to something valid
+		drawShields(sim);
+		fxShader.use().set("u_vp", cam.viewProj).set("u_tex", 0);
+		drawEngines(sim);
+		drawProjectiles(sim);
+		drawBeams(sim);
+		drawArcs(sim);
+		drawMissileFx(sim);
+		drawEffects(sim);
+		drawDust(sim);
+		if (cam.tacticalBlend() > 0.01f) drawTacticalAids(sim, cam.tacticalBlend());
+		GL11.glDepthMask(true);
+
+		target.resolve();
+
+		// Composite onto the caller's framebuffer.
+		glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, outputFbo);
+		GL11.glViewport(0, 0, screenW, screenH);
+		GL11.glDisable(GL11.GL_DEPTH_TEST);
+		GL11.glDisable(GL11.GL_BLEND);
+		GL11.glDisable(GL11.GL_CULL_FACE);
+		GL11.glEnable(GL11.GL_TEXTURE_2D);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, target.texture());
+		fxShader.use().set("u_vp", identity).set("u_mode", 4).set("u_tex", 0);
+		GL11.glBegin(GL11.GL_QUADS);
+		GL11.glTexCoord2f(0, 0); GL11.glVertex2f(-1, -1);
+		GL11.glTexCoord2f(1, 0); GL11.glVertex2f(1, -1);
+		GL11.glTexCoord2f(1, 1); GL11.glVertex2f(1, 1);
+		GL11.glTexCoord2f(0, 1); GL11.glVertex2f(-1, 1);
+		GL11.glEnd();
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex);
+		GL20.glUseProgram(0);
+	}
+
+	// ------------------------------------------------------------------------------------------
+
+	private void drawSky(ChaseCamera cam, Tuning t, float aspect) {
+		Vec3 r = cam.rot.right(tmpA), u = cam.rot.up(tmpB), f = cam.rot.forward(tmpC);
+		float tanY = (float) Math.tan(cam.fovYRad * 0.5);
+		Vec3 sun = new Vec3(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize();
+		skyShader.use()
+				.set("u_right", r.x, r.y, r.z).set("u_up", u.x, u.y, u.z).set("u_fwd", f.x, f.y, f.z)
+				.set("u_tanX", tanY * aspect).set("u_tanY", tanY)
+				.set("u_sunDir", sun.x, sun.y, sun.z).set("u_sunColor", t.sunColor)
+				.set("u_nebA", t.nebulaColorA).set("u_nebB", t.nebulaColorB).set("u_nebStrength", t.nebulaStrength);
+		GL11.glBegin(GL11.GL_QUADS);
+		GL11.glVertex2f(-1, -1);
+		GL11.glVertex2f(1, -1);
+		GL11.glVertex2f(1, 1);
+		GL11.glVertex2f(-1, 1);
+		GL11.glEnd();
+	}
+
+	private void ensureStars(int count) {
+		if (stars != null && starsBuiltFor == count) return;
+		if (stars != null) stars.delete();
+		Random rnd = new Random(1337);
+		float[] v = new float[count * 7];
+		int[] idx = new int[count];
+		for (int i = 0; i < count; i++) {
+			double zz = rnd.nextDouble() * 2 - 1, phi = rnd.nextDouble() * Math.PI * 2, rr = Math.sqrt(1 - zz * zz);
+			float bright = (float) Math.pow(rnd.nextDouble(), 6.0);
+			float size = 1.0f + bright * 2.6f;
+			float temp = (float) rnd.nextDouble();
+			float lum = 0.18f + 0.82f * bright;
+			v[i * 7] = (float) (rr * Math.cos(phi));
+			v[i * 7 + 1] = (float) zz;
+			v[i * 7 + 2] = (float) (rr * Math.sin(phi));
+			v[i * 7 + 3] = lum * (0.8f + 0.25f * temp);
+			v[i * 7 + 4] = lum * (0.85f + 0.1f * temp);
+			v[i * 7 + 5] = lum * (1.05f - 0.25f * temp);
+			v[i * 7 + 6] = size;
+			idx[i] = i;
+		}
+		stars = Mesh.upload(v, idx, 7, new int[][] {{0, 3, 0}, {1, 4, 3}});
+		starsBuiltFor = count;
+	}
+
+	private void drawStars(ChaseCamera cam) {
+		vpRot.view(cam.rot, new Vec3());
+		vpRot.mul(cam.proj, vpRot);
+		starShader.use().set("u_vpRot", vpRot);
+		GL11.glEnable(GL20.GL_VERTEX_PROGRAM_POINT_SIZE);
+		GL11.glEnable(GL20.GL_POINT_SPRITE);
+		stars.draw(GL11.GL_POINTS);
+		GL11.glDisable(GL20.GL_POINT_SPRITE);
+		GL11.glDisable(GL20.GL_VERTEX_PROGRAM_POINT_SIZE);
+	}
+
+	private void drawShips(Sim sim) {
+		Tuning t = sim.tuning;
+		ChaseCamera cam = sim.camera;
+		Vec3 sun = new Vec3(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize();
+		Vec3 fill = new Vec3(t.fillDir[0], t.fillDir[1], t.fillDir[2]).normalize();
+		shipShader.use()
+				.set("u_tex", 0)
+				.set("u_nrm", 1)
+				.set("u_bump", t.bumpStrength)
+				.set("u_lightDir", sun.x, sun.y, sun.z)
+				.set("u_lightColor", t.sunColor)
+				.set("u_ambient", t.ambient)
+				.set("u_fillDir", fill.x, fill.y, fill.z)
+				.set("u_fillColor", t.fillColor)
+				.set("u_camPos", cam.pos.x, cam.pos.y, cam.pos.z);
+		GL11.glEnable(GL11.GL_TEXTURE_2D);
+		Quat q = new Quat(), bank = new Quat();
+		java.util.List<Ship3D> ghosts = null;
+		for (Ship3D s : sim.ships) {
+			if (s.phaseLevel > 0.01f) {
+				// Phased ships are drawn afterwards, see-through.
+				if (ghosts == null) ghosts = new java.util.ArrayList<>();
+				ghosts.add(s);
+				continue;
+			}
+			ShipModel m = modelFor(s, t);
+			if (m == null) continue;
+			bank.setAxisAngle(0, 0, 1, s.visualBank);
+			q.mul(s.rot, bank);
+			model.fromRotationTranslation(q, s.pos.x, s.pos.y, s.pos.z).scaleLocal(s.scale);
+			mvp.mul(cam.viewProj, model);
+			shipShader.set("u_model", model).set("u_mvp", mvp).set("u_tint", m.tint)
+					.set("u_hitFlash", Math.min(1f, s.hitFlash * 3f)).set("u_dead", s.destroyed ? 1f : 0f);
+			bindModel(m);
+			m.mesh.draw(GL11.GL_TRIANGLES);
+			lastTriangles += m.mesh.indexCount() / 3;
+			lastShips++;
+			drawWeapons(s, t, cam);
+		}
+		if (ghosts != null) {
+			GL11.glEnable(GL11.GL_BLEND);
+			GL11.glBlendFunc(0x8003, 0x8004); // GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA (constant set per ship below)
+			GL11.glDepthMask(false);
+			for (Ship3D s : ghosts) {
+				ShipModel m = modelFor(s, t);
+				if (m == null) continue;
+				GL14.glBlendColor(0f, 0f, 0f, 1f - 0.7f * s.phaseLevel);
+				bank.setAxisAngle(0, 0, 1, s.visualBank);
+				q.mul(s.rot, bank);
+				model.fromRotationTranslation(q, s.pos.x, s.pos.y, s.pos.z).scaleLocal(s.scale);
+				mvp.mul(cam.viewProj, model);
+				shipShader.set("u_model", model).set("u_mvp", mvp).set("u_tint", m.tint)
+						.set("u_hitFlash", 0f).set("u_dead", 0f);
+				bindModel(m);
+				m.mesh.draw(GL11.GL_TRIANGLES);
+				lastTriangles += m.mesh.indexCount() / 3;
+				lastShips++;
+			}
+			GL11.glDepthMask(true);
+			GL11.glDisable(GL11.GL_BLEND);
+		}
+		unbindDetail();
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+	}
+
+	/** Turret/hardpoint sprites as small relief meshes, pointing where the barrel is aimed. */
+	private void drawWeapons(Ship3D s, Tuning t, ChaseCamera cam) {
+		Quat wr = new Quat();
+		Vec3 wp = new Vec3();
+		for (WeaponMount mt : s.weapons) {
+			if (mt.model == null && mt.modelSource instanceof ShipModel.Source) mt.model = ShipModel.get((ShipModel.Source) mt.modelSource, t);
+			if (mt.gunModel == null && mt.gunModelSource instanceof ShipModel.Source) mt.gunModel = ShipModel.get((ShipModel.Source) mt.gunModelSource, t);
+			if (!(mt.model instanceof ShipModel)) continue;
+			mt.worldPos(s, wp);
+			mt.worldRot(s, wr);
+			drawPart((ShipModel) mt.model, wr, wp, s, cam);
+			if (mt.gunModel instanceof ShipModel) {
+				Vec3 up = wr.up(new Vec3()).scale(0.6f * s.scale);
+				drawPart((ShipModel) mt.gunModel, wr, up.add(wp), s, cam);
+			}
+		}
+	}
+
+	private void drawPart(ShipModel m, Quat rot, Vec3 pos, Ship3D s, ChaseCamera cam) {
+		model.fromRotationTranslation(rot, pos.x, pos.y, pos.z).scaleLocal(s.scale);
+		mvp.mul(cam.viewProj, model);
+		shipShader.set("u_model", model).set("u_mvp", mvp).set("u_tint", m.tint)
+				.set("u_hitFlash", Math.min(1f, s.hitFlash * 3f)).set("u_dead", s.destroyed ? 1f : 0f);
+		bindModel(m);
+		m.mesh.draw(GL11.GL_TRIANGLES);
+		lastTriangles += m.mesh.indexCount() / 3;
+	}
+
+	/** Colour texture on unit 0, surface-detail normal map on unit 1. */
+	private static void bindModel(ShipModel m) {
+		GL13.glActiveTexture(GL13.GL_TEXTURE1);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, m.normalTexture);
+		GL13.glActiveTexture(GL13.GL_TEXTURE0);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, m.texture);
+	}
+
+	private static void unbindDetail() {
+		GL13.glActiveTexture(GL13.GL_TEXTURE1);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+		GL13.glActiveTexture(GL13.GL_TEXTURE0);
+	}
+
+	/** Builds (or fetches) the GPU model for a ship the first time it's drawn. */
+	public static ShipModel modelFor(Ship3D s, Tuning t) {
+		if (s.model instanceof ShipModel) return (ShipModel) s.model;
+		if (!(s.modelSource instanceof ShipModel.Source)) return null;
+		ShipModel m = ShipModel.get((ShipModel.Source) s.modelSource, t);
+		s.model = m;
+		return m;
+	}
+
+	private void drawEngines(Sim sim) {
+		Tuning t = sim.tuning;
+		ChaseCamera cam = sim.camera;
+		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
+		Vec3 p = new Vec3(), d = new Vec3(), toCam = new Vec3(), side = new Vec3();
+
+		fxShader.set("u_mode", 1);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Ship3D s : sim.ships) {
+			float thrust = s.thrustVisual;
+			for (int ei = 0; ei < s.engines.size(); ei++) {
+				EngineMount e = s.engines.get(ei);
+				if (s.engineDown != null && ei < s.engineDown.length && s.engineDown[ei] > 0f) continue; // knocked out by EMP
+				s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
+				s.rot.rotate(e.dir, d);
+				float len = e.length * (0.25f + 0.85f * thrust) * t.engineFlameScale * s.scale;
+				float wid = e.width * 0.55f * t.engineFlameScale * s.scale;
+				toCam.set(cam.pos).sub(p).normalize();
+				side.set(d).cross(toCam);
+				if (side.lengthSq() < 1e-6f) continue;
+				side.normalize().scale(wid * 0.5f);
+				float a = 0.45f + 0.6f * Math.min(1f, thrust);
+				GL11.glColor4f(e.r, e.g, e.b, a);
+				GL11.glTexCoord2f(0, 0); GL11.glVertex3f(p.x - side.x, p.y - side.y, p.z - side.z);
+				GL11.glTexCoord2f(0, 1); GL11.glVertex3f(p.x + side.x, p.y + side.y, p.z + side.z);
+				GL11.glTexCoord2f(1, 1); GL11.glVertex3f(p.x + d.x * len + side.x * 0.45f, p.y + d.y * len + side.y * 0.45f, p.z + d.z * len + side.z * 0.45f);
+				GL11.glTexCoord2f(1, 0); GL11.glVertex3f(p.x + d.x * len - side.x * 0.45f, p.y + d.y * len - side.y * 0.45f, p.z + d.z * len - side.z * 0.45f);
+			}
+		}
+		GL11.glEnd();
+
+		fxShader.set("u_mode", 2);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Ship3D s : sim.ships) {
+			float thrust = Math.min(1f, s.thrustVisual);
+			for (int ei = 0; ei < s.engines.size(); ei++) {
+				EngineMount e = s.engines.get(ei);
+				if (s.engineDown != null && ei < s.engineDown.length && s.engineDown[ei] > 0f) continue; // knocked out by EMP
+				s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
+				float r = e.width * 0.75f * (0.5f + 0.6f * thrust) * t.engineFlameScale * s.scale;
+				GL11.glColor4f(e.r, e.g, e.b, 0.22f + 0.33f * thrust);
+				quad(p, camR, camU, r);
+			}
+		}
+		GL11.glEnd();
+	}
+
+	/** Camera-facing streaks: fringe colour outside, core colour along the centre, fading toward the tail. */
+	private void drawProjectiles(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		Vec3 toCam = new Vec3(), side = new Vec3(), tail = new Vec3();
+		fxShader.set("u_mode", 5);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Projectile p : sim.combat.projectiles) {
+			WeaponSpec3D w = p.spec;
+			float len = Math.max(8f, w.projLength), wid = Math.max(2f, w.projWidth) * 1.6f;
+			float dist = p.distanceFromOrigin();
+			float a = Math.min(1f, Math.max(0f, (p.maxRange - dist) / (0.15f * p.maxRange)));
+			len = Math.min(len, dist + 1f); // don't draw the tail behind the muzzle
+			tail.set(p.pos).addScaled(p.dir, -len);
+			toCam.set(cam.pos).sub(p.pos).normalize();
+			side.set(p.dir).cross(toCam);
+			if (side.lengthSq() < 1e-6f) continue;
+			side.normalize().scale(wid * 0.5f);
+			GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], a);
+			GL14.glSecondaryColor3f(w.coreColor[0], w.coreColor[1], w.coreColor[2]);
+			GL11.glTexCoord2f(0, 0); GL11.glVertex3f(p.pos.x - side.x, p.pos.y - side.y, p.pos.z - side.z);
+			GL11.glTexCoord2f(0, 1); GL11.glVertex3f(p.pos.x + side.x, p.pos.y + side.y, p.pos.z + side.z);
+			GL11.glTexCoord2f(1, 1); GL11.glVertex3f(tail.x + side.x, tail.y + side.y, tail.z + side.z);
+			GL11.glTexCoord2f(1, 0); GL11.glVertex3f(tail.x - side.x, tail.y - side.y, tail.z - side.z);
+		}
+		GL11.glEnd();
+		// Glowing head so shots stay readable from the chase camera (Starsector sizes them for a zoomed-out 2D view).
+		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
+		fxShader.set("u_mode", 2);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Projectile p : sim.combat.projectiles) {
+			WeaponSpec3D w = p.spec;
+			float dist = p.distanceFromOrigin();
+			float a = Math.min(1f, Math.max(0f, (p.maxRange - dist) / (0.15f * p.maxRange)));
+			float size = Math.max(4f, w.projWidth * 1.8f) + p.pos.distance(cam.pos) * 0.004f;
+			GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], 0.9f * a);
+			quad(p.pos, camR, camU, size);
+		}
+		GL11.glEnd();
+	}
+
+	/** Missile bodies: the missile sprite as a small flat relief mesh, nose along its heading. */
+	private void drawMissileBodies(Sim sim) {
+		Tuning t = sim.tuning;
+		ChaseCamera cam = sim.camera;
+		if (sim.combat.missiles.isEmpty()) return;
+		Vec3 sun = new Vec3(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize();
+		Vec3 fill = new Vec3(t.fillDir[0], t.fillDir[1], t.fillDir[2]).normalize();
+		shipShader.use().set("u_tex", 0).set("u_nrm", 1).set("u_bump", t.bumpStrength)
+				.set("u_lightDir", sun.x, sun.y, sun.z).set("u_lightColor", t.sunColor)
+				.set("u_ambient", t.ambient).set("u_fillDir", fill.x, fill.y, fill.z).set("u_fillColor", t.fillColor)
+				.set("u_camPos", cam.pos.x, cam.pos.y, cam.pos.z).set("u_hitFlash", 0f).set("u_dead", 0f);
+		Quat q = new Quat();
+		Vec3 up = new Vec3();
+		for (Missile3D ms : sim.combat.missiles) {
+			WeaponSpec3D w = ms.spec;
+			if (w.missileModel == null && w.missileModelSource instanceof ShipModel.Source) {
+				w.missileModel = ShipModel.get((ShipModel.Source) w.missileModelSource, t);
+			}
+			if (!(w.missileModel instanceof ShipModel)) continue;
+			ShipModel m = (ShipModel) w.missileModel;
+			up.set(Math.abs(ms.dir.y) > 0.95f ? 1f : 0f, Math.abs(ms.dir.y) > 0.95f ? 0f : 1f, 0f);
+			q.setLookRotation(ms.dir, up);
+			model.fromRotationTranslation(q, ms.pos.x, ms.pos.y, ms.pos.z);
+			mvp.mul(cam.viewProj, model);
+			shipShader.set("u_model", model).set("u_mvp", mvp).set("u_tint", m.tint);
+			bindModel(m);
+			m.mesh.draw(GL11.GL_TRIANGLES);
+			lastTriangles += m.mesh.indexCount() / 3;
+		}
+		unbindDetail();
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+	}
+
+	/** Missile engine flames, glows and fading trails. */
+	private void drawMissileFx(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		if (sim.combat.missiles.isEmpty()) return;
+		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
+		Vec3 a = new Vec3(), b = new Vec3(), side = new Vec3(), toCam = new Vec3(), seg = new Vec3();
+		// Trails
+		fxShader.set("u_mode", 0);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Missile3D ms : sim.combat.missiles) {
+			float[] c = ms.spec.missileGlow;
+			float fadeAll = ms.flamedOut() ? Math.max(0f, 1f - ms.fade) : 1f;
+			float wid = Math.max(2f, ms.spec.missileRadius * 0.45f);
+			int n = ms.trailCount;
+			for (int i = 0; i < n - 1; i++) {
+				int i0 = (ms.trailHead - n + i + Missile3D.TRAIL) % Missile3D.TRAIL;
+				int i1 = (i0 + 1) % Missile3D.TRAIL;
+				a.set(ms.trail[i0 * 3], ms.trail[i0 * 3 + 1], ms.trail[i0 * 3 + 2]);
+				b.set(ms.trail[i1 * 3], ms.trail[i1 * 3 + 1], ms.trail[i1 * 3 + 2]);
+				seg.set(b).sub(a);
+				toCam.set(cam.pos).sub(b);
+				side.set(seg).cross(toCam);
+				if (side.lengthSq() < 1e-6f) continue;
+				side.normalize().scale(wid * 0.5f);
+				float al0 = 0.35f * fadeAll * i / n, al1 = 0.35f * fadeAll * (i + 1) / n;
+				GL11.glColor4f(c[0] * al0, c[1] * al0, c[2] * al0, 1f);
+				GL11.glVertex3f(a.x - side.x, a.y - side.y, a.z - side.z);
+				GL11.glVertex3f(a.x + side.x, a.y + side.y, a.z + side.z);
+				GL11.glColor4f(c[0] * al1, c[1] * al1, c[2] * al1, 1f);
+				GL11.glVertex3f(b.x + side.x, b.y + side.y, b.z + side.z);
+				GL11.glVertex3f(b.x - side.x, b.y - side.y, b.z - side.z);
+			}
+		}
+		GL11.glEnd();
+		// Engine glow at the tail
+		fxShader.set("u_mode", 2);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Missile3D ms : sim.combat.missiles) {
+			if (ms.flamedOut()) continue;
+			float[] c = ms.spec.missileGlow;
+			float len = ms.spec.missileRadius;
+			a.set(ms.pos).addScaled(ms.dir, -len);
+			GL11.glColor4f(c[0], c[1], c[2], 0.9f);
+			quad(a, camR, camU, Math.max(6f, ms.spec.missileRadius * 1.2f));
+			GL11.glColor4f(1f, 0.95f, 0.85f, 0.7f);
+			quad(a, camR, camU, Math.max(3f, ms.spec.missileRadius * 0.45f));
+		}
+		GL11.glEnd();
+	}
+
+	/** Beams: camera-facing ribbons from the mount to whatever they hit, glow at both ends. */
+	private static final int SHIELD_RINGS = 14, SHIELD_SEGS = 40;
+
+	/**
+	 * Raised shields as glowing sphere caps (additive): faint in the middle, brighter toward the
+	 * silhouette, a bright rim at the cap edge, and a flare where it was just hit.
+	 */
+	private void drawShields(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		boolean any = false;
+		Vec3 c = new Vec3(), f = new Vec3(), u = new Vec3(), v = new Vec3(), d = new Vec3(), hd = new Vec3();
+		for (Ship3D s : sim.ships) {
+			ShieldFlux sf = s.flux;
+			if (s.destroyed || sf == null || !sf.shieldUp()) continue;
+			if (!any) {
+				shieldShader.use().set("u_vp", cam.viewProj).set("u_cam", cam.pos.x, cam.pos.y, cam.pos.z);
+				any = true;
+			}
+			float r = sf.radius * s.scale;
+			s.rot.rotate(sf.centre.x * s.scale, sf.centre.y * s.scale, sf.centre.z * s.scale, c).add(s.pos);
+			s.rot.rotate(sf.facing, f).normalize();
+			u.set(Math.abs(f.y) < 0.9f ? 0f : 1f, Math.abs(f.y) < 0.9f ? 1f : 0f, 0f);
+			v.set(f).cross(u).normalize();
+			u.set(v).cross(f).normalize();
+			float flicker = sf.level() > 0.8f ? 0.85f + 0.15f * (float) Math.sin(sim.time * 40f + s.radius) : 1f;
+			shieldShader.set("u_inner", sf.innerColor).set("u_ring", sf.ringColor).set("u_alpha", flicker).set("u_bright", sim.tuning.shieldBrightness);
+			for (int i = 0; i < ShieldFlux.HITS; i++) {
+				float k = sf.hitSize[i] * Math.max(0f, 1f - sf.hitAge[i] / 0.45f);
+				s.rot.rotate(sf.hitDir[i], hd);
+				shieldShader.set("u_hit" + i, hd.x, hd.y, hd.z, k);
+			}
+			float half = sf.halfAngle();
+			GL11.glBegin(GL11.GL_QUADS);
+			for (int i = 0; i < SHIELD_RINGS; i++) {
+				float t0 = half * i / SHIELD_RINGS, t1 = half * (i + 1) / SHIELD_RINGS;
+				for (int j = 0; j < SHIELD_SEGS; j++) {
+					float p0 = (float) (2 * Math.PI * j / SHIELD_SEGS), p1 = (float) (2 * Math.PI * (j + 1) / SHIELD_SEGS);
+					shieldVertex(c, r, f, u, v, t0, p0, i / (float) SHIELD_RINGS, d);
+					shieldVertex(c, r, f, u, v, t0, p1, i / (float) SHIELD_RINGS, d);
+					shieldVertex(c, r, f, u, v, t1, p1, (i + 1) / (float) SHIELD_RINGS, d);
+					shieldVertex(c, r, f, u, v, t1, p0, (i + 1) / (float) SHIELD_RINGS, d);
+				}
+			}
+			GL11.glEnd();
+		}
+	}
+
+	private static void shieldVertex(Vec3 c, float r, Vec3 f, Vec3 u, Vec3 v, float theta, float phi, float edge, Vec3 d) {
+		float st = (float) Math.sin(theta), ct = (float) Math.cos(theta);
+		float cp = (float) Math.cos(phi), sp = (float) Math.sin(phi);
+		d.set(f.x * ct + (u.x * cp + v.x * sp) * st, f.y * ct + (u.y * cp + v.y * sp) * st, f.z * ct + (u.z * cp + v.z * sp) * st);
+		GL11.glNormal3f(d.x, d.y, d.z);
+		GL11.glTexCoord2f(edge, 0f);
+		GL11.glVertex3f(c.x + d.x * r, c.y + d.y * r, c.z + d.z * r);
+	}
+
+	private void drawBeams(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		Vec3 o = new Vec3(), d = new Vec3(), toCam = new Vec3(), side = new Vec3();
+		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
+		fxShader.set("u_mode", 6);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Ship3D s : sim.ships) {
+			for (WeaponMount m : s.weapons) {
+				if (m.beamLevel <= 0f) continue;
+				WeaponSpec3D w = m.spec;
+				m.worldPos(s, o);
+				d.set(m.beamEnd).sub(o);
+				if (d.lengthSq() < 1f) continue;
+				toCam.set(cam.pos).sub(o);
+				side.set(d).cross(toCam);
+				if (side.lengthSq() < 1e-6f) continue;
+				float wid = w.beamWidth * (0.35f + 0.65f * m.beamLevel);
+				side.normalize().scale(wid * 0.5f);
+				GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], m.beamLevel);
+				GL14.glSecondaryColor3f(w.coreColor[0], w.coreColor[1], w.coreColor[2]);
+				GL11.glTexCoord2f(0, 0); GL11.glVertex3f(o.x - side.x, o.y - side.y, o.z - side.z);
+				GL11.glTexCoord2f(0, 1); GL11.glVertex3f(o.x + side.x, o.y + side.y, o.z + side.z);
+				GL11.glTexCoord2f(1, 1); GL11.glVertex3f(m.beamEnd.x + side.x, m.beamEnd.y + side.y, m.beamEnd.z + side.z);
+				GL11.glTexCoord2f(1, 0); GL11.glVertex3f(m.beamEnd.x - side.x, m.beamEnd.y - side.y, m.beamEnd.z - side.z);
+			}
+		}
+		GL11.glEnd();
+		fxShader.set("u_mode", 2);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Ship3D s : sim.ships) {
+			for (WeaponMount m : s.weapons) {
+				if (m.beamLevel <= 0f) continue;
+				WeaponSpec3D w = m.spec;
+				m.worldPos(s, o);
+				GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], 0.6f * m.beamLevel);
+				quad(o, camR, camU, w.beamWidth * 1.2f);
+				if (m.beamHitting) {
+					GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], 0.9f * m.beamLevel);
+					quad(m.beamEnd, camR, camU, w.beamWidth * 2.2f);
+					GL11.glColor4f(1f, 0.95f, 0.9f, 0.8f * m.beamLevel);
+					quad(m.beamEnd, camR, camU, w.beamWidth * 0.8f);
+				}
+			}
+		}
+		GL11.glEnd();
+	}
+
+	private final java.util.Random arcRnd = new java.util.Random();
+
+	/** EMP arcs: jagged lightning between two points, re-rolled every frame so it crackles. */
+	private void drawArcs(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		Vec3 a = new Vec3(), b = new Vec3(), d = new Vec3(), toCam = new Vec3(), side = new Vec3(), perp1 = new Vec3(), perp2 = new Vec3();
+		boolean begun = false;
+		for (Effect e : sim.combat.effects) {
+			if (e.kind != Effect.Kind.ARC) continue;
+			if (!begun) {
+				fxShader.set("u_mode", 6);
+				GL11.glBegin(GL11.GL_QUADS);
+				begun = true;
+			}
+			float alpha = 1f - e.age01();
+			d.set(e.end).sub(e.pos);
+			float len = d.length();
+			if (len < 1f) continue;
+			d.scale(1f / len);
+			perp1.set(Math.abs(d.y) < 0.9f ? 0f : 1f, Math.abs(d.y) < 0.9f ? 1f : 0f, 0f).cross(d).normalize();
+			perp2.set(d).cross(perp1);
+			int n = Math.max(6, Math.min(16, (int) (len / 8f)));
+			a.set(e.pos);
+			for (int i = 1; i <= n; i++) {
+				float t = i / (float) n;
+				b.set(e.pos).addScaled(d, len * t);
+				if (i < n) {
+					float j = len * 0.3f * (float) Math.sin(Math.PI * t);
+					b.addScaled(perp1, (arcRnd.nextFloat() - 0.5f) * j).addScaled(perp2, (arcRnd.nextFloat() - 0.5f) * j);
+				}
+				toCam.set(cam.pos).sub(a);
+				side.set(b).sub(a).cross(toCam);
+				if (side.lengthSq() > 1e-6f) {
+					side.normalize().scale(e.size);
+					GL11.glColor4f(e.r, e.g, e.b, alpha);
+					GL14.glSecondaryColor3f(0.9f, 0.95f, 1f);
+					GL11.glTexCoord2f(0.3f, 0); GL11.glVertex3f(a.x - side.x, a.y - side.y, a.z - side.z);
+					GL11.glTexCoord2f(0.3f, 1); GL11.glVertex3f(a.x + side.x, a.y + side.y, a.z + side.z);
+					GL11.glTexCoord2f(0.3f, 1); GL11.glVertex3f(b.x + side.x, b.y + side.y, b.z + side.z);
+					GL11.glTexCoord2f(0.3f, 0); GL11.glVertex3f(b.x - side.x, b.y - side.y, b.z - side.z);
+				}
+				a.set(b);
+			}
+		}
+		if (begun) GL11.glEnd();
+	}
+
+	/** Muzzle flashes, impact sparks and explosions as glowing billboards. */
+	private void drawEffects(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
+		fxShader.set("u_mode", 2);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Effect e : sim.combat.effects) {
+			float age = e.age01();
+			float size, alpha;
+			switch (e.kind) {
+				case FLASH: size = e.size * (0.6f + 0.4f * age); alpha = (float) Math.pow(1f - age, 1.5); break;
+				case SPARK: size = e.size * (1f + age); alpha = (1f - age) * (1f - age); break;
+				case EXPLOSION: size = e.size * (0.3f + (float) Math.sqrt(age)); alpha = (float) Math.pow(1f - age, 1.2); break;
+				default: continue;
+			}
+			GL11.glColor4f(e.r, e.g, e.b, alpha);
+			quad(e.pos, camR, camU, size);
+			if (e.kind != Effect.Kind.FLASH) {
+				GL11.glColor4f(1f, 0.95f, 0.85f, alpha * 0.8f);
+				quad(e.pos, camR, camU, size * 0.35f);
+			}
+		}
+		GL11.glEnd();
+	}
+
+	private static void quad(Vec3 c, Vec3 r, Vec3 u, float s) {
+		GL11.glTexCoord2f(0, 0); GL11.glVertex3f(c.x - r.x * s - u.x * s, c.y - r.y * s - u.y * s, c.z - r.z * s - u.z * s);
+		GL11.glTexCoord2f(1, 0); GL11.glVertex3f(c.x + r.x * s - u.x * s, c.y + r.y * s - u.y * s, c.z + r.z * s - u.z * s);
+		GL11.glTexCoord2f(1, 1); GL11.glVertex3f(c.x + r.x * s + u.x * s, c.y + r.y * s + u.y * s, c.z + r.z * s + u.z * s);
+		GL11.glTexCoord2f(0, 1); GL11.glVertex3f(c.x - r.x * s + u.x * s, c.y - r.y * s + u.y * s, c.z - r.z * s + u.z * s);
+	}
+
+	private void ensureDust(int count, float range) {
+		if (dust != null && dustBuiltFor == count) return;
+		Random rnd = new Random(42);
+		dust = new float[count * 3];
+		for (int i = 0; i < dust.length; i++) dust[i] = rnd.nextFloat();
+		dustBuiltFor = count;
+	}
+
+	/** Space dust around the camera: the main cue for your own speed and drift. */
+	private void drawDust(Sim sim) {
+		Tuning t = sim.tuning;
+		Ship3D player = sim.viewer();
+		if (player == null) return;
+		Vec3 c = sim.camera.pos;
+		float range = Math.max(200f, t.dustRange), half = range * 0.5f;
+		Vec3 v = player.vel;
+		float streak = t.dustStreak;
+		fxShader.set("u_mode", 0);
+		GL11.glBegin(GL11.GL_LINES);
+		for (int i = 0; i < dustBuiltFor; i++) {
+			float rx = wrap(dust[i * 3] * range - c.x, range) - half;
+			float ry = wrap(dust[i * 3 + 1] * range - c.y, range) - half;
+			float rz = wrap(dust[i * 3 + 2] * range - c.z, range) - half;
+			float dist = (float) Math.sqrt(rx * rx + ry * ry + rz * rz);
+			float fade = 1f - dist / half;
+			if (fade <= 0f) continue;
+			fade *= fade * Math.min(1f, dist / 40f);
+			float x = c.x + rx, y = c.y + ry, z = c.z + rz;
+			float a = t.dustBrightness * fade;
+			GL11.glColor4f(0.55f * a, 0.62f * a, 0.8f * a, 1f);
+			GL11.glVertex3f(x, y, z);
+			GL11.glColor4f(0f, 0f, 0f, 1f);
+			GL11.glVertex3f(x + v.x * streak + 0.6f, y + v.y * streak, z + v.z * streak);
+		}
+		GL11.glEnd();
+	}
+
+	private static float wrap(float v, float range) {
+		float r = v % range;
+		return r < 0f ? r + range : r;
+	}
+
+	/** Reference grid on the player's plane plus altitude stalks, so depth reads in the overview. */
+	private void drawTacticalAids(Sim sim, float blend) {
+		Ship3D player = sim.viewer();
+		if (player == null) return;
+		float step = 500f, extent = 6000f;
+		float y0 = player.pos.y;
+		float cx = (float) Math.floor(player.pos.x / step) * step, cz = (float) Math.floor(player.pos.z / step) * step;
+		fxShader.set("u_mode", 0);
+		GL11.glBegin(GL11.GL_LINES);
+		for (float k = -extent; k <= extent; k += step) {
+			float a = 0.10f * blend * (1f - Math.abs(k) / extent);
+			GL11.glColor4f(0.3f * a, 0.6f * a, 0.8f * a, 1f);
+			GL11.glVertex3f(cx + k, y0, cz - extent);
+			GL11.glVertex3f(cx + k, y0, cz + extent);
+			GL11.glVertex3f(cx - extent, y0, cz + k);
+			GL11.glVertex3f(cx + extent, y0, cz + k);
+		}
+		for (Ship3D s : sim.ships) {
+			boolean friend = s.owner == player.owner;
+			float a = 0.6f * blend;
+			GL11.glColor4f((friend ? 0.3f : 0.9f) * a, (friend ? 0.9f : 0.3f) * a, (friend ? 0.6f : 0.3f) * a, 1f);
+			GL11.glVertex3f(s.pos.x, s.pos.y, s.pos.z);
+			GL11.glVertex3f(s.pos.x, y0, s.pos.z);
+			float r = Math.max(30f, s.radius * 0.6f);
+			for (int i = 0; i < 16; i++) {
+				double a0 = i * Math.PI / 8, a1 = (i + 1) * Math.PI / 8;
+				GL11.glVertex3f(s.pos.x + (float) Math.cos(a0) * r, y0, s.pos.z + (float) Math.sin(a0) * r);
+				GL11.glVertex3f(s.pos.x + (float) Math.cos(a1) * r, y0, s.pos.z + (float) Math.sin(a1) * r);
+			}
+		}
+		GL11.glEnd();
+	}
+}

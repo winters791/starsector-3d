@@ -1,0 +1,7 @@
+{
+	# Merged into the core settings.json. Every BaseEveryFrameCombatPlugin listed under
+	# "plugins" is added to every battle; CombatHostPlugin decides per battle whether to take over.
+	"plugins":{
+		"s3d_combatHost":"s3d.host.CombatHostPlugin",
+	},
+}
