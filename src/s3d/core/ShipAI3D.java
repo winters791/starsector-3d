@@ -247,7 +247,19 @@ public final class ShipAI3D {
 		ShieldFlux tf = target.flux;
 		if (tf != null && tf.disabled()) r *= 0.6f; // overloaded or venting: move in for the kill
 		else if (tf != null && tf.level() > 0.8f && fluxLevel < 0.4f) r *= 0.8f; // flux-locked: press
+		if (target.fixedPart()) {
+			// A station section or module: the range counts from its near side (where the shots land),
+			// clear of its real shape (its collision circle can be far bigger than the hull).
+			Vec3 out = tF.set(s.pos).sub(target.pos);
+			float reach = out.lengthSq() > 1f ? target.reachToward(out.normalize()) : target.radius;
+			return Math.max(reach + s.radius * 1.6f + 100f, Math.max(s.radius * 2.5f, r) + reach * 0.85f);
+		}
 		return Math.max(s.radius + target.radius + 100f, Math.max(s.radius * 2.5f, r));
+	}
+
+	/** Distance to the target, counted to its near side for a station section or module. */
+	private float gap(Ship3D s) {
+		return target.pos.distance(s.pos) - Sim.nearSide(target, s.pos);
 	}
 
 	/** 1 for frigates down to 0.3 for capitals: how often and how hard a hull manoeuvres. */
@@ -286,7 +298,8 @@ public final class ShipAI3D {
 		boolean covered = onUs && guns.dot(fromTarget) > 0.3f;
 		boolean helpless = target.flux != null && target.flux.disabled();
 		boolean bigger = agility(target) < ag - 0.2f;
-		if (ag >= 0.75f && faster && fit && near && (!covered || helpless || bigger) && rng.nextFloat() < t.aiPassChance * ag) {
+		boolean station = target.root().anchored; // a run past a station section ends in the station
+		if (ag >= 0.75f && faster && fit && near && !station && (!covered || helpless || bigger) && rng.nextFloat() < t.aiPassChance * ag) {
 			move = Move.PASS;
 			passStage = 0;
 			passTime = 0f;
@@ -313,6 +326,11 @@ public final class ShipAI3D {
 		float best = stationScore(bearing, guns) + 0.15f; // a little inertia: moving costs firing time
 		boolean moved = false;
 		Vec3 cand = tD, axisV = tE, bestDir = tF.set(bearing);
+		// A module: not from inside its structure (between it and the core or the ship it's on).
+		Vec3 outward = target.parent != null ? new Vec3(target.pos).sub(target.root().pos) : null;
+		if (outward != null) outward.y = 0f;
+		if (outward != null && outward.lengthSq() > 1f) outward.normalize();
+		else outward = null;
 		for (int i = 0; i < 6; i++) {
 			randomPerpendicular(bearing, axisV);
 			float ang = (float) Math.toRadians(50f + 60f * rng.nextFloat());
@@ -320,6 +338,7 @@ public final class ShipAI3D {
 			cand.set(axisV).cross(bearing).scale((float) Math.sin(ang)).addScaled(bearing, (float) Math.cos(ang));
 			cand.y = FlightModel.clamp(cand.y, -0.55f, 0.55f);
 			cand.normalize();
+			if (outward != null && cand.dot(outward) < 0f) continue;
 			float score = stationScore(cand, guns) + rng.nextFloat() * 0.4f;
 			if (score > best) {
 				best = score;
@@ -551,10 +570,12 @@ public final class ShipAI3D {
 	private void stayWithFight(Sim sim, Ship3D s, Vec3 want) {
 		Tuning t = sim.tuning;
 		Vec3 pull = tB.set(0f, 0f, 0f);
-		Vec3 home = sim.fleetCentre(s.owner);
+		Vec3 home = sim.mobileCentre(s.owner);
 		if (home != null) {
 			float d = home.distance(s.pos);
-			boolean busy = target != null && target.pos.distance(s.pos) < weaponRange;
+			// Busy: something in range, or working on a station (its attackers spread round it, so
+			// their centre can be inside it).
+			boolean busy = target != null && (gap(s) < weaponRange || target.fixedPart() && gap(s) < weaponRange * 3f);
 			if (!busy && d > t.aiCohesion) pull.add(tC.set(home).sub(s.pos).normalize().scale(Math.min(1.5f, (d - t.aiCohesion) / t.aiCohesion + 0.5f)));
 		}
 		if (sim.arenaHalfX > 0f) {
@@ -593,7 +614,7 @@ public final class ShipAI3D {
 	}
 
 	private boolean wantSystem(Sim sim, Ship3D s, ShipSystem3D sys) {
-		float dist = target != null ? target.pos.distance(s.pos) : Float.MAX_VALUE;
+		float dist = target != null ? gap(s) : Float.MAX_VALUE;
 		float level = s.flux != null ? s.flux.level() : 0f;
 		boolean inRange = dist < weaponRange;
 		boolean helpless = s.flux != null && s.flux.disabled();
@@ -651,7 +672,7 @@ public final class ShipAI3D {
 		for (Ship3D o : sim.ships) {
 			if (o.destroyed || o.owner == s.owner || o.fighter || o.invulnerable) continue; // ships fight ships; PD handles fighters
 			// Distance from us, plus half the distance from our fleet, so a fleet tends to engage together.
-			Vec3 home = sim.fleetCentre(s.owner);
+			Vec3 home = sim.mobileCentre(s.owner);
 			float d = o.pos.distance(s.pos) + (home != null ? 0.5f * o.pos.distance(home) : 0f);
 			if (o == target) d *= 0.75f;
 			if (o == s.lastHitBy) d *= 0.8f;
@@ -815,7 +836,11 @@ public final class ShipAI3D {
 			if (o.fighter && !s.fighter) continue; // ships don't swerve for fighters
 			Vec3 away = tC.set(s.pos).sub(o.pos);
 			float d = away.length();
-			float clear = (s.radius + o.radius) * 1.6f;
+			// A station section or core doesn't move: keep clear of its real shape plus our own size
+			// (its collision circle can be far bigger than the hull, and at station scale a margin
+			// proportional to it would keep us out of gun range).
+			float clear = !o.fixedPart() ? (s.radius + o.radius) * 1.6f
+					: (d > 1e-3f ? o.reachToward(tE.set(away).scale(1f / d)) : o.radius) + s.radius * 1.6f + 80f;
 			if (d >= clear || d < 1e-3f) continue;
 			float k = (clear - d) / clear;
 			push.addScaled(away.scale(1f / d), k * 2.5f);

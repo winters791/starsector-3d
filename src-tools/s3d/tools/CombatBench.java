@@ -1651,7 +1651,7 @@ public final class CombatBench {
 		core.sizeClass = "station";
 		core.anchored = true;
 		core.invulnerable = true;
-		core.spinRate = (float) Math.toRadians(2f);
+		core.spinRate = (float) Math.toRadians(t.stationSpinDeg);
 		core.ai = new s3d.core.ShipAI3D(500 + owner);
 		return withModules(game, hulls, t, core, variantId, owner);
 	}
@@ -1691,7 +1691,8 @@ public final class CombatBench {
 	/**
 	 * Station assault: four attackers against an orbital station. The core never takes damage and is
 	 * never targeted; modules fire back, take the damage and die; modules stay rigidly in place as
-	 * the station turns; nobody flies through the structure; the station doesn't get pushed.
+	 * the station turns; nobody touches the structure (real hull shapes, not bounding spheres: at
+	 * station scale those are far bigger than the hulls); the station doesn't get pushed.
 	 */
 	static void stationAssault(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
 		if (!hulls.containsKey("station1")) {
@@ -1722,8 +1723,8 @@ public final class CombatBench {
 		}
 		Vec3 fwd0 = core.rot.forward(new Vec3());
 		s3d.core.PilotInput in = screen();
-		float maxDrift = 0f, minClear = Float.MAX_VALUE;
-		int coreTargeted = 0, frames = 0, stationShots = 0, overloads = 0;
+		float maxDrift = 0f, minGap = Float.MAX_VALUE;
+		int coreTargeted = 0, frames = 0, stationShots = 0, overloads = 0, contactFrames = 0;
 		float modulesDeadAt = -1f, peakFlux = 0f;
 		java.util.Map<Ship3D, Boolean> wasOver = new java.util.HashMap<>();
 		for (float time = 0; time < 300f && modulesDeadAt < 0f; time += DT) {
@@ -1739,7 +1740,10 @@ public final class CombatBench {
 			for (Ship3D a : attackers) {
 				if (a.destroyed) continue;
 				if (a.ai.target == core) coreTargeted++;
-				for (Ship3D p : st) minClear = Math.min(minClear, a.pos.distance(p.pos) / (a.radius + p.radius));
+				for (Ship3D p : st) {
+					minGap = Math.min(minGap, p.surfaceDistance(a.pos) - a.radius);
+					if (a.pos.distance(p.pos) < a.radius + p.radius && touching(a, p)) contactFrames++;
+				}
 			}
 			boolean allDead = true;
 			for (int i = 1; i < st.size(); i++) if (!st.get(i).destroyed) allDead = false;
@@ -1752,11 +1756,24 @@ public final class CombatBench {
 		float attackerDamage = 0f;
 		for (Ship3D a : attackers) attackerDamage += damageTaken(a);
 		boolean ok = core.hull == core.hullMax && !core.destroyed && coreTargeted == 0 && maxDrift < 0.5f
-				&& core.pos.distance(corePos0) < 0.01f && modulesDead == st.size() - 1 && attackerDamage > 500f && minClear > 0.35f;
+				&& core.pos.distance(corePos0) < 0.01f && modulesDead == st.size() - 1 && attackerDamage > 500f && contactFrames == 0;
 		check("station assault", ok, String.format("%d modules, all destroyed at %.0fs (%d/%d), core hull %.0f/%.0f, core targeted %d frames, "
-				+ "module drift %.2f, core moved %.2f, turned %.0f deg, attackers lost %d, damage to attackers %.0f (station shots %d, attacker peak flux %.0f%%, %d overloads), closest approach %.2f radii",
+				+ "module drift %.2f, core moved %.2f, turned %.0f deg, attackers lost %d, damage to attackers %.0f (station shots %d, attacker peak flux %.0f%%, %d overloads), "
+				+ "hull contact %d frames, closest %.0f from a hull",
 				st.size() - 1, modulesDeadAt, modulesDead, st.size() - 1, core.hull, core.hullMax, coreTargeted, maxDrift,
-				core.pos.distance(corePos0), turned, lost, attackerDamage, stationShots, peakFlux * 100f, overloads, minClear));
+				core.pos.distance(corePos0), turned, lost, attackerDamage, stationShots, peakFlux * 100f, overloads, contactFrames, minGap));
+	}
+
+	/** Any of a's collision sample points inside b's real hull. */
+	static boolean touching(Ship3D a, Ship3D b) {
+		float[] pts = a.volume.collisionSamples();
+		Vec3 p = new Vec3();
+		for (int k = 0; k < pts.length; k += 3) {
+			a.rot.rotate(pts[k] * a.scale, pts[k + 1] * a.scale, pts[k + 2] * a.scale, p).add(a.pos).sub(b.pos);
+			b.rot.inverseRotate(p, p).scale(1f / b.scale);
+			if (b.volume.contains(p.x, p.y, p.z)) return true;
+		}
+		return false;
 	}
 
 	/**

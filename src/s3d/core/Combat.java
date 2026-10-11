@@ -140,10 +140,18 @@ public final class Combat {
 
 	/** True if a world point lies inside the mount's firing cone and within its range (sphere around the mount). */
 	public static boolean canReach(Ship3D s, WeaponMount m, Vec3 point, Tuning t) {
+		return canReach(s, m, point, 0f, t);
+	}
+
+	/**
+	 * As above, with the point allowed `nearer` beyond the range: aiming at a big structure's
+	 * centre, the shot meets its near side that much sooner.
+	 */
+	public static boolean canReach(Ship3D s, WeaponMount m, Vec3 point, float nearer, Tuning t) {
 		Vec3 mw = m.worldPos(s, new Vec3());
 		Vec3 d = new Vec3(point).sub(mw);
 		float dist = d.length();
-		if (dist > m.spec.range * t.weaponRangeMult) return false;
+		if (dist - nearer > m.spec.range * t.weaponRangeMult) return false;
 		if (dist < 1e-3f) return true;
 		if (m.spec.kind == WeaponSpec3D.Kind.MISSILE && m.spec.guided) return true; // launched along the barrel, then steer
 		s.rot.inverseRotate(d, d).scale(1f / dist);

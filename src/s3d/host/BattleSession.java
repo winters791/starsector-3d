@@ -75,6 +75,8 @@ final class BattleSession extends Session3D {
 	private final Map<ShipAPI, Float> killPending = new IdentityHashMap<>();
 	/** Invulnerable station cores whose sections are all gone; time the last one died. */
 	private final Map<ShipAPI, Float> strippedSince = new IdentityHashMap<>();
+	/** Twins made this frame, placed once their whole structure is in: stations, then free ships. */
+	private final List<Ship3D> newStations = new ArrayList<>(), newShips = new ArrayList<>();
 
 	private final float mapW, mapH, scale, edgeZ;
 	private int deployed, graves, parkedCount, launches, landings, fighterLosses;
@@ -156,6 +158,7 @@ final class BattleSession extends Session3D {
 				else if (!ship.isFighter() || !mirrorFighter(ship)) parked.put(ship, parkingSpot(ship));
 			}
 		}
+		settleNewcomers();
 		for (Map.Entry<ShipAPI, Ship3D> e : new ArrayList<>(twins.entrySet())) {
 			ShipAPI ship = e.getKey();
 			if (finished.contains(ship)) continue;
@@ -214,6 +217,7 @@ final class BattleSession extends Session3D {
 				s.pos.x += (tries % 2 == 0 ? 1f : -1f) * (tries + 1) * s.radius * 2.2f;
 			}
 			if (side < 0f) s.rot.setAxisAngle(0f, 1f, 0f, (float) Math.PI);
+			newShips.add(s);
 			s.ai = new ShipAI3D(n);
 			s.ai.homeDir.set(0f, 0f, side);
 			s.ai.profile(s, cfg.tuning);
@@ -251,6 +255,7 @@ final class BattleSession extends Session3D {
 			s.ai = new ShipAI3D(n);
 			s.ai.homeDir.set(0f, 0f, s.owner == 0 ? 1f : -1f);
 			twins.put(ship, s);
+			newStations.add(s);
 			log.info(String.format("S3D: station %s (%s) in 3D at (%.0f, %.0f, %.0f), radius %.0f, %s, %s, %d weapons on the core",
 					s.name, s.hullName, s.pos.x, s.pos.y, s.pos.z, s.radius, s.invulnerable ? "core invulnerable (Vast Bulk)" : "core can be damaged",
 					spins ? "turning " + cfg.tuning.stationSpinDeg + " deg/s" : "not turning", s.weapons.size()));
@@ -292,6 +297,48 @@ final class BattleSession extends Session3D {
 			log.error("S3D: could not mirror module " + ship.getHullSpec().getHullId() + " of " + parentShip.getName() + "; it stays a puppet", t);
 			return false;
 		}
+	}
+
+	/**
+	 * Once this frame's twins are all in (a station's sections included): a station that would poke
+	 * out of the battle area is moved in until all of it fits (at station scale it can be thousands
+	 * of units across; the command map keeps showing it where vanilla has it), and a ship that
+	 * arrived inside or against a station is moved out beside it.
+	 */
+	private void settleNewcomers() {
+		for (Ship3D core : newStations) {
+			if (core.destroyed || !sim.ships.contains(core)) continue;
+			float ext = sim.structureExtent(core);
+			float hx = sim.arenaHalfX * 0.8f - ext, hz = sim.arenaHalfZ * 0.8f - ext;
+			float x = hx > 0f ? Math.max(-hx, Math.min(hx, core.pos.x)) : 0f;
+			float z = hz > 0f ? Math.max(-hz, Math.min(hz, core.pos.z)) : 0f;
+			if (Math.abs(x - core.pos.x) + Math.abs(z - core.pos.z) > 1f) {
+				log.info(String.format("S3D: station %s reaches %.0f from its centre; moved from (%.0f, %.0f) to (%.0f, %.0f) so all of it is inside the battle area",
+						core.name, ext, core.pos.x, core.pos.z, x, z));
+				core.pos.x = x;
+				core.pos.z = z;
+				for (Ship3D m : sim.ships) if (m.parent != null && m.root() == core) s3d.core.Sim.attach(m);
+			}
+		}
+		newStations.clear();
+		for (Ship3D s : newShips) {
+			if (s.destroyed || !sim.ships.contains(s)) continue;
+			for (Ship3D o : sim.ships) {
+				if (!o.anchored || o.destroyed) continue;
+				float need = sim.structureExtent(o) + s.radius * 2f + 200f;
+				float dx = s.pos.x - o.pos.x, dz = s.pos.z - o.pos.z, d = (float) Math.hypot(dx, dz);
+				if (d >= need) continue;
+				if (d < 1f) {
+					dx = 0f;
+					dz = s.owner == 0 ? 1f : -1f;
+					d = 1f;
+				}
+				s.pos.x = o.pos.x + dx / d * need;
+				s.pos.z = o.pos.z + dz / d * need;
+				log.info(String.format("S3D: %s arrived inside station %s; moved out to (%.0f, %.0f, %.0f)", s.name, o.name, s.pos.x, s.pos.y, s.pos.z));
+			}
+		}
+		newShips.clear();
 	}
 
 	/** A fighter whose carrier is alive but hasn't got its 3D twin yet (it will, this frame or next). */

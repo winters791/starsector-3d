@@ -85,6 +85,49 @@ public final class HullVolume {
 		return samples;
 	}
 
+	private static final int REACH_BINS = 32;
+	private float[] reach;
+	private float extent;
+
+	/**
+	 * How far the solid shape reaches from the centre toward local direction (x, z) (unscaled; the
+	 * direction needn't be unit): the furthest solid cell in that 1/32 of a turn, or its neighbours.
+	 */
+	public float reachToward(float x, float z) {
+		if (reach == null) buildReach();
+		double a = Math.atan2(x, z);
+		int bin = (int) Math.floor((a + Math.PI) / (2 * Math.PI) * REACH_BINS);
+		return reach[Math.max(0, Math.min(REACH_BINS - 1, bin))];
+	}
+
+	/** Furthest solid point from the centre in the horizontal plane (unscaled). */
+	public float extent() {
+		if (reach == null) buildReach();
+		return extent;
+	}
+
+	private void buildReach() {
+		float[] raw = new float[REACH_BINS];
+		float ext = 0f;
+		for (int gz = 0; gz < nz; gz++) {
+			for (int gx = 0; gx < nx; gx++) {
+				if (sdf[gz * nx + gx] <= 0f) continue;
+				float x = originX + gx * cell, z = originZ + gz * cell;
+				float r = (float) Math.hypot(x, z) + cell * 0.5f;
+				int bin = (int) Math.floor((Math.atan2(x, z) + Math.PI) / (2 * Math.PI) * REACH_BINS);
+				bin = Math.max(0, Math.min(REACH_BINS - 1, bin));
+				raw[bin] = Math.max(raw[bin], r);
+				ext = Math.max(ext, r);
+			}
+		}
+		float[] out = new float[REACH_BINS];
+		for (int i = 0; i < REACH_BINS; i++) {
+			out[i] = Math.max(raw[i], Math.max(raw[(i + 1) % REACH_BINS], raw[(i + REACH_BINS - 1) % REACH_BINS]));
+		}
+		extent = ext;
+		reach = out;
+	}
+
 	/** Top-surface height at (x, z), or 0 outside the silhouette. Used to seat turrets on the hull. */
 	public float topAt(float x, float z) {
 		float gx = (x - originX) / cell, gz = (z - originZ) / cell;
