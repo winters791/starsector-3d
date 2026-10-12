@@ -18,8 +18,8 @@ import s3d.math.Vec3;
 
 /**
  * 2D overlay in screen pixels: mouse reticle, nose (boresight) and velocity markers, throttle,
- * target brackets, off-screen arrows, battlefield minimap, attitude ball, hull/armor/flux panels,
- * status text and help.
+ * target brackets, off-screen arrows, battlefield minimap, attitude ball, hull/armor/flux panels
+ * and status text.
  *
  * To keep fleet fights readable, full brackets only go on ships that matter right now (your
  * target, enemies within your gun range, ships that hit you in the last few seconds); others get
@@ -34,18 +34,8 @@ public final class HudRenderer {
 		public final List<String> alerts = new ArrayList<>();
 		/** Performance readout, under the minimap. */
 		public final List<String> perf = new ArrayList<>();
-		/** Key that toggles your fighter wings, for the weapon panel. */
-		public String wingsKey = "Z";
-		/** Key names for on-screen hints (action -> display name), filled by the host. */
-		public final java.util.Map<String, String> keyNames = new java.util.HashMap<>();
-
-		String keyHint(String action) {
-			return keyNames.getOrDefault(action, "?");
-		}
 		public String toast;
 		public float toastAlpha;
-		public boolean showHelp;
-		public String[] helpLines = new String[0];
 	}
 
 	private static final float[] CYAN = {0.55f, 0.9f, 1f};
@@ -54,8 +44,16 @@ public final class HudRenderer {
 	private static final float[] AMBER = {1f, 0.8f, 0.35f};
 	private static final float[] GRAY = {0.55f, 0.58f, 0.62f};
 	private static final float[] SHIELD = {0.55f, 0.8f, 1f};
-	private static final float[] FLUX_SOFT = {0.75f, 0.6f, 1f};
-	private static final float[] FLUX_HARD = {0.5f, 0.3f, 0.95f};
+	private static final float[] FLUX_SOFT = {0.62f, 0.7f, 1f};
+	private static final float[] FLUX_HARD = {0.42f, 0.38f, 1f};
+	/** Gun pippers: red-orange, apart from the green / amber lead circle. */
+	private static final float[] PIPPER = {1f, 0.42f, 0.18f};
+	/** Your ship panel: the target hologram's cyan, bright for what's selected or up, dim for what's off. */
+	private static final float[] HOLO = {0.45f, 0.85f, 1f};
+	private static final float[] HOLO_HI = {0.8f, 0.97f, 1f};
+	private static final float[] HOLO_DIM = {0.32f, 0.58f, 0.78f};
+	/** Your ship panel's divider: pixels right per pixel up, as vanilla's slants. */
+	private static final float PANEL_SLANT = 0.4f;
 	/** A ship that damaged you within this many seconds counts as an attacker (bracket + arrow). */
 	private static final float ATTACKER_MEMORY = 5f;
 
@@ -96,6 +94,7 @@ public final class HudRenderer {
 			GL11.glVertex2f(14f, h - 14f);
 			GL11.glEnd();
 		}
+		if (p != null && !sim.spectating) drawShipPanel(sim, texts, bars); // its own backdrop and lines, under the rest
 		GL11.glBegin(GL11.GL_LINES);
 		if (p != null) {
 			drawTargets(sim, w, h, texts);
@@ -106,11 +105,9 @@ public final class HudRenderer {
 				drawLead(sim, w, h, texts);
 			}
 			drawThrottle(sim, w, h, texts);
-			drawAttitude(p, w - 95f, 95f, 60f, texts);
+			drawAttitude(p, w - 95f, 95f, 60f);
 			if (mapSize > 0f) drawMinimap(sim, 14f, h - 14f - mapSize, mapSize, w / (float) h, texts);
 			if (!sim.spectating) drawTargetPanel(sim, sim.aimTarget, w, h, texts, bars); // spectating: no target display
-			if (!sim.spectating) drawWeaponPanel(sim, info, texts, bars);
-			else drawSpectateBanner(sim, info, w, texts);
 			drawWarnings(sim, w, h, texts);
 			drawIncoming(sim, w, h, texts);
 		}
@@ -131,6 +128,7 @@ public final class HudRenderer {
 		// Status line
 		StringBuilder status = new StringBuilder();
 		if (sim.paused) status.append("PAUSED   ");
+		if (sim.spectating) status.append("SPECTATING   ");
 		if (sim.worldTimeScale < 0.99f) status.append(String.format("TIME x%.1f   ", 1f / sim.worldTimeScale));
 		if (sim.controls.autoLevel) status.append("AUTO-LEVEL   ");
 		if (sim.camera.tactical) status.append("TACTICAL   ");
@@ -150,7 +148,6 @@ public final class HudRenderer {
 		if (info.toast != null && info.toastAlpha > 0f) {
 			texts.add(new Text(info.toast, cx, cy + h * 0.28f, AMBER, info.toastAlpha, true));
 		}
-		if (info.showHelp) drawHelp(info.helpLines, w, h, texts);
 
 		drawTexts(texts);
 		GL11.glDisable(GL11.GL_BLEND);
@@ -243,7 +240,7 @@ public final class HudRenderer {
 	}
 
 	/** Attitude ball: horizon line tilts with roll and slides with pitch. */
-	private void drawAttitude(Ship3D p, float cx, float cy, float r, List<Text> texts) {
+	private void drawAttitude(Ship3D p, float cx, float cy, float r) {
 		Vec3 f = p.rot.forward(new Vec3()), right = p.rot.right(new Vec3()), up = p.rot.up(new Vec3());
 		float pitch = (float) Math.asin(Math.max(-1f, Math.min(1f, f.y)));
 		float roll = (float) Math.atan2(right.y, up.y);
@@ -262,7 +259,6 @@ public final class HudRenderer {
 		line(cx - 22f, cy, cx - 8f, cy);
 		line(cx + 8f, cy, cx + 22f, cy);
 		circle(cx, cy, 3f, 8);
-		texts.add(new Text(String.format("P%+4.0f R%+4.0f", Math.toDegrees(pitch), Math.toDegrees(roll)), cx, cy - r - 8f, CYAN, 0.8f, true));
 	}
 
 	// ---- targets ---------------------------------------------------------------------------
@@ -292,8 +288,7 @@ public final class HudRenderer {
 			boolean isTarget = s == sim.target;
 			boolean isAim = s == sim.aimTarget;
 			float[] col = s.destroyed ? GRAY : isAim ? AMBER : s.owner == p.owner ? GREEN : RED;
-			String label = isTarget ? "LOCKED  " + s.name + "  " + formatDist(dist)
-					: isAim ? s.name + "  " + formatDist(dist) : null; // names only on what you're aiming at
+			String label = isTarget || isAim ? s.name + "  " + formatDist(dist) : null; // names only on what you're aiming at
 			boolean attacker = s.owner != p.owner && sim.time - s.lastHitPlayerAt < ATTACKER_MEMORY;
 			boolean relevant = isTarget || isAim || attacker || s.owner != p.owner && dist <= reach;
 			if (attacker && !isAim) col = RED;
@@ -481,7 +476,7 @@ public final class HudRenderer {
 			float[] q = project(sim, pt.x, pt.y, pt.z, w, h);
 			if (q == null) continue;
 			boolean ready = m.readiness() >= 1f;
-			color(GREEN, ready ? 1f : 0.45f);
+			color(PIPPER, ready ? 1f : 0.45f);
 			line(q[0] - 5f, q[1], q[0] - 1.5f, q[1]);
 			line(q[0] + 1.5f, q[1], q[0] + 5f, q[1]);
 			line(q[0], q[1] - 5f, q[0], q[1] - 1.5f);
@@ -610,11 +605,7 @@ public final class HudRenderer {
 		color(CYAN, 0.18f);
 		line(x0, boxTop, x1, boxTop);
 		line(x0, boxTop - boxH, x1, boxTop - boxH);
-		holoShip = t;
-		holoX = x0 + 4f;
-		holoY = boxTop - boxH + 4f;
-		holoW = pw - 8f;
-		holoH = boxH - 8f;
+		targetHolo.set(t, x0 + 4f, boxTop - boxH + 4f, pw - 8f, boxH - 8f);
 
 		float y = boxTop - boxH - 8f;
 		float hullFrac = t.hullMax > 0f ? t.hull / t.hullMax : 0f;
@@ -630,9 +621,28 @@ public final class HudRenderer {
 		}
 	}
 
-	/** Hologram request for the renderer (the target and its box in screen pixels), set by drawTargetPanel. */
-	Ship3D holoShip;
-	float holoX, holoY, holoW, holoH;
+	/** A hologram for the renderer to draw after the HUD: the ship and its box in screen pixels. */
+	static final class Holo {
+		Ship3D ship;
+		float x, y, w, h;
+		/** Nose to the top of the box, swaying (your ship) instead of turning (the target). */
+		final boolean noseUp;
+
+		Holo(boolean noseUp) {
+			this.noseUp = noseUp;
+		}
+
+		void set(Ship3D ship, float x, float y, float w, float h) {
+			this.ship = ship;
+			this.x = x;
+			this.y = y;
+			this.w = w;
+			this.h = h;
+		}
+	}
+
+	/** Set by the panels each frame; Renderer3D.renderHud draws and clears them. */
+	final Holo ownHolo = new Holo(true), targetHolo = new Holo(false);
 
 	/** Flux bar: soft flux in light violet with the hard part in deep violet at the start. */
 	private static void fluxBar(List<float[]> bars, float x0, float y, float x1, float hgt, s3d.core.ShieldFlux f) {
@@ -651,87 +661,291 @@ public final class HudRenderer {
 		return f.shieldOn ? "SHIELD UP" : "SHIELD DOWN";
 	}
 
-	private void drawWeaponPanel(Sim sim, Info info, List<Text> texts, List<float[]> bars) {
+	// ---- your ship panel -------------------------------------------------------------------
+
+	/**
+	 * Your ship, bottom left, laid out like vanilla's ship panel in the target display's hologram
+	 * style: your hull as a hologram (nose up, a little smaller than the target's) over its name,
+	 * class and variant; a slanted divider; flux and hull bars, ship state and system above a rule;
+	 * the weapon groups under it, stepping left along the divider (number, mount icon, weapons,
+	 * LINKED / ALTERNATING, readiness, damage type, AUTOFIRE box, ammo). Draws its own backdrop
+	 * and lines before the main line pass, so the rest of the HUD sits on top.
+	 */
+	private void drawShipPanel(Sim sim, List<Text> texts, List<float[]> bars) {
 		Ship3D p = sim.player;
-		float k = 0.75f, lh = lineH() * k;
-		float x = 14f, y = 26f + p.groups.size() * lh;
+		float k = 0.8f, lh = lineH() * k, adv = textW("x") * k;
+		float m = 14f;
+
+		// Left column: the hologram over name, class and variant.
+		float holoW = 160f, holoH = 148f, holoY = m + lh * 3f + 8f;
+		ownHolo.set(p, m, holoY, holoW, holoH);
+		texts.add(new Text(caps(p.name, 24), m + 2f, m + lh * 3f, HOLO_HI, 0.95f, false, k));
+		texts.add(new Text(caps(p.hullName, 24), m + 2f, m + lh * 2f, HOLO, 0.8f, false, k));
+		if (p.variantName != null) texts.add(new Text(caps(p.variantName, 24), m + 2f, m + lh, HOLO, 0.6f, false, k));
+
+		// Divider from the bottom edge up to the rule; groups below the rule, ship status above it.
+		int rows = Math.max(1, p.groups.size());
+		float rowH = lh * 2f + 4f, headH = lh * 1.4f;
+		float ruleY = m + rows * rowH + headH;
+		float slant0 = m + holoW + 12f; // divider x at the bottom edge
+		float ruleX = slant0 + PANEL_SLANT * ruleY, right = ruleX + 400f;
+
+		// Status lines, top to bottom: extras, FLUX, HULL, SYSTEM, PHASE.
 		int wingsUp = 0;
 		for (Ship3D s : sim.ships) if (s.fighter && s.carrier == p && !s.destroyed) wingsUp++;
-		float extra = 2.2f;
-		if (wingsUp > 0 || p.wingsRegroup) {
-			texts.add(new Text(String.format("WINGS  %s  (%d out)  [%s]", p.wingsRegroup ? "REGROUP" : "ENGAGE", wingsUp, info.wingsKey),
-					x, y + lh * extra, p.wingsRegroup ? AMBER : GREEN, 0.8f, false, k));
-			extra += 1f;
+		int fragNeed = 0;
+		if (p.fragments != null) for (WeaponMount wm : p.weapons) fragNeed = Math.max(fragNeed, wm.spec.fragmentsNeeded);
+		float slowed = sim.combat.exotic.slowedRepairsLeft(p);
+		boolean wings = wingsUp > 0 || p.wingsRegroup;
+		int lines = 1 + (p.flux != null && p.flux.maxFlux > 0f ? 1 : 0) + (p.system != null ? 1 : 0) + (p.cloak != null ? 1 : 0)
+				+ (wings ? 1 : 0) + (p.fragments != null ? 1 : 0) + (slowed > 0f ? 1 : 0);
+		float step = lh * 1.15f, top = ruleY + 5f + lines * step;
+
+		// Backdrop: darker at the bottom edge, fading upward (the hologram is additive and needs it).
+		GL11.glBegin(GL11.GL_QUADS);
+		shade(m - 6f, 0f, m + holoW + 4f, 0f, m + holoW + 4f, holoY + holoH + 4f, m - 6f, holoY + holoH + 4f, top);
+		shade(slant0, 0f, right, 0f, right, ruleY, ruleX, ruleY, top);
+		shade(ruleX, ruleY, right, ruleY, right, top, ruleX, top, top);
+		if (p.selectedGroup >= 0 && p.selectedGroup < p.groups.size()) { // selected group: a band along the divider
+			float yt = ruleY - headH - p.selectedGroup * rowH + 1f, yb = yt - rowH + 2f;
+			GL11.glColor4f(HOLO[0], HOLO[1], HOLO[2], 0.1f);
+			GL11.glVertex2f(slant0 + PANEL_SLANT * yb + 3f, yb);
+			GL11.glVertex2f(right - 6f, yb);
+			GL11.glVertex2f(right - 6f, yt);
+			GL11.glVertex2f(slant0 + PANEL_SLANT * yt + 3f, yt);
 		}
+		GL11.glEnd();
+
+		GL11.glBegin(GL11.GL_LINES);
+		color(HOLO, 0.55f);
+		line(slant0, 0f, ruleX, ruleY);
+		line(ruleX, ruleY, right, ruleY);
+		line(right, ruleY - 4f, right, ruleY + 4f);
+		color(HOLO, 0.45f);
+		float c = 10f, hx1 = m + holoW, hy1 = holoY + holoH;
+		corner(m, holoY, c, c);
+		corner(hx1, holoY, -c, c);
+		corner(m, hy1, c, -c);
+		corner(hx1, hy1, -c, -c);
+
+		float sx = ruleX + 4f;
+		float barX0 = sx + adv * 6f, barX1 = barX0 + 130f, valX = barX1 + 8f, stateX = valX + adv * 7f + 4f;
+		float y = top;
+		if (wings) {
+			texts.add(new Text(String.format("WINGS  %s  (%d OUT)", p.wingsRegroup ? "REGROUP" : "ENGAGE", wingsUp),
+					sx, y, p.wingsRegroup ? AMBER : HOLO, 0.85f, false, k));
+			y -= step;
+		}
+		if (p.fragments != null) { // Threat fragment swarm: what fragment weapons draw on
+			int have = p.fragments.active();
+			texts.add(new Text(String.format("FRAGMENTS  %d / %d", have, p.fragments.size), sx, y, have < fragNeed ? RED : HOLO, 0.85f, false, k));
+			y -= step;
+		}
+		if (slowed > 0f) {
+			texts.add(new Text(String.format("REALITY DISRUPTED  slower repairs %.0f s", Math.max(1f, slowed)).toUpperCase(java.util.Locale.ROOT),
+					sx, y, AMBER, 0.85f, false, k));
+			y -= step;
+		}
+		float barY = lh * 0.72f;
+		if (p.flux != null && p.flux.maxFlux > 0f) {
+			texts.add(new Text("FLUX", sx, y, HOLO, 0.9f, false, k));
+			barTicks(barX0, barX1, y - barY, 7f);
+			fluxBar(bars, barX0, y - barY, barX1, 7f, p.flux);
+			texts.add(new Text(String.format("%.0f", p.flux.flux), valX, y, HOLO, 0.9f, false, k));
+			if (p.flux.zeroFluxBoostActive() && !p.destroyed) texts.add(new Text("0-FLUX BOOST", stateX, y, HOLO_HI, 0.85f, false, k));
+			y -= step;
+		}
+		float hullFrac = p.hullMax > 0f ? Math.max(0f, Math.min(1f, p.hull / p.hullMax)) : 0f;
+		texts.add(new Text("HULL", sx, y, HOLO, 0.9f, false, k));
+		barTicks(barX0, barX1, y - barY, 7f);
+		bar(bars, barX0, y - barY, barX1, 7f, hullFrac, hullFrac > 0.5f ? HOLO : hullFrac > 0.25f ? AMBER : RED);
+		texts.add(new Text(String.format("%.0f", Math.max(0f, p.hull)), valX, y, HOLO, 0.9f, false, k));
+		String state = null;
+		float[] stateCol = HOLO;
+		if (p.destroyed) {
+			state = "DESTROYED";
+			stateCol = RED;
+		} else if (p.flux != null && p.flux.overloaded()) {
+			state = String.format("OVERLOADED %.1fs", p.flux.overloadLeft);
+			stateCol = RED;
+		} else if (p.flux != null && p.flux.venting) {
+			state = "VENTING FLUX";
+			stateCol = SHIELD;
+		} else if (p.phased) {
+			state = "PHASED";
+			stateCol = AMBER;
+		} else if (p.flux != null && p.flux.hasShield()) {
+			state = p.flux.shieldOn ? "SHIELDS UP" : "SHIELDS DOWN";
+			stateCol = p.flux.shieldOn ? HOLO_HI : HOLO_DIM;
+		}
+		if (state != null) texts.add(new Text(state, stateX, y, stateCol, 0.9f, false, k));
+		y -= step;
 		for (s3d.core.ShipSystem3D sys : new s3d.core.ShipSystem3D[] {p.system, p.cloak}) {
 			if (sys == null) continue;
-			String key = sys == p.cloak ? "RMB" : info.keyHint("system");
-			String line;
-			float[] col;
 			if (!sys.supported()) {
-				line = String.format("SYSTEM  %s  (not in 3D yet)", sys.name);
-				col = GRAY;
+				texts.add(new Text(caps(sys.name, 26), sx, y, GRAY, 0.8f, false, k));
+				texts.add(new Text("NOT IN 3D YET", stateX, y, GRAY, 0.8f, false, k));
 			} else {
-				String charges = sys.maxAmmo > 0 ? String.format("  %d/%d", (int) sys.ammo, sys.maxAmmo) : "";
-				line = String.format("%s  %s  %s%s  [%s]", sys == p.cloak ? "PHASE" : "SYSTEM", sys.name, sys.status(), charges, key);
-				col = sys.on() ? AMBER : sys.ready(p) ? GREEN : CYAN;
+				boolean ready = sys.ready(p);
+				float[] col = sys.on() ? AMBER : ready ? HOLO_HI : HOLO;
+				texts.add(new Text(caps(sys.name, 26), sx, y, col, 0.95f, false, k));
+				if (sys.maxAmmo > 0) texts.add(new Text(String.valueOf((int) sys.ammo), valX, y, sys.ammo >= 1f ? HOLO : RED, 0.9f, false, k));
+				color(HOLO, 0.6f);
+				line(stateX, y - lh * 0.9f, stateX, y - lh * 0.1f);
+				bar(bars, stateX + 4f, y - barY, stateX + 40f, 5f, systemFrac(sys), sys.on() ? AMBER : ready ? HOLO_HI : HOLO_DIM);
+				texts.add(new Text(sys.status(), stateX + 46f, y, col, 0.9f, false, k));
 			}
-			texts.add(new Text(line, x, y + lh * extra, col, 0.85f, false, k));
-			extra += 1f;
+			y -= step;
 		}
-		texts.add(new Text("WEAPONS", x, y + lh, CYAN, 0.7f, false, k));
+
+		// Weapon groups.
+		texts.add(new Text("WEAPON GROUPS", slant0 + PANEL_SLANT * (ruleY - 3f) + 6f, ruleY - 3f, HOLO, 0.8f, false, k));
+		if (p.groups.isEmpty()) {
+			float rt = ruleY - headH;
+			texts.add(new Text("NO WEAPONS", slant0 + PANEL_SLANT * rt + 6f, rt, HOLO_DIM, 0.7f, false, k));
+		}
 		for (int i = 0; i < p.groups.size(); i++) {
 			s3d.core.WeaponGroup3D g = p.groups.get(i);
+			float rt = ruleY - headH - i * rowH; // top of the row's first line
+			float rx = slant0 + PANEL_SLANT * rt + 6f; // clear of the divider along the first line
+			float nx = rx + adv * 3f + 12f, cx = nx + adv * 24f, bx = cx + adv * 12.5f;
 			boolean selected = i == p.selectedGroup;
-			String label = g.label();
-			if (label.length() > 20) label = label.substring(0, 20);
-			String mode = g.autofire && !selected ? "A" : selected ? ">" : " ";
-			if (!g.hasWorkingWeapon()) {
-				texts.add(new Text(String.format("%d%s %-20s", i + 1, mode, label), x, y, GRAY, 0.7f, false, k));
-			} else {
-				float r = 1f;
-				int off = 0, working = 0;
-				float back = 0f;
-				for (WeaponMount m : g.mounts) {
-					if (!m.spec.supported) continue;
-					working++;
-					if (m.disabledFor > 0f) {
-						off++;
-						back = Math.max(back, m.disabledFor);
-					} else {
-						r = Math.min(r, m.readiness());
-					}
+			WeaponMount first = null;
+			int off = 0, working = 0, ammo = 0, maxAmmo = 0;
+			float r = 1f, back = 0f;
+			String dmg = null;
+			for (WeaponMount wm : g.mounts) {
+				if (!wm.spec.supported) continue;
+				if (first == null) first = wm;
+				working++;
+				String d = wm.spec.damageType != null ? wm.spec.damageType : "OTHER";
+				dmg = dmg == null || dmg.equals(d) ? d : "MIXED";
+				if (wm.disabledFor > 0f) {
+					off++;
+					back = Math.max(back, wm.disabledFor);
+				} else {
+					r = Math.min(r, wm.readiness());
 				}
-				float[] col = off == working ? RED : selected ? (r >= 1f ? GREEN : AMBER) : CYAN;
-				texts.add(new Text(String.format("%d%s %-20s", i + 1, mode, label), x, y, col, selected ? 1f : 0.75f, false, k));
-				if (off > 0) {
-					String why = off == working ? String.format("OFF %.0fs", back) : off + " OFF";
-					texts.add(new Text(why, x + textW("x") * k * 24f + 92f, y, RED, 0.9f, false, k));
+				if (wm.spec.maxAmmo > 0) {
+					ammo += (int) wm.ammo;
+					maxAmmo += wm.spec.maxAmmo;
 				}
-				float bx = x + textW("x") * k * 24f;
-				bar(bars, bx, y - lh * 0.75f, bx + 40f, 4f, r, r >= 1f ? GREEN : AMBER);
-				int ammo = 0, maxAmmo = 0;
-				for (WeaponMount m : g.mounts) {
-					if (!m.spec.supported || m.spec.maxAmmo <= 0) continue;
-					ammo += (int) m.ammo;
-					maxAmmo += m.spec.maxAmmo;
-				}
-				if (maxAmmo > 0) texts.add(new Text(ammo + "/" + maxAmmo, bx + 46f, y, ammo > 0 ? CYAN : RED, 0.8f, false, k));
 			}
-			y -= lh;
+			float a = selected ? 1f : 0.75f;
+			float[] col = first == null ? GRAY : off == working ? RED : selected ? HOLO_HI : HOLO;
+			texts.add(new Text((i + 1) + ".", rx, rt, col, a, false, k));
+			WeaponMount iconOf = first != null ? first : g.mounts.isEmpty() ? null : g.mounts.get(0);
+			if (iconOf != null) {
+				color(col, 0.9f * a);
+				mountIcon(iconOf.spec.type, iconOf.spec.size, rx + adv * 2.5f + 5f, rt - lh * 0.5f);
+			}
+			texts.add(new Text(caps(groupLabel(g), 22), nx, rt, col, a, false, k));
+			if (first == null) {
+				texts.add(new Text("NOT IN 3D YET", cx, rt, GRAY, 0.7f, false, k));
+				continue;
+			}
+			texts.add(new Text(g.alternating ? "ALTERNATING" : "LINKED", cx, rt, col, 0.85f * a, false, k));
+			texts.add(new Text("DMG: " + dmg.replace('_', ' '), nx + adv * 2f, rt - lh, col, 0.8f * a, false, k));
+			if (off == working) {
+				texts.add(new Text(String.format("OFF %.0fs", back), bx, rt, RED, 0.9f, false, k));
+			} else {
+				bar(bars, bx, rt - barY + 1f, bx + 40f, 5f, r, r >= 1f ? (selected ? HOLO_HI : HOLO) : AMBER);
+				if (off > 0) texts.add(new Text(off + " OFF", bx + 46f, rt, RED, 0.9f, false, k));
+			}
+			boolean auto = g.autofire; // the group's setting; while selected it's still fired by hand
+			texts.add(new Text("AUTOFIRE", cx, rt - lh, auto ? col : HOLO_DIM, (auto ? 0.85f : 0.6f) * a, false, k));
+			float boxX = cx + adv * 9f + 2f, boxY = rt - lh * 1.5f - 3.5f;
+			if (auto) {
+				bars.add(new float[] {boxX, boxY, boxX + 7f, boxY + 7f, col[0], col[1], col[2], 0.9f});
+			} else {
+				color(HOLO_DIM, 0.6f);
+				line(boxX, boxY, boxX + 7f, boxY);
+				line(boxX + 7f, boxY, boxX + 7f, boxY + 7f);
+				line(boxX + 7f, boxY + 7f, boxX, boxY + 7f);
+				line(boxX, boxY + 7f, boxX, boxY);
+			}
+			if (maxAmmo > 0) texts.add(new Text(ammo + "/" + maxAmmo, bx, rt - lh, ammo > 0 ? col : RED, 0.85f * a, false, k));
+		}
+		GL11.glEnd();
+	}
+
+	/** Backdrop quad (counter-clockwise from bottom left), alpha fading from the bottom edge to topY. */
+	private static void shade(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float topY) {
+		float[][] v = {{x0, y0}, {x1, y1}, {x2, y2}, {x3, y3}};
+		for (float[] q : v) {
+			float f = Math.max(0f, Math.min(1f, q[1] / Math.max(1f, topY)));
+			GL11.glColor4f(0.01f, 0.03f, 0.06f, 0.5f - 0.32f * f);
+			GL11.glVertex2f(q[0], q[1]);
 		}
 	}
 
-	/** What you're watching and how to change it. */
-	private void drawSpectateBanner(Sim sim, Info info, int w, List<Text> texts) {
-		Ship3D v = sim.viewer();
-		String what = sim.freeCam ? "FREE CAMERA" : "SPECTATING  " + (v != null ? v.name + "  (" + v.hullName + ")" + (v == sim.player ? "  - your ship, AI-flown" : "") : "");
-		texts.add(new Text(what, w * 0.5f, 74f, CYAN, 0.95f, true));
-		String keys = sim.freeCam
-				? "mouse turns   " + info.keyHint("throttleUp") + "/" + info.keyHint("throttleDown") + " forward/back   " + info.keyHint("strafeLeft") + "/" + info.keyHint("strafeRight")
-						+ " sideways   " + info.keyHint("strafeUp") + "/" + info.keyHint("strafeDown") + " up/down   wheel speed   " + info.keyHint("tactical") + " follow a ship   " + info.keyHint("spectate") + " back to your ship"
-				: info.keyHint("prevHull") + " / " + info.keyHint("nextHull") + " other ships   " + info.keyHint("tactical") + " free camera   hold " + info.keyHint("freeLook") + " look around   " + info.keyHint("spectate") + " back to your ship";
-		texts.add(new Text(keys, w * 0.5f, 56f, CYAN, 0.7f, true, 0.8f));
+	/** Vanilla's bar ends: a bracket at the start and a tick at the end. */
+	private static void barTicks(float x0, float x1, float y, float hgt) {
+		line(x0 - 2f, y - 1f, x0 - 2f, y + hgt + 1f);
+		line(x0 - 2f, y - 1f, x0 + 1f, y - 1f);
+		line(x0 - 2f, y + hgt + 1f, x0 + 1f, y + hgt + 1f);
+		line(x1 + 2f, y - 2f, x1 + 2f, y + hgt + 2f);
+	}
+
+	/** Vanilla's slot shapes, sized by mount: ballistic square, energy circle, missile diamond, else a triangle. */
+	private static void mountIcon(String type, String size, float x, float y) {
+		float r = "LARGE".equals(size) ? 5.5f : "MEDIUM".equals(size) ? 4.5f : 3.5f;
+		switch (type != null ? type : "") {
+			case "BALLISTIC":
+				line(x - r, y - r, x + r, y - r);
+				line(x + r, y - r, x + r, y + r);
+				line(x + r, y + r, x - r, y + r);
+				line(x - r, y + r, x - r, y - r);
+				break;
+			case "ENERGY":
+				circle(x, y, r, 12);
+				break;
+			case "MISSILE":
+				line(x, y + r * 1.25f, x + r * 1.25f, y);
+				line(x + r * 1.25f, y, x, y - r * 1.25f);
+				line(x, y - r * 1.25f, x - r * 1.25f, y);
+				line(x - r * 1.25f, y, x, y + r * 1.25f);
+				break;
+			default:
+				line(x, y + r, x + r, y - r);
+				line(x + r, y - r, x - r, y - r);
+				line(x - r, y - r, x, y + r);
+		}
+	}
+
+	/** Bar for the system: time left while it runs, progress through cooldown or the next charge, full when ready. */
+	private static float systemFrac(s3d.core.ShipSystem3D sys) {
+		switch (sys.state) {
+			case IN:
+			case OUT:
+				return sys.effect;
+			case ACTIVE:
+				return sys.toggle || sys.active <= 0f ? 1f : 1f - sys.stateTime / sys.active;
+			case COOLDOWN:
+				return sys.cooldown > 0f ? sys.stateTime / sys.cooldown : 1f;
+			default:
+				return sys.maxAmmo > 0 && sys.ammo < 1f ? sys.ammo : 1f;
+		}
+	}
+
+	/** "2X HEAVY MAULER" for the group's first weapon, "+1" for each other kind in it. */
+	private static String groupLabel(s3d.core.WeaponGroup3D g) {
+		String name = null;
+		int count = 0;
+		java.util.Set<String> others = new java.util.HashSet<>();
+		for (WeaponMount wm : g.mounts) {
+			if (name == null) name = wm.spec.name;
+			if (wm.spec.name.equals(name)) count++;
+			else others.add(wm.spec.name);
+		}
+		if (name == null) return "";
+		return count + "x " + name + (others.isEmpty() ? "" : " +" + others.size());
+	}
+
+	private static String caps(String s, int max) {
+		if (s == null) return "";
+		s = s.toUpperCase(java.util.Locale.ROOT);
+		return s.length() > max ? s.substring(0, max) : s;
 	}
 
 	/** Mid-screen warnings about your own ship: overloaded, venting, destroyed. */
@@ -756,15 +970,12 @@ public final class HudRenderer {
 		}
 	}
 
-	/** Enemy missiles nearby: a warning count plus a small red marker on each one. */
+	/** Enemy missiles nearby: a small red marker on each one. */
 	private void drawIncoming(Sim sim, int w, int h, List<Text> texts) {
 		Ship3D p = sim.viewer();
-		int near = 0;
 		for (s3d.core.Missile3D ms : sim.combat.missiles) {
 			if (ms.owner == p.owner || ms.flamedOut()) continue;
-			float d = ms.pos.distance(p.pos);
-			if (d > 3000f) continue;
-			if (ms.target == p && d < 2000f) near++;
+			if (ms.pos.distance(p.pos) > 3000f) continue;
 			float[] s = project(sim, ms.pos.x, ms.pos.y, ms.pos.z, w, h);
 			if (s == null) continue;
 			color(RED, 0.9f);
@@ -774,7 +985,6 @@ public final class HudRenderer {
 			line(s[0], s[1] - k, s[0] - k, s[1]);
 			line(s[0] - k, s[1], s[0], s[1] + k);
 		}
-		if (near > 0) texts.add(new Text("INCOMING MISSILES: " + near, w * 0.5f, h - 14f - lineH() * 4.5f, RED, 1f, true));
 		if (sim.incomingFire) texts.add(new Text("INCOMING FIRE TEST ON (B)", w * 0.5f, 48f, RED, 0.85f, true));
 	}
 
@@ -806,29 +1016,6 @@ public final class HudRenderer {
 
 	private static String formatDist(float d) {
 		return d >= 1000f ? String.format("%.1fk", d / 1000f) : String.format("%.0f", d);
-	}
-
-	// ---- help ------------------------------------------------------------------------------
-
-	private void drawHelp(String[] lines, int w, int h, List<Text> texts) {
-		float lh = lineH();
-		float boxW = 0f;
-		for (String s : lines) boxW = Math.max(boxW, textW(s));
-		boxW += 40f;
-		float boxH = lines.length * lh + 30f;
-		float x0 = (w - boxW) * 0.5f, y1 = (h + boxH) * 0.5f;
-		GL11.glBegin(GL11.GL_QUADS);
-		GL11.glColor4f(0.02f, 0.04f, 0.07f, 0.82f);
-		GL11.glVertex2f(x0, y1 - boxH);
-		GL11.glVertex2f(x0 + boxW, y1 - boxH);
-		GL11.glVertex2f(x0 + boxW, y1);
-		GL11.glVertex2f(x0, y1);
-		GL11.glEnd();
-		float y = y1 - 15f;
-		for (String s : lines) {
-			texts.add(new Text(s, x0 + 20f, y, CYAN, 1f, false));
-			y -= lh;
-		}
 	}
 
 	// ---- primitives ------------------------------------------------------------------------

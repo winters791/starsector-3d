@@ -25,6 +25,19 @@ import s3d.math.Vec3;
  * near it vents. Overloaded or venting, it faces the fight and backs off slowly. Enemies that are
  * overloaded or venting are the preferred targets, and get fired on even at high flux.
  *
+ * Caution (Tuning.aiCaution): ships keep out of enemy guns' reach where they can. Against a target
+ * they outrange they fight from just outside its guns; enemies other than the target that have them
+ * under their guns push them out sideways (and further back when they're round the target); at high
+ * flux they back right out of the target's reach to cool off, and vent once no guns reach them.
+ * Flanking spots, gun runs and targets inside the enemy's crowd count against.
+ *
+ * Opportunism (Tuning.aiOpportunism): a mount whose shot is blocked (a friendly in the way, a missile
+ * not worth it) turns to another enemy it can reach; among enemies in reach it takes the better shot
+ * (helpless, unshielded from where it is, nearly dead); weapons that cost no flux never hold for flux,
+ * and shots that will land on armor are fired at higher flux. Ships pick targets that are hurt,
+ * flux-locked, already in front of their guns or outranged; fighters dogfight enemy fighters at about
+ * their speed instead of flashing past them.
+ *
  * Orders (vanilla's command map, via {@link Order3D}): escorts stay with their ship and fight only
  * what comes near it; HOLD and CAPTURE go to their point and fight only round it (capturers sit
  * inside the capture ring); ATTACK goes after its ship; AVOID keeps out of its area and doesn't
@@ -48,13 +61,48 @@ public final class ShipAI3D {
 	public Axis axis = Axis.NOSE;
 	/** Preferred fighting distance and main weapon range (3D units). */
 	public float engageRange = 800f, weaponRange = 1000f;
+	/** Furthest any of its weapons reaches, missiles included (3D units): where it starts being a danger. */
+	public float maxReach;
+	/**
+	 * Where its forward hardpoints sit (firepower-weighted, local, unscaled; zero if they don't carry much of
+	 * the nose's firepower). A nose ship points these at its target rather than its centre: on big hulls the
+	 * mounts sit tens of units above and beside the centreline, more than a 5 deg hardpoint can make up.
+	 */
+	private final Vec3 hardpointAim = new Vec3(), tG = new Vec3();
 	/** Projectile speed of the main weapons, for leading. */
 	public float leadSpeed = 800f;
+	/** Firepower of its guns (dps, missiles left out): the yardstick for how outgunned it is somewhere. */
+	public float gunDps;
+	/**
+	 * How far out along its gun axis its main guns sit from the centre (firepower-weighted, 3D units):
+	 * a big hull's guns reach that much further than weaponRange, counted from its centre.
+	 */
+	public float mountLead;
+	/** This pilot's caution and opportunism (see Tuning.aiCaution / aiOpportunism); NaN = the tuning's. */
+	public float caution = Float.NaN, opportunism = Float.NaN;
+	/**
+	 * Debug (bench): mount-frames with an enemy in reach; of those, shots allowed, and holds because the
+	 * barrel wasn't on yet, for flux, for a friendly in the way, by missile discipline; then blocked shots
+	 * that found another enemy instead.
+	 */
+	public final int[] fireStats = new int[7];
+	/** Backing out of the target's reach to let flux drain (from 75% flux until it's under 40%). */
+	private boolean coolingOff;
+	/** Caution has set this frame's fighting range: outside the target's guns (it's outranged, or we're cooling off). */
+	private boolean standingOff;
+	/** Running out to the range we want (too slow in reverse), for how long, and off to which side (world). */
+	private boolean opening;
+	private float openTime;
+	private final Vec3 openSide = new Vec3();
+	/** This frame: enemy gun dps that reaches us, from everyone and from all but the target; the way out of the others' reach (world). */
+	private float gunsOnUs, gunsOnUsOthers;
+	private final Vec3 awayDir = new Vec3();
 
 	private final ShipControls c = new ShipControls();
 	private boolean profiled;
 	private float retarget, strafeSign = 1f, phase, quiet;
 	private final Vec3 tA = new Vec3(), tB = new Vec3(), tC = new Vec3(), tD = new Vec3(), tE = new Vec3(), tF = new Vec3();
+	private final Vec3 tH = new Vec3(), tI = new Vec3(), tJ = new Vec3(), tK = new Vec3();
 	private final java.util.Random rng;
 
 	// ---- manoeuvring (ships) ----
@@ -91,24 +139,33 @@ public final class ShipAI3D {
 	public void profile(Ship3D s, Tuning t) {
 		profiled = true;
 		float[] weight = new float[3];
-		float[] rangeSum = new float[3], speedSum = new float[3];
+		float[] rangeSum = new float[3], speedSum = new float[3], leadSum = new float[3];
 		Vec3[] axes = {new Vec3(0, 0, -1), new Vec3(-1, 0, 0), new Vec3(1, 0, 0)};
-		float missileRange = 0f;
+		float missileRange = 0f, hardpointDps = 0f;
+		maxReach = weaponsReach(s, t);
+		gunDps = 0f;
+		hardpointAim.set(0f, 0f, 0f);
 		for (WeaponMount m : s.weapons) {
 			WeaponSpec3D w = m.spec;
-			if (!w.supported || w.pdOnly) continue;
+			if (!w.supported || w.pdOnly || w.flareLauncher) continue; // flares are decoys, not firepower
 			if (w.kind == WeaponSpec3D.Kind.MISSILE) {
 				missileRange = Math.max(missileRange, w.range);
 				continue;
 			}
+			gunDps += dps(w) * (w.pd ? 0.5f : 1f);
 			float dps = dps(w) * (m.hardpoint ? 1.2f : 1f);
 			if (w.pd) dps *= 0.5f; // PD guns help, but don't decide how the ship fights
+			if (m.hardpoint && !w.pd && m.restDir.dot(axes[0]) > 0.985f) { // within 10 deg of the nose
+				hardpointAim.addScaled(m.localPos, dps);
+				hardpointDps += dps;
+			}
 			for (int i = 0; i < 3; i++) {
 				float ang = (float) Math.acos(Math.max(-1f, Math.min(1f, m.restDir.dot(axes[i]))));
 				if (ang > m.halfArcRad + 0.09f) continue;
 				weight[i] += dps;
 				rangeSum[i] += dps * w.range;
 				speedSum[i] += dps * Sim.shotSpeed(w);
+				leadSum[i] += dps * Math.max(0f, m.localPos.dot(axes[i])) * s.scale;
 			}
 		}
 		weight[0] *= 1.15f; // ties go to the nose: easier to fly, and how most hulls are laid out
@@ -117,9 +174,11 @@ public final class ShipAI3D {
 		axis = Axis.values()[best];
 		float raw = weight[best];
 		if (best == 0) raw /= 1.15f;
+		mountLead = 0f;
 		if (raw > 0f) {
 			weaponRange = rangeSum[best] / raw * t.weaponRangeMult;
 			leadSpeed = speedSum[best] / raw;
+			mountLead = leadSum[best] / raw;
 		} else if (missileRange > 0f) {
 			axis = Axis.NOSE;
 			weaponRange = missileRange * t.weaponRangeMult;
@@ -127,13 +186,134 @@ public final class ShipAI3D {
 		} else {
 			weaponRange = 600f * t.weaponRangeMult;
 		}
-		engageRange = Math.max(s.radius * 2.5f, weaponRange * t.aiRangeFrac);
+		engageRange = Math.max(sizeFloor(s), weaponRange * t.aiRangeFrac);
+		if (axis == Axis.NOSE && hardpointDps > 0f && hardpointDps >= 0.3f * weight[0] / 1.15f) hardpointAim.scale(1f / hardpointDps);
+		else hardpointAim.set(0f, 0f, 0f);
+	}
+
+	/** Furthest any of the ship's weapons reaches (3D units); from the AI's profile when it has one. */
+	static float reachOf(Ship3D o, Tuning t) {
+		return o.ai != null && o.ai.profiled ? o.ai.maxReach : weaponsReach(o, t);
+	}
+
+	private static float weaponsReach(Ship3D o, Tuning t) {
+		float r = 0f;
+		for (WeaponMount m : o.weapons) if (m.spec.supported && !m.spec.flareLauncher) r = Math.max(r, m.spec.range);
+		return r * t.weaponRangeMult;
 	}
 
 	static float dps(WeaponSpec3D w) {
 		if (w.kind == WeaponSpec3D.Kind.BEAM) return w.dps;
 		float cycle = Math.max(0.05f, w.cooldown + w.chargeTime + Math.max(0, w.burstSize - 1) * w.burstDelay);
 		return w.damage * Math.max(1, w.burstSize) / cycle;
+	}
+
+	private float cautionOf(Tuning t) {
+		return Float.isNaN(caution) ? t.aiCaution : caution;
+	}
+
+	private float opportunismOf(Tuning t) {
+		return Float.isNaN(opportunism) ? t.aiOpportunism : opportunism;
+	}
+
+	/** Mounts sit off a hull's centre: an enemy's guns count as reaching from this fraction of its radius nearer. */
+	private static final float MOUNT_OFFSET = 0.3f;
+
+	/** Builds o's gun reach table (Ship3D.gunRanges / gunDpsReaching). */
+	private static void gunTable(Ship3D o) {
+		int n = 0;
+		float[] r = new float[o.weapons.size()], d = new float[r.length];
+		for (WeaponMount m : o.weapons) {
+			WeaponSpec3D w = m.spec;
+			if (!w.supported || w.pdOnly || w.flareLauncher || w.kind == WeaponSpec3D.Kind.MISSILE) continue;
+			int i = n++;
+			while (i > 0 && r[i - 1] < w.range) { // insertion sort, longest first
+				r[i] = r[i - 1];
+				d[i] = d[i - 1];
+				i--;
+			}
+			r[i] = w.range;
+			d[i] = dps(w) * (w.pd ? 0.5f : 1f);
+		}
+		for (int i = 1; i < n; i++) d[i] += d[i - 1];
+		o.gunDpsReaching = java.util.Arrays.copyOf(d, n);
+		o.gunRanges = java.util.Arrays.copyOf(r, n);
+	}
+
+	/** Dps of o's guns that reach dist (3D units) from their mounts. */
+	static float gunsReaching(Ship3D o, float dist, Tuning t) {
+		if (o.gunRanges == null) gunTable(o);
+		float dps = 0f;
+		for (int i = 0; i < o.gunRanges.length && o.gunRanges[i] * t.weaponRangeMult >= dist; i++) dps = o.gunDpsReaching[i];
+		return dps;
+	}
+
+	/** Centre-to-centre distance out to which o's longest gun reaches: its range plus how far out from the centre its mounts sit. */
+	static float gunReach(Ship3D o, Tuning t) {
+		if (o.gunRanges == null) gunTable(o);
+		return o.gunRanges.length > 0 ? o.gunRanges[0] * t.weaponRangeMult + o.radius * MOUNT_OFFSET : 0f;
+	}
+
+	/**
+	 * Gun dps enemy o can bring on a ship of ours at world point p, counting its guns as reaching `margin`
+	 * further than they do (to keep clear of the edge). An overloaded or venting enemy's guns count a
+	 * quarter, guns facing away a bit over half (it has to turn first). With awayOut, adds the way out of
+	 * its reach (away from it, weighted by those guns).
+	 */
+	private float gunsOn(Sim sim, Ship3D s, Ship3D o, Vec3 p, float margin, Vec3 awayOut) {
+		if (o.owner == s.owner || o.destroyed || o.fighter || o.weapons.isEmpty()) return 0f;
+		float dx = p.x - o.pos.x, dy = p.y - o.pos.y, dz = p.z - o.pos.z;
+		float dist = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+		float dps = gunsReaching(o, dist - o.radius * MOUNT_OFFSET - margin, sim.tuning);
+		if (dps <= 0f) return 0f;
+		if (o.flux != null && o.flux.disabled()) dps *= 0.25f;
+		if (dist > 1e-3f) {
+			Vec3 axis = o.ai != null && o != sim.player ? o.ai.gunAxisWorld(o, tI) : o.rot.forward(tI);
+			dps *= 0.6f + 0.4f * Math.max(0f, (axis.x * dx + axis.y * dy + axis.z * dz) / dist);
+			if (awayOut != null) awayOut.addScaled(tI.set(dx, dy, dz), dps / dist);
+		}
+		return dps;
+	}
+
+	/** Enemy gun dps reaching world point p from every enemy but `skip` (see gunsOn). */
+	private float exposure(Sim sim, Ship3D s, Vec3 p, Ship3D skip, float margin, Vec3 awayOut) {
+		float total = 0f;
+		for (Ship3D o : sim.ships) if (o != skip) total += gunsOn(sim, s, o, p, margin, awayOut);
+		return total;
+	}
+
+	/** How outgunned a ship of ours would be under `dps` of enemy guns: about 1 = as much as its own guns. */
+	private float outgunned(float dps) {
+		return dps / Math.max(50f, gunDps);
+	}
+
+	/** Who has us under their guns this frame (gunsOnUs, gunsOnUsOthers, awayDir). */
+	private void scanGuns(Sim sim, Ship3D s) {
+		awayDir.set(0f, 0f, 0f);
+		float margin = 60f + s.radius * 0.3f;
+		gunsOnUsOthers = exposure(sim, s, s.pos, target, margin, awayDir);
+		gunsOnUs = gunsOnUsOthers + (target != null ? gunsOn(sim, s, target, s.pos, margin, null) : 0f);
+		float level = s.flux != null ? s.flux.level() : 0f;
+		if (level > 0.75f) coolingOff = true;
+		else if (level < 0.4f) coolingOff = false;
+	}
+
+	/**
+	 * Caution: how hard to get out of the reach of enemies other than the target (0 = none of them has us
+	 * under its guns); the way out is awayDir.
+	 */
+	private float cautionUrge(Tuning t) {
+		float cau = cautionOf(t);
+		if (cau <= 0f || gunsOnUsOthers <= 0f || awayDir.lengthSq() < 1e-6f) return 0f;
+		return cau * Math.min(2f, outgunned(gunsOnUsOthers));
+	}
+
+	/** Strafes along awayDir (so the nose can stay on the target). */
+	private void strafeAway(Ship3D s, float urge) {
+		Vec3 local = s.rot.inverseRotate(tH.set(awayDir).normalize(), tH);
+		float k = Math.min(1f, urge);
+		c.strafeX = FlightModel.clamp(c.strafeX + local.x * k, -1f, 1f);
+		c.strafeY = FlightModel.clamp(c.strafeY + local.y * k * 0.7f, -1f, 1f);
 	}
 
 	/** One frame: pick a target, steer, move and fight. */
@@ -166,6 +346,7 @@ public final class ShipAI3D {
 			retarget = t.aiRetargetTime;
 			target = pickTarget(sim, s);
 		}
+		scanGuns(sim, s);
 		c.clearAxes();
 		c.autoLevel = true;
 		manageFlux(sim, s, dt);
@@ -186,10 +367,15 @@ public final class ShipAI3D {
 			// Overloaded or venting: keep facing the fight and back off slowly while an enemy is close,
 			// rather than running for the map edge.
 			want.set(target.pos).sub(s.pos).normalize();
-			throttle = target.pos.distance(s.pos) < engageRange * 1.2f ? -0.5f : 0f;
+			float backTo = engageRange * 1.2f;
+			boolean careful = cautionOf(t) > 0f && !target.fixedPart();
+			if (careful) backTo = Math.max(backTo, gunReach(target, t) + 60f); // out of its guns, in full reverse
+			throttle = target.pos.distance(s.pos) < backTo ? careful ? -1f : -0.5f : 0f;
 			weave(sim, s, dt);
 			c.strafeX = jinkX;
 			c.strafeY = jinkY;
+			float urge = cautionUrge(t);
+			if (urge > 0f) strafeAway(s, urge);
 		} else {
 			throttle = fightCourse(sim, s, want, dt);
 		}
@@ -332,6 +518,7 @@ public final class ShipAI3D {
 			retarget = sim.tuning.aiRetargetTime;
 			target = pickTarget(sim, s);
 		}
+		scanGuns(sim, s);
 		manageFlux(sim, s, dt);
 		fireWeapons(sim, s, dt);
 	}
@@ -354,15 +541,30 @@ public final class ShipAI3D {
 				float th = passCourse(sim, s, want, toN, dist, engageRange, fluxLevel, dt);
 				if (move == Move.PASS) return th;
 			}
+			if (openRange(s, toN, dist, engageRange, dt)) {
+				want.set(toN).scale(-1f).addScaled(openSide, 0.6f).normalize();
+				c.strafeX = jinkX * 0.5f;
+				c.strafeY = jinkY * 0.5f;
+				return 1f;
+			}
 			Vec3 lead = tD;
 			if (!Combat.interceptCurved(s.pos, s.vel, target.pos, target.vel, target.accel, Math.max(50f, leadSpeed), lead)) lead.set(target.pos);
-			want.set(lead).sub(s.pos).normalize();
+			want.set(lead).sub(s.pos);
+			if (hardpointAim.lengthSq() > 0f) want.sub(s.rot.rotate(hardpointAim.x * s.scale, hardpointAim.y * s.scale, hardpointAim.z * s.scale, tG));
+			want.normalize();
 			// Weave all the time (less on the way in); FLANK adds a slide round the target on top.
 			float k = dist < weaponRange * 1.2f ? 1f : 0.4f;
 			c.strafeX = jinkX * k;
 			c.strafeY = jinkY * k;
 			if (move == Move.FLANK) flank(s, toN);
-			return rangeThrottle(s, toN, dist, engageRange);
+			float urge = cautionUrge(t);
+			if (urge > 0f) {
+				strafeAway(s, urge);
+				// The guns on us are round or past the target: stand further back, still within our own reach.
+				float back = -tH.set(awayDir).normalize().dot(toN);
+				if (back > 0f) engageRange = Math.min(Math.max(engageRange, weaponRange * 0.95f), engageRange * (1f + 0.4f * Math.min(1f, urge) * back));
+			}
+			return rangeThrottle(s, toN, dist, engageRange, standingOff ? -1f : -0.5f);
 		}
 		// Broadside: fly across the line to the target with the gun side facing it, leaning in or
 		// out to hold range. The orbit's plane is tilted per plan and bobs, so it isn't flat.
@@ -374,6 +576,8 @@ public final class ShipAI3D {
 		if (axis == Axis.PORT) across.scale(-1f);
 		float radial = FlightModel.clamp((dist - engageRange) / Math.max(1f, engageRange) * 1.6f, -0.7f, 0.9f);
 		want.set(across).addScaled(toN, radial).addScaled(up, wobble * 0.35f).normalize();
+		float urge = cautionUrge(t);
+		if (urge > 0f) want.addScaled(tH.set(awayDir).normalize(), Math.min(1f, urge) * 0.8f).normalize();
 		c.strafeY = jinkY * 0.7f;
 		if (dist > weaponRange * 1.6f) return 1f;
 		return FlightModel.clamp(0.65f + throttleBias + 0.15f * (float) Math.sin(sim.time * 0.3f + phase * 2f), 0.3f, 1f);
@@ -387,21 +591,73 @@ public final class ShipAI3D {
 		float r = engageRange * (1f + rangeBias + 0.1f * (float) Math.sin(sim.time * 0.23f + phase));
 		r *= 1f + 0.6f * Math.max(0f, fluxLevel - 0.5f) / 0.5f; // stand off so the shield and dissipation catch up
 		ShieldFlux tf = target.flux;
-		if (tf != null && tf.disabled()) r *= 0.6f; // overloaded or venting: move in for the kill
+		boolean targetHelpless = tf != null && tf.disabled();
+		float cau = Math.min(1f, cautionOf(sim.tuning));
+		float edge = target.fixedPart() ? 0f : gunReach(target, sim.tuning) + 40f + s.radius * 0.3f; // just outside its guns
+		boolean outranged = cau > 0f && !target.fixedPart() && edge <= reachOut() * 0.92f;
+		// Overloaded or venting: move in for the kill; unless we outrange it, when our guns already reach
+		// it from outside its own (moving in, we'd still be in its face when it comes back).
+		if (targetHelpless) r *= outranged ? 1f - 0.4f * (1f - cau) : 0.6f;
 		else if (tf != null && tf.level() > 0.8f && fluxLevel < 0.4f) r *= 0.8f; // flux-locked: press
 		if (target.fixedPart()) {
+			standingOff = false;
 			// A station section or module: the range counts from its near side (where the shots land),
 			// clear of its real shape (its collision circle can be far bigger than the hull).
 			Vec3 out = tF.set(s.pos).sub(target.pos);
 			float reach = out.lengthSq() > 1f ? target.reachToward(out.normalize()) : target.radius;
-			return Math.max(reach + s.radius * 1.6f + 100f, Math.max(s.radius * 2.5f, r) + reach * 0.85f);
+			return Math.max(reach + s.radius * 1.6f + 100f, Math.max(sizeFloor(s), r) + reach * 0.85f);
 		}
-		return Math.max(s.radius + target.radius + 100f, Math.max(s.radius * 2.5f, r));
+		standingOff = false;
+		if (cau > 0f && !targetHelpless) {
+			// Out of its guns' reach where we can: fight a target we outrange from just outside its guns,
+			// and back right out of them to cool off at high flux.
+			if ((coolingOff || outranged) && edge > r * 0.95f) {
+				r = Math.max(r, r + (edge - r) * cau);
+				standingOff = true;
+			}
+		}
+		return Math.max(s.radius + target.radius + 100f, Math.max(sizeFloor(s), r));
+	}
+
+	/** Centre-to-centre distance its main guns reach: their range plus how far out from the centre they sit. */
+	private float reachOut() {
+		return weaponRange + mountLead;
+	}
+
+	/**
+	 * Big hulls fight from further off (2.5 radii), but never from beyond most of their guns' reach: at
+	 * vanilla ranges a capital at 3D scale (radius 550-600) would otherwise sit out of range for good.
+	 */
+	private float sizeFloor(Ship3D s) {
+		return Math.min(s.radius * 2.5f, reachOut() * 0.85f);
 	}
 
 	/** Distance to the target, counted to its near side for a station section or module. */
 	private float gap(Ship3D s) {
 		return target.pos.distance(s.pos) - Sim.nearSide(target, s.pos);
+	}
+
+	/**
+	 * Caution: caught well inside the range it's standing off at, a ship that's too slow in reverse to
+	 * get clear of its target (but faster going forward) turns away and runs out, off to one side, then
+	 * comes about once it's nearly there (or after 8 s).
+	 */
+	private boolean openRange(Ship3D s, Vec3 toN, float dist, float range, float dt) {
+		if (!standingOff || target.params == null) {
+			opening = false;
+			return false;
+		}
+		if (!opening) {
+			float chase = target.params.fwdSpeed;
+			if (dist > range * 0.75f || s.params.revSpeed >= chase * 0.9f || s.params.fwdSpeed < chase * 1.2f) return false;
+			opening = true;
+			openTime = 0f;
+			randomPerpendicular(toN, openSide);
+			openSide.y *= 0.3f; // mostly level
+		}
+		openTime += dt;
+		if (dist > range * 0.95f || openTime > 8f) opening = false;
+		return opening;
 	}
 
 	/** 1 for frigates down to 0.3 for capitals: how often and how hard a hull manoeuvres. */
@@ -441,7 +697,15 @@ public final class ShipAI3D {
 		boolean helpless = target.flux != null && target.flux.disabled();
 		boolean bigger = agility(target) < ag - 0.2f;
 		boolean station = target.root().anchored; // a run past a station section ends in the station
-		if (ag >= 0.75f && faster && fit && near && !station && (!covered || helpless || bigger) && rng.nextFloat() < t.aiPassChance * ag) {
+		// Caution: no runs at a target whose friends have the ground round it under their guns.
+		// A target we outrange is fought from outside its guns, not run past; and a run into a bigger hull
+		// whose guns are on us is for the bold.
+		float cau = cautionOf(t);
+		boolean crowded = cau > 0f && cau * outgunned(exposure(sim, s, target.pos, target, 0f, null)) > 0.5f;
+		float theirs = gunReach(target, t); // an unarmed target's "reach" is harmless: runs are fine
+		boolean outranged = cau > 0f && theirs > 0f && theirs + 40f + s.radius * 0.3f <= reachOut() * 0.92f; // even helpless: it may be back before the run's done
+		if (ag >= 0.75f && faster && fit && near && !station && !crowded && !outranged && (!covered || helpless || bigger && cau < 0.5f)
+				&& rng.nextFloat() < t.aiPassChance * ag) {
 			move = Move.PASS;
 			passStage = 0;
 			passTime = 0f;
@@ -452,7 +716,7 @@ public final class ShipAI3D {
 			randomPerpendicular(tB.set(target.pos).sub(s.pos).normalize(), passSide);
 			return;
 		}
-		if (rng.nextFloat() < t.aiFlankChance && pickStation(s)) move = Move.FLANK;
+		if (rng.nextFloat() < t.aiFlankChance && pickStation(sim, s)) move = Move.FLANK;
 		plans[move.ordinal()]++;
 	}
 
@@ -462,10 +726,10 @@ public final class ShipAI3D {
 	 * guns, and not straight over or under it. Staying put is one of the options (it wins when the
 	 * armor facing us is already broken), in which case the plan becomes HOLD.
 	 */
-	private boolean pickStation(Ship3D s) {
+	private boolean pickStation(Sim sim, Ship3D s) {
 		Vec3 bearing = tB.set(s.pos).sub(target.pos).normalize();
 		Vec3 guns = target.ai != null ? target.ai.gunAxisWorld(target, tC) : target.rot.forward(tC);
-		float best = stationScore(bearing, guns) + 0.15f; // a little inertia: moving costs firing time
+		float best = stationScore(sim, s, bearing, guns) + 0.15f; // a little inertia: moving costs firing time
 		boolean moved = false;
 		Vec3 cand = tD, axisV = tE, bestDir = tF.set(bearing);
 		// A module: not from inside its structure (between it and the core or the ship it's on).
@@ -481,7 +745,7 @@ public final class ShipAI3D {
 			cand.y = FlightModel.clamp(cand.y, -0.55f, 0.55f);
 			cand.normalize();
 			if (outward != null && cand.dot(outward) < 0f) continue;
-			float score = stationScore(cand, guns) + rng.nextFloat() * 0.4f;
+			float score = stationScore(sim, s, cand, guns) + rng.nextFloat() * 0.4f;
 			if (score > best) {
 				best = score;
 				bestDir.set(cand);
@@ -492,9 +756,18 @@ public final class ShipAI3D {
 		return moved;
 	}
 
-	/** How good it is to fight from world direction dir (from the target): broken armor, away from its guns, fairly level. */
-	private float stationScore(Vec3 dir, Vec3 guns) {
-		return (1f - armorFacing(target, dir)) * 2f - dir.dot(guns) * 0.6f - Math.abs(dir.y) * 0.4f;
+	/**
+	 * How good it is to fight from world direction dir (from the target): broken armor, away from its guns,
+	 * fairly level, and (caution) out of reach of the other enemies' guns.
+	 */
+	private float stationScore(Sim sim, Ship3D s, Vec3 dir, Vec3 guns) {
+		float score = (1f - armorFacing(target, dir)) * 2f - dir.dot(guns) * 0.6f - Math.abs(dir.y) * 0.4f;
+		float cau = cautionOf(sim.tuning);
+		if (cau > 0f) {
+			Vec3 spot = tH.set(target.pos).addScaled(dir, Math.max(engageRange, target.pos.distance(s.pos)));
+			score -= cau * 0.8f * Math.min(2f, outgunned(exposure(sim, s, spot, target, 0f, null)));
+		}
+		return score;
 	}
 
 	/** Fraction (0..1) of armor left on the part of ship t that faces world direction dir. */
@@ -624,13 +897,13 @@ public final class ShipAI3D {
 			}
 			float sign = rng.nextBoolean() ? 1f : -1f;
 			jinkGoalX = px / len * sign * max;
-			jinkGoalY = py / len * sign * max * 0.7f;
+			jinkGoalY = py / len * sign * max * 0.7f / t.verticalMult; // weave at the vertical pace it had before up/down got faster
 			jinkLeft = 1f + 0.8f * rng.nextFloat();
 		} else if (jinkLeft <= 0f) {
 			float a = rng.nextFloat() * 6.283f;
 			float mag = Math.min(max, t.aiStrafe * 0.5f) + (max - Math.min(max, t.aiStrafe * 0.5f)) * rng.nextFloat();
 			jinkGoalX = (float) Math.cos(a) * mag;
-			jinkGoalY = (float) Math.sin(a) * mag * 0.6f;
+			jinkGoalY = (float) Math.sin(a) * mag * 0.6f / t.verticalMult;
 			jinkLeft = (1.2f + 2.5f * rng.nextFloat()) * (1.6f - 0.6f * ag);
 		}
 		float ease = (dodge ? 4f : 1.5f) * dt;
@@ -663,9 +936,10 @@ public final class ShipAI3D {
 	}
 
 	/**
-	 * Shield up while fire is inbound (and for a moment after); down when quiet so hard flux drains.
-	 * Vent when flux is high and nothing is inbound, or when it's nearly full and the shield is
-	 * about to give anyway.
+	 * Shield up while an enemy has us within its reach and flux is comfortable (shields take seconds
+	 * to unfold, so waiting for a shot to be on its way is too late), and whenever fire is inbound (and
+	 * for a moment after); down when quiet and flux is high, so hard flux drains. Vent when flux is high
+	 * and nothing is inbound, or when it's nearly full and the shield is about to give anyway.
 	 */
 	private void manageFlux(Sim sim, Ship3D s, float dt) {
 		ShieldFlux f = s.flux;
@@ -674,7 +948,8 @@ public final class ShipAI3D {
 		if (f == null || f.disabled()) return;
 		quiet = threat > 0f ? 0f : quiet + dt;
 		if (f.hasShield()) {
-			boolean want = threat > 0f || quiet < 0.6f && f.shieldOn;
+			boolean exposed = f.level() < sim.tuning.aiShieldFlux && underGuns(sim, s, f.unfoldTime);
+			boolean want = threat > 0f || exposed || quiet < 0.6f && f.shieldOn;
 			if (f.level() > 0.97f && threat <= 0f) want = false;
 			// Nearly full: take the hit on armor rather than overload, while the hull can afford it.
 			float roomFlux = (f.maxFlux - f.flux) / Math.max(1e-3f, f.fluxPerDamage);
@@ -687,22 +962,40 @@ public final class ShipAI3D {
 		for (Ship3D o : sim.ships) {
 			if (o.owner != s.owner && !o.destroyed) nearest = Math.min(nearest, o.pos.distance(s.pos));
 		}
-		boolean safe = nearest > weaponRange * 0.9f;
+		// Caution: safe only once no enemy guns reach us (fighters and caution 0: no enemy close).
+		boolean safe = s.fighter || cautionOf(sim.tuning) <= 0f ? nearest > weaponRange * 0.9f : gunsOnUs <= 0f;
 		if (f.level() > 0.7f && (safe && quiet > 0.5f || quiet > 1.5f && f.level() > 0.8f)) f.vent();
+	}
+
+	/**
+	 * True if an enemy has this ship within its weapons' reach, or will before a shield raised now is
+	 * fully up (closing speed x unfold time).
+	 */
+	private static boolean underGuns(Sim sim, Ship3D s, float unfoldTime) {
+		for (Ship3D o : sim.ships) {
+			if (o.owner == s.owner || o.destroyed || o.phased || o.weapons.isEmpty()) continue;
+			float dx = o.pos.x - s.pos.x, dy = o.pos.y - s.pos.y, dz = o.pos.z - s.pos.z;
+			float dist = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+			float closing = dist > 1e-3f ? -((o.vel.x - s.vel.x) * dx + (o.vel.y - s.vel.y) * dy + (o.vel.z - s.vel.z) * dz) / dist : 0f;
+			if (dist - s.radius <= reachOf(o, sim.tuning) + Math.max(0f, closing) * unfoldTime) return true;
+		}
+		return false;
 	}
 
 	/**
 	 * Throttle that holds the fighting range by matching the target's speed along the line between
 	 * the ships, closing or opening at a rate that can still brake in time (no overshoot, no dash in
-	 * and out).
+	 * and out). minThrottle: how hard it may back off (-0.5 normally, -1 = full reverse).
 	 */
-	private float rangeThrottle(Ship3D s, Vec3 toN, float dist, float range) {
+	private float rangeThrottle(Ship3D s, Vec3 toN, float dist, float range, float minThrottle) {
 		FlightParams p = s.params;
 		float e = dist - range;
 		float rate = Math.min(p.fwdSpeed, Math.min((float) Math.sqrt(2f * Math.max(1f, p.fwdDecel) * Math.abs(e)) * 0.8f, Math.abs(e) * 0.6f));
 		float targetAlong = target.vel.dot(toN); // how fast the target moves away from us
 		float wantAlong = targetAlong + Math.signum(e) * rate;
-		return FlightModel.clamp(wantAlong / Math.max(1f, p.fwdSpeed), -0.5f, 1f);
+		// Standing off (caution): back away as fast as needed, up to full reverse (reverse throttle is a share of reverse speed).
+		if (wantAlong < 0f && minThrottle < -0.5f) return FlightModel.clamp(wantAlong / Math.max(1f, p.revSpeed), minThrottle, 0f);
+		return FlightModel.clamp(wantAlong / Math.max(1f, p.fwdSpeed), minThrottle, 1f);
 	}
 
 	/**
@@ -804,17 +1097,76 @@ public final class ShipAI3D {
 				}
 				return max > 0f && have < max * 0.4f;
 			}
+			case MISSILE_AUTOFORGE:
+				return true; // only usable once a rack is low (ShipSystem3D checks)
+			case ENTROPY_AMPLIFIER:
+			case DRONE_STRIKE:
+				// Both check reach and target themselves; use them once actually fighting it.
+				return target != null && !target.phased && dist < weaponRange * 1.1f;
+			case MINE_STRIKE: {
+				if (target == null || target.phased || target.surfaceDistance(s.pos) >= sys.range * sim.tuning.weaponRangeMult) return false;
+				for (Missile3D m : sim.combat.missiles) if (m.source == s && m.spec.mine) return false; // one mine at a time
+				return true;
+			}
+			case PHASE_TELEPORTER:
+				// Jump in to close a long gap, or out of a beating.
+				return target != null && dist > engageRange * 1.8f || threatNow > s.hullMax * 0.04f && s.hull < s.hullMax * 0.5f;
+			case CANISTER_FLAK: {
+				// Throw the cloud when missiles are about a second and a half out (canisters only last a few seconds), or fighters are close.
+				for (Missile3D m : sim.combat.missiles) {
+					if (m.owner == s.owner || m.flare || m.flamedOut() || m.spec.mine) continue;
+					if (m.pos.distance(s.pos) - s.radius < Math.max(250f, m.vel.length() * 1.5f)) return true;
+				}
+				for (Ship3D o : sim.ships) {
+					if (o.fighter && o.owner != s.owner && !o.destroyed && o.pos.distance(s.pos) - s.radius < 500f) return true;
+				}
+				return false;
+			}
+			case TARGETING_FEED:
+				for (Ship3D f : sim.ships) {
+					if (!f.fighter || f.carrier != s || f.destroyed || f.ai == null || f.ai.target == null) continue;
+					if (f.pos.distance(f.ai.target.pos) < 2500f) return true; // its wings are on someone
+				}
+				return false;
+			case LIDAR_ARRAY:
+				// Long wind-up with the guns silent: only when lined up on a target its hardpoints will reach.
+				return target != null && facing && dist < weaponRange * (1f + sys.lidarRange) && level < 0.6f && !target.phased;
 			default:
 				return false; // RECALL and anything else: the player's call
 		}
 	}
 
-	/** Nearest live enemy, slightly preferring whoever is shooting at us and the current target (no flip-flopping). */
+	/**
+	 * Phase Teleporter: where an AI jumps. Hurt and under fire: straight away from the fire. Otherwise
+	 * to its fighting distance from the target, off to one side of the line between them (a flank).
+	 */
+	public Vec3 teleportDestination(Sim sim, Ship3D s, float reach) {
+		if (threatNow > s.hullMax * 0.04f && s.hull < s.hullMax * 0.5f && threatDir.lengthSq() > 1e-6f) {
+			return new Vec3(s.pos).addScaled(new Vec3(threatDir).normalize(), -reach);
+		}
+		if (target == null) return null;
+		Vec3 from = new Vec3(s.pos).sub(target.pos);
+		if (from.lengthSq() < 1e-6f) from.set(homeDir);
+		from.normalize();
+		Vec3 side = new Vec3(from).cross(new Vec3(0f, 1f, 0f));
+		if (side.lengthSq() < 1e-6f) side.set(1f, 0f, 0f);
+		side.normalize().scale(strafeSign);
+		Vec3 dir = from.scale(0.6f).addScaled(side, 0.8f).normalize();
+		return new Vec3(target.pos).addScaled(dir, engageRange + target.radius);
+	}
+
+	/**
+	 * Nearest live enemy, slightly preferring whoever is shooting at us and the current target (no
+	 * flip-flopping); opportunism prefers openings (see opening), caution avoids targets we'd have to
+	 * fight inside their friends' reach.
+	 */
 	private Ship3D pickTarget(Sim sim, Ship3D s) {
 		Order3D order = currentOrder(sim, s);
 		if (order != null && order.kind == Order3D.Kind.ATTACK) return order.ship;
 		Ship3D best = null;
 		float bestScore = Float.MAX_VALUE;
+		float cau = cautionOf(sim.tuning), opp = Math.min(1f, opportunismOf(sim.tuning));
+		Vec3 axisNow = gunAxisWorld(s, tH);
 		for (Ship3D o : sim.ships) {
 			if (o.destroyed || o.owner == s.owner || o.fighter || o.invulnerable) continue; // ships fight ships; PD handles fighters
 			if (order != null && !allowedTarget(order, o)) continue;
@@ -824,12 +1176,31 @@ public final class ShipAI3D {
 			if (o == target) d *= 0.75f;
 			if (o == s.lastHitBy) d *= 0.8f;
 			if (o.flux != null && o.flux.disabled()) d *= 0.4f; // overloaded or venting: pounce
+			if (opp > 0f) d *= 1f - (1f - opening(sim, s, o, axisNow)) * opp;
+			if (cau > 0f && !o.fixedPart()) {
+				// Where we'd fight it from: inside its friends' reach makes it a worse pick.
+				float od = Math.max(1f, o.pos.distance(s.pos));
+				Vec3 spot = tJ.set(s.pos).sub(o.pos).scale(Math.min(od, engageRange) / od).add(o.pos);
+				d *= 1f + cau * 0.5f * Math.min(2f, outgunned(exposure(sim, s, spot, o, 0f, null)));
+			}
 			if (d < bestScore) {
 				bestScore = d;
 				best = o;
 			}
 		}
 		return best;
+	}
+
+	/** 1 for an ordinary target, lower for an opening: nearly dead, flux-locked, already in front of our guns, or outranged by us. */
+	private float opening(Sim sim, Ship3D s, Ship3D o, Vec3 axisNow) {
+		float k = 1f;
+		if (o.hull < o.hullMax * 0.4f) k *= 0.8f;
+		if (o.flux != null && !o.flux.disabled() && o.flux.level() > 0.75f) k *= 0.85f;
+		float dist = o.pos.distance(s.pos);
+		if (dist > 1e-3f && tK.set(o.pos).sub(s.pos).scale(1f / dist).dot(axisNow) > 0.9f) k *= 0.85f;
+		float theirs = o.fixedPart() ? 0f : gunReach(o, sim.tuning);
+		if (theirs > 0f && theirs + 40f + s.radius * 0.3f <= reachOut() * 0.92f) k *= 0.85f;
+		return k;
 	}
 
 	/** An overloaded/venting enemy within weapon range that isn't already our target. */
@@ -884,7 +1255,7 @@ public final class ShipAI3D {
 			else s.rot.forward(want);
 			throttle = carrier != null ? 0.8f : 0.4f;
 		} else {
-			throttle = attackRun(s, want, dt);
+			throttle = attackRun(s, want, dt, opportunismOf(t));
 		}
 		avoidCollisions(sim, s, want);
 		steer(s, want);
@@ -938,7 +1309,7 @@ public final class ShipAI3D {
 	}
 
 	/** Close in on the lead, fire, break away past the target, come round again. */
-	private float attackRun(Ship3D s, Vec3 want, float dt) {
+	private float attackRun(Ship3D s, Vec3 want, float dt, float opp) {
 		if (breakTimer > 0f) {
 			breakTimer -= dt;
 			want.set(breakDir);
@@ -959,6 +1330,14 @@ public final class ShipAI3D {
 			breakDir.set(side).addScaled(to, -0.6f / dist).add(new Vec3(0f, 0.35f, 0f)).normalize();
 			breakTimer = 1.3f + 0.5f * (float) Math.abs(Math.sin(phase));
 			strafeSign = -strafeSign;
+		}
+		if (opp > 0f && target.fighter && dist < weaponRange * 0.8f) {
+			// Dogfight (opportunism): inside gun range, ease off toward the target's own speed so the guns
+			// stay on it longer instead of flashing past (at vanilla ranges a full-speed pass is ~1.5 s of fire).
+			float away = target.vel.dot(to) / dist; // how fast it runs from us
+			float want2 = away + (dist - weaponRange * 0.35f) * 0.8f;
+			float th = FlightModel.clamp(want2 / Math.max(1f, s.params.fwdSpeed), 0.35f, 1f);
+			return 1f - (1f - th) * Math.min(1f, opp);
 		}
 		return 1f;
 	}
@@ -982,21 +1361,48 @@ public final class ShipAI3D {
 			if (o == s || o.destroyed) continue;
 			if (o.fighter && !s.fighter) continue; // ships don't swerve for fighters
 			Vec3 away = tC.set(s.pos).sub(o.pos);
-			float d = away.length();
+			float dNow = away.length(), d = dNow;
+			if (o.fixedPart() && dNow - o.extent() > s.radius * 1.6f + 80f + s.vel.length()) continue; // well clear of all of it
 			// A station section or core doesn't move: keep clear of its real shape plus our own size
 			// (its collision circle can be far bigger than the hull, and at station scale a margin
 			// proportional to it would keep us out of gun range).
 			float clear = !o.fixedPart() ? (s.radius + o.radius) * 1.6f
-					: (d > 1e-3f ? o.reachToward(tE.set(away).scale(1f / d)) : o.radius) + s.radius * 1.6f + 80f;
-			if (d >= clear || d < 1e-3f) continue;
-			float k = (clear - d) / clear;
-			push.addScaled(away.scale(1f / d), k * 2.5f);
+					: (d > 1e-3f ? structureReach(o, tE.set(away).scale(1f / d), s.radius / d) : o.radius) + s.radius * 1.6f + 80f;
+			if (o.fixedPart()) {
+				// It won't get out of the way: keep clear of where we'll be in a second, too (at speed a ship
+				// carries well past the point where it starts to turn away).
+				float ax = away.x + s.vel.x, ay = away.y + s.vel.y, az = away.z + s.vel.z;
+				d = Math.min(d, (float) Math.sqrt(ax * ax + ay * ay + az * az));
+			}
+			if (d >= clear || dNow < 1e-3f) continue;
+			// Near a structure, how far into the margin round its hull we are (not into its whole reach, which
+			// at station scale made the push too weak to stop ships scraping a section next to their target).
+			float k = !o.fixedPart() ? (clear - d) / clear : Math.min(2f, (clear - d) / (s.radius * 1.6f + 80f));
+			push.addScaled(away.scale(1f / dNow), k * 2.5f);
 			// Strafe out of the way too, which works even while the nose is busy.
 			Vec3 local = s.rot.inverseRotate(away, tD);
 			c.strafeX = FlightModel.clamp(c.strafeX + Math.signum(local.x) * k * 2f, -1f, 1f);
 			c.strafeY = FlightModel.clamp(c.strafeY + Math.signum(local.y) * k * 2f, -1f, 1f);
 		}
 		if (push.lengthSq() > 0f) want.add(push).normalize();
+	}
+
+	/**
+	 * How far a structure's hull reaches toward us: the most of its reach toward dir (unit, from it to us)
+	 * and toward the edges of our own outline as seen from it (spread: our radius over the distance). A
+	 * station section is irregular; along the line to our centre it can reach far less than beside it.
+	 */
+	private float structureReach(Ship3D o, Vec3 dir, float spread) {
+		float r = o.reachToward(dir);
+		float k = Math.min(1f, spread * 1.2f);
+		Vec3 u = tJ.set(dir).cross(Math.abs(dir.y) < 0.9f ? tK.set(0f, 1f, 0f) : tK.set(1f, 0f, 0f)).normalize();
+		Vec3 v = tK.set(dir).cross(u).normalize();
+		for (int i = 0; i < 4; i++) {
+			Vec3 side = i < 2 ? u : v;
+			float sign = (i & 1) == 0 ? k : -k;
+			r = Math.max(r, o.reachToward(tF.set(dir).addScaled(side, sign).normalize()));
+		}
+		return r;
 	}
 
 	/** Virtual stick toward a world direction: rate commands that brake before overshooting. */
@@ -1017,36 +1423,85 @@ public final class ShipAI3D {
 		return Math.signum(err) * rate;
 	}
 
+	/** Why a mount holds its fire (0 = it fires); the numbers index fireStats. */
+	private static final int FIRE = 0, HOLD_CONE = 2, HOLD_FLUX = 3, HOLD_FRIENDLY = 4, HOLD_MISSILE = 5, SWITCHED = 6;
+	private final Vec3 fAim = new Vec3(), fAimFirst = new Vec3(), fBarrel = new Vec3();
+	private final Ship3D[] fTgt = new Ship3D[1];
+	private float fireCos, fireSin;
+
 	/**
 	 * Every mount engages on its own: PD takes missiles first, everything else the AI's target if it
-	 * can reach the lead, else the nearest enemy it can reach. Ship-killing shots are held while the
-	 * barrel is still swinging onto the lead or a friendly is in the way.
+	 * can reach the lead, else the best other enemy it can reach. Ship-killing shots are held while the
+	 * barrel is still swinging onto the lead or a friendly is in the way; with opportunism a mount whose
+	 * shot is blocked (friendly in the way, missile not worth it) turns to another enemy it can reach.
 	 */
 	private void fireWeapons(Sim sim, Ship3D s, float dt) {
-		Vec3 aim = new Vec3();
-		Ship3D[] tgt = new Ship3D[1];
-		float coneCos = (float) Math.cos(Math.toRadians(sim.tuning.aiFireConeDeg));
+		float opp = opportunismOf(sim.tuning);
+		fireCos = (float) Math.cos(Math.toRadians(sim.tuning.aiFireConeDeg));
+		fireSin = (float) Math.sin(Math.toRadians(sim.tuning.aiFireConeDeg));
+		Vec3 aim = fAim;
+		Ship3D[] tgt = fTgt;
 		for (WeaponMount m : s.weapons) {
-			boolean engage = sim.autofireAim(s, m, target, aim, tgt);
-			boolean fire = engage;
+			boolean engage = sim.autofireAim(s, m, target, null, opp, aim, tgt);
+			int hold = FIRE;
 			if (engage && tgt[0] != null) {
-				Vec3 mw = m.worldPos(s, tC);
-				Vec3 dir = tD.set(aim).sub(mw);
-				float len = dir.length();
-				if (len > 1e-3f) {
-					dir.scale(1f / len);
-					boolean guided = m.spec.kind == WeaponSpec3D.Kind.MISSILE && m.spec.guided;
-					Vec3 barrel = s.rot.rotate(m.aimDir, new Vec3());
-					if (!guided && barrel.dot(dir) < coneCos) fire = false;
-					if (!Sim.missileWorthFiring(s, m, tgt[0])) fire = false;
-					boolean helpless = tgt[0].flux != null && tgt[0].flux.disabled();
-					float limit = helpless ? 0.98f : sim.tuning.aiFluxFireLimit;
-					if (s.flux != null && s.flux.level() > limit && !m.spec.pd) fire = false;
-					if (fire && friendlyInLine(sim, s, mw, aim)) fire = false;
+				fireStats[0]++;
+				hold = holdReason(sim, s, m, aim, tgt[0], opp);
+				if (opp > 0f && (hold == HOLD_FRIENDLY || hold == HOLD_MISSILE)) {
+					Ship3D first = tgt[0];
+					fAimFirst.set(aim);
+					if (sim.autofireAim(s, m, target, first, opp, aim, tgt) && tgt[0] != null) {
+						fireStats[SWITCHED]++;
+						hold = holdReason(sim, s, m, aim, tgt[0], opp);
+					} else { // nobody else in reach: keep tracking the first
+						aim.set(fAimFirst);
+						tgt[0] = first;
+					}
 				}
+				fireStats[hold == FIRE ? 1 : hold]++;
 			}
-			sim.combat.stepMount(s, m, engage ? aim : null, fire, tgt[0], dt, sim.tuning);
+			sim.combat.stepMount(s, m, engage ? aim : null, engage && hold == FIRE, tgt[0], dt, sim.tuning);
 		}
+	}
+
+	/** FIRE, or why this mount holds its shot at tg (aim = the lead point). */
+	private int holdReason(Sim sim, Ship3D s, WeaponMount m, Vec3 aim, Ship3D tg, float opp) {
+		Vec3 mw = m.worldPos(s, tC);
+		Vec3 dir = tD.set(aim).sub(mw);
+		float len = dir.length();
+		if (len <= 1e-3f) return FIRE;
+		dir.scale(1f / len);
+		boolean guided = m.spec.kind == WeaponSpec3D.Kind.MISSILE && m.spec.guided;
+		Vec3 barrel = s.rot.rotate(m.aimDir, fBarrel);
+		// On target: the barrel within the cone of the lead, widened by the hull round it (a hardpoint
+		// held at the edge of its arc can't swing any closer; see Sim.arcPad).
+		float sp = Math.min(1f, Sim.arcPad(tg) / len); // sin of the pad's angle
+		float onTarget = fireCos * (float) Math.sqrt(1f - sp * sp) - fireSin * sp; // cos(cone + pad); the cone is small, so never past 180
+		if (!guided && barrel.dot(dir) < onTarget) {
+			// Still swinging on. With opportunism, a shot that will be blocked once it's on counts as blocked
+			// now, so the mount looks elsewhere instead of swinging back and forth between the two.
+			if (opp > 0f && !Sim.missileWorthFiring(s, m, tg)) return HOLD_MISSILE;
+			if (opp > 0f && friendlyInLine(sim, s, mw, aim)) return HOLD_FRIENDLY;
+			return HOLD_CONE;
+		}
+		if (!Sim.missileWorthFiring(s, m, tg)) return HOLD_MISSILE;
+		if (s.flux != null && !m.spec.pd && s.flux.level() > fluxLimit(sim, m, tg, mw, opp)) return HOLD_FLUX;
+		if (friendlyInLine(sim, s, mw, aim)) return HOLD_FRIENDLY;
+		return FIRE;
+	}
+
+	/**
+	 * Flux level above which a ship-killing shot is held, keeping room for the shield. Anything goes into
+	 * a helpless target; with opportunism, weapons that cost no flux never hold, and a shot that will
+	 * land on armor (no shield in the way from here) is worth more of our flux.
+	 */
+	private float fluxLimit(Sim sim, WeaponMount m, Ship3D tg, Vec3 from, float opp) {
+		if (tg.flux != null && tg.flux.disabled()) return 0.98f;
+		float limit = sim.tuning.aiFluxFireLimit;
+		if (opp <= 0f) return limit;
+		if (m.spec.fluxPerShot <= 0f && m.spec.fluxPerSecond <= 0f) return 2f;
+		if (!Sim.shieldCovers(tg, from, tE)) limit = Math.max(limit, limit + (0.95f - limit) * Math.min(1f, opp));
+		return limit;
 	}
 
 	private static boolean friendlyInLine(Sim sim, Ship3D s, Vec3 from, Vec3 to) {

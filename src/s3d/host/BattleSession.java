@@ -97,9 +97,9 @@ final class BattleSession extends Session3D {
 	private final List<Ship3D> newStations = new ArrayList<>(), newShips = new ArrayList<>();
 
 	private final float mapW, mapH, scale, edgeZ;
-	private int deployed, graves, parkedCount, launches, landings, fighterLosses;
+	private int deployed, graves, parkedCount, launches, landings, fighterLosses, fightersDismissed;
 	private float fighterLogTimer = 10f, manoeuvreLogTimer = 20f;
-	private boolean started, handedBack, handBackArmed, noShipsToast;
+	private boolean handedBack, handBackArmed, noShipsToast;
 	private float clock, armorTimer, ordersTimer, transferTimer = -1f, handBackTimer;
 
 	/** Null if this battle can be played in 3D, else why not. */
@@ -146,8 +146,6 @@ final class BattleSession extends Session3D {
 		Ship3D player = flag != null ? twins.get(flag) : null;
 		if (player == null || player.owner != 0) player = pickNextPlayer(null);
 		if (player != null) takeControl(player, false);
-		started = true;
-		toast("3D battle. H for controls, Tab for the command map.");
 		log.info(String.format("S3D: campaign battle in 3D: map %.0f x %.0f, 3D edges at z = +/-%.0f, %d ships mirrored, you fly %s; tuning #%s",
 				mapW, mapH, edgeZ, twins.size(), player != null ? player.name : "nothing", cfg.hash));
 	}
@@ -230,7 +228,7 @@ final class BattleSession extends Session3D {
 			float halfW = mapW * 0.5f * scale * 0.9f;
 			float x = Math.max(-halfW, Math.min(halfW, loc.x * scale * cfg.tuning.battleDeploySpread));
 			float y = (((n * 37) % 5) - 2) * 0.5f * cfg.tuning.battleDeployAltitude;
-			float z = side * edgeZ * cfg.tuning.battleDeployFrac;
+			float z = side * Math.min(cfg.tuning.battleDeployDistance, edgeZ * 0.85f);
 			s.pos.set(x, y, z);
 			for (int tries = 0; tries < 12 && overlapsAny(s); tries++) {
 				s.pos.x += (tries % 2 == 0 ? 1f : -1f) * (tries + 1) * s.radius * 2.2f;
@@ -243,7 +241,6 @@ final class BattleSession extends Session3D {
 			s.throttle = 0.6f;
 			s.rot.forward(s.vel).scale(s.params.fwdSpeed * 0.5f);
 			twins.put(ship, s);
-			if (started) toast((s.owner == 0 ? "Reinforcements: " : "Enemy reinforcements: ") + s.hullName);
 			log.info(String.format("S3D: %s entered the 3D battle at (%.0f, %.0f, %.0f), hull %.0f/%.0f, AI fights %s at %.0f (weapon range %.0f)",
 					s.name, s.pos.x, s.pos.y, s.pos.z, s.hull, s.hullMax, s.ai.axis, s.ai.engageRange, s.ai.weaponRange));
 		} catch (Throwable t) {
@@ -508,8 +505,12 @@ final class BattleSession extends Session3D {
 				boolean ordered = retreatOrdered(ship);
 				if (ordered != s.retreatOrdered) {
 					log.info("S3D: " + s.name + (ordered ? " ordered to retreat" : " retreat order cancelled"));
-					if (ordered && s == sim.player) toast("Retreat ordered: fly to your edge of the battle (behind your start)");
 					s.retreatOrdered = ordered;
+					// A retreating AI carrier calls its wings back so they leave with it (yours stay as you set them).
+					if (s != sim.player && ship.hasLaunchBays()) {
+						s.wingsRegroup = ordered;
+						ship.setPullBackFighters(ordered);
+					}
 				}
 				Order3D o = s.ai != null ? readOrder(ship, s) : null;
 				if (o == null ? s.order != null : !o.sameAs(s.order)) {
@@ -525,12 +526,14 @@ final class BattleSession extends Session3D {
 			syncFlux(ship, s);
 			if (writeArmor) writeArmor(ship, s);
 		}
+		dismissStrandedFighters();
 		fighterLogTimer -= realDt;
 		if (fighterLogTimer <= 0f && launches + landings + fighterLosses > 0) {
 			fighterLogTimer = 10f;
 			int up = 0;
 			for (Ship3D s : sim.ships) if (s.fighter && !s.destroyed) up++;
-			log.info("S3D: fighters: " + up + " flying; so far " + launches + " launched, " + landings + " landed to rearm, " + fighterLosses + " lost");
+			log.info("S3D: fighters: " + up + " flying; so far " + launches + " launched, " + landings + " landed to rearm, " + fighterLosses + " lost, "
+					+ fightersDismissed + " left with their side");
 		}
 		manoeuvreLogTimer -= realDt;
 		if (manoeuvreLogTimer <= 0f) {
@@ -595,7 +598,6 @@ final class BattleSession extends Session3D {
 		sim.combat.kill(s); // explodes; its modules go with it
 		for (Ship3D o : sim.ships) if (o.parent == s && o.hostRef instanceof ShipAPI) finished.add((ShipAPI) o.hostRef);
 		log.info("S3D: vanilla ended " + s.name + " (" + s.hullName + ", hulk=" + ship.isHulk() + "); its 3D twin goes too");
-		if (s.anchored) toast((s.owner == 0 ? "Station lost: " : "Station defeated: ") + s.name);
 	}
 
 	private boolean pastOwnEdge(Ship3D s) {
@@ -737,7 +739,6 @@ final class BattleSession extends Session3D {
 					log.info(String.format("S3D: objective %s (%s) in 3D at (%.0f, %.0f), held by %s", v.name, v.type, v.pos.x, v.pos.z, owner < 0 ? "nobody" : "side " + owner));
 				} else if (owner != v.owner) {
 					log.info("S3D: " + v.name + " now held by " + (owner < 0 ? "nobody" : "side " + owner) + " (was " + (v.owner < 0 ? "nobody" : "side " + v.owner) + ")");
-					toast(owner == 0 ? v.name + " taken" : owner == 1 ? "Enemy took the " + v.name : v.name + " lost");
 					v.owner = owner;
 				}
 				v.present[0] = v.present[1] = 0;
@@ -839,8 +840,6 @@ final class BattleSession extends Session3D {
 					+ "; puppet killed (hulk=" + ship.isHulk() + ", hp=" + ship.getHitpoints() + ")");
 		}
 		if (s.fighter) fighterLosses++;
-		else if (s.parent != null) toast((s.owner == 0 ? "Section lost: " : "Section destroyed: ") + s.hullName);
-		else if (s != sim.player) toast((s.owner == 0 ? "Lost: " : "Destroyed: ") + s.name + " (" + s.hullName + ")");
 	}
 
 	private Vector2f graveSpot() {
@@ -861,7 +860,44 @@ final class BattleSession extends Session3D {
 		retreatPending.put(ship, clock);
 		removeTwin(s);
 		log.info("S3D: " + s.name + " retreated in 3D; puppet sent off the " + (s.owner == 0 ? "bottom" : "top") + " edge");
-		toast((s.owner == 0 ? "Retreated: " : "Enemy retreated: ") + s.name);
+	}
+
+	/**
+	 * Fighters can't outlast their side: a wing whose carrier retreated goes with it, and wings
+	 * whose carriers died fight on only while their side still has ships here. Their puppets are
+	 * pinned to the 3D twins and never reach a map edge, so left alone they would keep vanilla from
+	 * ending the battle after the last ship of their side has gone.
+	 */
+	private void dismissStrandedFighters() {
+		boolean[] hasShips = new boolean[2];
+		for (Ship3D s : sim.ships) if (!s.destroyed && !s.fighter && (s.owner == 0 || s.owner == 1)) hasShips[s.owner] = true;
+		for (Map.Entry<ShipAPI, Ship3D> e : new ArrayList<>(twins.entrySet())) {
+			ShipAPI ship = e.getKey();
+			Ship3D f = e.getValue();
+			if (!f.fighter || f.destroyed || finished.contains(ship)) continue;
+			boolean carrierLeft = f.carrier != null && !f.carrier.destroyed && !sim.ships.contains(f.carrier);
+			boolean sideGone = f.owner >= 0 && f.owner < 2 && !hasShips[f.owner];
+			if (carrierLeft || sideGone) dismissFighter(ship, f, carrierLeft ? "its carrier left" : "no ships left on its side");
+		}
+		for (Map.Entry<ShipAPI, Vector2f> e : new ArrayList<>(parked.entrySet())) {
+			ShipAPI ship = e.getKey();
+			if (!ship.isFighter() || finished.contains(ship)) continue;
+			int side = ship.getOwner();
+			ShipAPI c = ship.getWing() != null ? ship.getWing().getSourceShip() : null;
+			boolean carrierGone = c == null || !c.isAlive() || c.isHulk() || finished.contains(c) || !engine.isEntityInPlay(c);
+			if (carrierGone || (side == 0 || side == 1) && !hasShips[side]) {
+				parked.remove(ship);
+				dismissFighter(ship, null, "parked, carrier or side gone");
+			}
+		}
+	}
+
+	private void dismissFighter(ShipAPI ship, Ship3D f, String why) {
+		finished.add(ship);
+		if (f != null) removeTwin(f);
+		if (engine.isEntityInPlay(ship)) engine.removeEntity(ship);
+		fightersDismissed++;
+		log.info("S3D: fighter " + ship.getHullSpec().getHullId() + " (side " + ship.getOwner() + ") left the battle: " + why);
 	}
 
 	/** Makes sure vanilla counted kills and retreats; falls back to removing the puppet directly. */
@@ -928,9 +964,8 @@ final class BattleSession extends Session3D {
 		if (next != null) {
 			takeControl(next, true);
 			noShipsToast = false;
-		} else if (!noShipsToast) {
-			noShipsToast = true;
-			toast("No ships left under your command");
+		} else {
+			noShipsToast = true; // the alert line says so
 		}
 	}
 
@@ -1050,9 +1085,8 @@ final class BattleSession extends Session3D {
 			toast("No fighter wings on this ship");
 			return;
 		}
-		p.wingsRegroup = !p.wingsRegroup;
+		p.wingsRegroup = !p.wingsRegroup; // the weapon panel's WINGS line shows it
 		puppet.setPullBackFighters(p.wingsRegroup);
-		toast(p.wingsRegroup ? "Wings: regroup around you" : "Wings: engage (your target first)");
 	}
 
 	@Override
@@ -1068,18 +1102,5 @@ final class BattleSession extends Session3D {
 			float toGo = edgeZ - p.pos.z;
 			alerts.add(toGo > 0f ? String.format("RETREAT: fly back past your starting side, %.0f to go", toGo) : "RETREAT: leaving the battle");
 		}
-	}
-
-	@Override
-	protected String[] sessionHelpLines() {
-		return new String[] {
-				"BATTLE",
-				"  Tab .............. vanilla command map (deploy reinforcements, orders)",
-				"                     3D pilots follow escort, defend/rally, capture, engage,",
-				"                     avoid and retreat orders; objectives are taken by sitting on them",
-				"  Retreat .......... ordered ships fly back past their own starting side and leave",
-				"  " + k("wings") + " ................ your fighter wings: engage / regroup",
-				"  " + k("handBack") + " twice ......... finish this battle in vanilla 2D",
-		};
 	}
 }

@@ -14,6 +14,8 @@ public final class WeaponMount {
 	public final Vec3 localPos;
 	public final Vec3 restDir;
 	public final float halfArcRad;
+	/** cos and sin of halfArcRad (arc tests run for every mount against every target each frame). */
+	public final float cosHalfArc, sinHalfArc;
 	public final boolean hardpoint;
 
 	/** Current barrel direction, ship-local unit vector. */
@@ -38,6 +40,8 @@ public final class WeaponMount {
 	public final Vec3 beamEnd = new Vec3();
 	public boolean beamHitting;
 	float beamDamageAccum, beamTextTimer;
+	/** This burst's once-per-burst beam effect (Paladin's blast) has happened. */
+	boolean burstFxDone;
 
 	/** Render-side models (ShipModel.Source / ShipModel), owned by the renderer. */
 	public Object modelSource, model;
@@ -51,6 +55,8 @@ public final class WeaponMount {
 		this.localPos = localPos;
 		this.restDir = new Vec3(restDir).normalize();
 		this.halfArcRad = (float) Math.toRadians(Math.min(360f, Math.max(0f, arcDeg)) * 0.5f);
+		this.cosHalfArc = (float) Math.cos(halfArcRad);
+		this.sinHalfArc = (float) Math.sin(halfArcRad);
 		this.hardpoint = hardpoint;
 		this.aimDir = new Vec3(this.restDir);
 		this.spread = spec.minSpread;

@@ -11,8 +11,8 @@ public final class FlightParams {
 	// Derived 3D values (rad/s, rad/s^2, units/s, units/s^2)
 	public float pitchRate, yawRate, rollRate;
 	public float pitchAccel, yawAccel, rollAccel;
-	public float fwdSpeed, revSpeed, strafeSpeed;
-	public float fwdAccel, fwdDecel, strafeAccel, lateralDecel;
+	public float fwdSpeed, revSpeed, strafeSpeed, verticalSpeed;
+	public float fwdAccel, fwdDecel, strafeAccel, lateralDecel, verticalAccel, verticalDecel;
 
 	public FlightParams(float maxSpeed, float accel, float decel, float maxTurnRateDeg, float turnAccelDeg) {
 		this.maxSpeed = maxSpeed;
@@ -58,6 +58,9 @@ public final class FlightParams {
 		fwdDecel = Math.max(1f, decel * t.decelMult);
 		strafeAccel = Math.max(1f, accel * t.accelMult * t.strafeAccelMult);
 		lateralDecel = Math.max(1f, decel * t.decelMult * t.lateralDampMult);
+		verticalSpeed = strafeSpeed * t.verticalMult;
+		verticalAccel = strafeAccel * t.verticalMult;
+		verticalDecel = lateralDecel * t.verticalMult;
 		return this;
 	}
 

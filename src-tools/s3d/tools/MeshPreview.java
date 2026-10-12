@@ -29,6 +29,7 @@ import s3d.math.Quat;
 import s3d.math.Vec3;
 import s3d.render.GLCaps;
 import s3d.render.HudRenderer;
+import s3d.render.ObjHull;
 import s3d.render.Renderer3D;
 import s3d.render.ShipModel;
 import s3d.render.SpriteImage;
@@ -39,6 +40,10 @@ import s3d.render.SpriteImage;
  */
 public final class MeshPreview {
 	private static final int VW = 640, VH = 400;
+	/** The mod folder, where hand-made hull models live (data/meshes/hulls). */
+	private static File modDir;
+	/** S3D_MESH=relief draws every hull as the sprite relief, ignoring hand-made models. */
+	private static final boolean USE_MODELS = !"relief".equals(System.getenv("S3D_MESH"));
 
 	public static void main(String[] args) throws Exception {
 		File game = new File(args[0]);
@@ -47,6 +52,7 @@ public final class MeshPreview {
 		for (int i = 2; i < args.length; i++) ids.add(args[i]);
 		if (ids.isEmpty()) ids = List.of("wolf", "hammerhead", "eagle", "onslaught");
 
+		modDir = build.getParentFile();
 		boolean pbuffer = createContext();
 		System.out.println("context: " + (pbuffer ? "pbuffer" : "window") + "  " + GLCaps.summary());
 
@@ -57,6 +63,16 @@ public final class MeshPreview {
 		int[] out = createCaptureTarget(VW, VH);
 		File dir = new File(build, "preview");
 		dir.mkdirs();
+		if ("hullModels".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=hullModels ./build.sh preview [ids]
+			hullModelScene(game, hulls, args.length > 2 ? ids : null, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("shipPanel".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=shipPanel ./build.sh preview
+			shipPanelScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
 
 		for (String id : ids) {
 			GameData.Hull h = hulls.get(id);
@@ -127,6 +143,7 @@ public final class MeshPreview {
 		battleScene(game, hulls, t, renderer, dir);
 		empScene(game, hulls, t, renderer, dir);
 		fighterScene(game, hulls, t, renderer, dir);
+		shipPanelScene(game, hulls, t, renderer, dir);
 		stationScene(game, hulls, t, renderer, dir);
 		benchmark(game, hulls, t, renderer, out[0], dir);
 		if (pbuffer) System.out.println("done (pbuffer)");
@@ -134,6 +151,10 @@ public final class MeshPreview {
 	}
 
 	private static Ship3D makeShip(File game, GameData.Hull h, Tuning t, String id) throws Exception {
+		return makeShip(game, h, t, id, USE_MODELS);
+	}
+
+	private static Ship3D makeShip(File game, GameData.Hull h, Tuning t, String id, boolean model) throws Exception {
 		GameData.readShipFile(game, h);
 		SpriteImage img = new SpriteImage(ImageIO.read(new File(game, h.spritePath)));
 		Ship3D s = new Ship3D(id);
@@ -143,9 +164,114 @@ public final class MeshPreview {
 		s.baseRadius = (float) Math.hypot(img.w, img.h) * 0.5f;
 		s.radius = s.baseRadius;
 		s.sizeClass = h.sizeClass;
-		s.modelSource = new ShipModel.Source(h.spritePath, img, h.centerX, img.h - h.centerYFromBottom);
+		ObjHull obj = model ? hullModel(h.id, img) : null;
+		s.modelSource = new ShipModel.Source(h.spritePath, img, h.centerX, img.h - h.centerYFromBottom, obj);
 		s.engines.addAll(h.engines);
 		return s;
+	}
+
+	/** data/meshes/hulls, or $S3D_MODEL_DIR (relative to the mod folder) for staged work in progress. */
+	private static File modelDir() {
+		String d = System.getenv("S3D_MODEL_DIR");
+		if (d == null || d.isEmpty()) return new File(modDir, "data/meshes/hulls");
+		File f = new File(d);
+		return f.isAbsolute() ? f : new File(modDir, d);
+	}
+
+	/** The hull's hand-made model from the mod folder (as the game would find it), or null. */
+	private static ObjHull hullModel(String hullId, SpriteImage img) throws Exception {
+		File f = new File(modelDir(), hullId + ".obj");
+		if (!f.isFile()) return null;
+		ObjHull obj = ObjHull.parse("data/meshes/hulls/" + f.getName(), java.nio.file.Files.readString(f.toPath()));
+		if (!obj.fits(img)) {
+			System.out.println(f.getName() + " was made for a " + obj.spriteW + "x" + obj.spriteH + " sprite; " + hullId + "'s is " + img.w + "x" + img.h);
+			return null;
+		}
+		return obj;
+	}
+
+	/**
+	 * Each hull that has a hand-made model, relief (top row) against model (bottom row) from the same
+	 * five angles plus the chase view: build/preview/model_<id>.png.
+	 */
+	private static void hullModelScene(File game, Map<String, GameData.Hull> hulls, List<String> only, Renderer3D renderer, File dir) throws Exception {
+		File[] files = modelDir().listFiles((d, n) -> n.endsWith(".obj"));
+		if (files == null) return;
+		int vw = 520, vh = 340;
+		int[] target = createCaptureTarget(vw, vh);
+		for (File f : files) {
+			String id = f.getName().substring(0, f.getName().length() - 4);
+			if (only != null && !only.contains(id) || hulls.get(id) == null) continue;
+			Tuning t = GameData.modTuning(dir.getParentFile());
+			String[] labels = {"top", "3/4 front, above", "side", "3/4 rear, below", "below", "chase view"};
+			BufferedImage sheet = new BufferedImage(vw * labels.length, vh * 2, BufferedImage.TYPE_INT_RGB);
+			Graphics2D g = sheet.createGraphics();
+			for (int row = 0; row < 2; row++) {
+				Ship3D s = makeShip(game, hulls.get(id), t, id, row == 1);
+				Sim sim = new Sim(t);
+				sim.addShip(s);
+				sim.setPlayer(s);
+				s.thrustVisual = 0.6f;
+				ShipModel m = Renderer3D.modelFor(s, t);
+				System.out.println(id + (row == 1 ? " model: " : " relief: ") + m.info.summary());
+				float r = (float) Math.hypot(m.info.maxX - m.info.minX, m.info.maxZ - m.info.minZ) * 0.5f * s.scale;
+				Vec3[] eyes = {new Vec3(0, r * 1.75f, 0.01f), new Vec3(r * 0.8f, r * 0.5f, -r * 0.95f), new Vec3(r * 1.5f, r * 0.04f, 0f),
+						new Vec3(-r * 0.75f, -r * 0.6f, r * 0.95f), new Vec3(0f, -r * 1.75f, 0.01f), null};
+				for (int v = 0; v < labels.length; v++) {
+					if (eyes[v] == null) {
+						sim.camera.snapTo(s);
+						sim.camera.update(s, t, 0.016f, false, 0f, 0f, vw / (float) vh);
+					} else {
+						lookAt(sim.camera, eyes[v], new Vec3(), t, vw / (float) vh);
+					}
+					renderer.renderScene(sim, vw, vh, target[0]);
+					BufferedImage img = read(vw, vh);
+					Graphics2D ig = img.createGraphics();
+					ig.setColor(java.awt.Color.WHITE);
+					ig.drawString(id + (row == 1 ? "  MODEL  " : "  relief  ") + labels[v], 8, vh - 10);
+					ig.dispose();
+					g.drawImage(img, v * vw, row * vh, null);
+				}
+			}
+			g.dispose();
+			File out = new File(dir, "model_" + id + ".png");
+			ImageIO.write(sheet, "png", out);
+			System.out.println("wrote " + out);
+			closeUps(game, hulls.get(id), id, t, renderer, dir);
+		}
+	}
+
+	/** The model large from three angles (front-above, rear-above, side-below): model_<id>_close.png. */
+	private static void closeUps(File game, GameData.Hull h, String id, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int vw = 900, vh = 600;
+		int[] target = createCaptureTarget(vw, vh);
+		Ship3D s = makeShip(game, h, t, id, true);
+		Sim sim = new Sim(t);
+		sim.addShip(s);
+		sim.setPlayer(s);
+		s.thrustVisual = 0.6f;
+		ShipModel m = Renderer3D.modelFor(s, t);
+		float r = (float) Math.hypot(m.info.maxX - m.info.minX, m.info.maxZ - m.info.minZ) * 0.5f * s.scale;
+		s.thrustVisual = 0.15f; // flames down, so the engine end shows
+		Vec3[] eyes = {new Vec3(r * 0.95f, r * 0.6f, -r * 1.05f), new Vec3(-r * 0.6f, r * 0.45f, r * 1.3f), new Vec3(r * 1.45f, -r * 0.4f, -r * 0.2f),
+				new Vec3(r * 0.12f, r * 0.25f, r * 1.4f)};
+		String[] labels = {"front, above", "rear, above", "side, below", "behind"};
+		BufferedImage sheet = new BufferedImage(vw * eyes.length, vh, BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = sheet.createGraphics();
+		for (int v = 0; v < eyes.length; v++) {
+			lookAt(sim.camera, eyes[v], new Vec3(), t, vw / (float) vh);
+			renderer.renderScene(sim, vw, vh, target[0]);
+			BufferedImage img = read(vw, vh);
+			Graphics2D ig = img.createGraphics();
+			ig.setColor(java.awt.Color.WHITE);
+			ig.drawString(id + "  MODEL  " + labels[v], 8, vh - 10);
+			ig.dispose();
+			g.drawImage(img, v * vw, 0, null);
+		}
+		g.dispose();
+		File out = new File(dir, "model_" + id + "_close.png");
+		ImageIO.write(sheet, "png", out);
+		System.out.println("wrote " + out);
 	}
 
 	private static void lookAt(ChaseCamera cam, Vec3 eye, Vec3 target, Tuning t, float aspect) {
@@ -285,7 +411,13 @@ public final class MeshPreview {
 			s3d.core.WeaponSpec3D ws = new s3d.core.WeaponSpec3D();
 			ws.id = wid;
 			ws.name = wid;
+			String[] row = weaponRow(game, wid);
+			if (row != null) {
+				ws.name = row[0];
+				ws.damageType = row[1].isEmpty() ? null : row[1];
+			}
 			ws.type = wj.optString("type", "?");
+			ws.size = wj.optString("size", null);
 			ws.supported = true;
 			ws.damage = 100f;
 			ws.range = 700f;
@@ -360,6 +492,113 @@ public final class MeshPreview {
 			java.util.List<String> slotIds = (java.util.List<String>) g[2];
 			for (s3d.core.WeaponMount m : s.weapons) if (slotIds.contains(m.slotId)) g3.mounts.add(m);
 			if (!g3.mounts.isEmpty()) s.groups.add(g3);
+		}
+	}
+
+	/** Weapon display name and damage type from weapon_data.csv, by id (null if not listed). */
+	private static String[] weaponRow(File game, String id) throws Exception {
+		if (weaponCsv == null) {
+			weaponCsv = new java.util.HashMap<>();
+			List<String> lines = java.nio.file.Files.readAllLines(new File(game, "data/weapons/weapon_data.csv").toPath(),
+					java.nio.charset.StandardCharsets.ISO_8859_1);
+			List<String> head = GameData.csv(lines.get(0));
+			int name = head.indexOf("name"), idCol = head.indexOf("id"), type = head.indexOf("type");
+			for (String line : lines.subList(1, lines.size())) {
+				List<String> r = GameData.csv(line);
+				if (r.size() > Math.max(type, idCol) && !r.get(idCol).isEmpty()) weaponCsv.put(r.get(idCol), new String[] {r.get(name), r.get(type)});
+			}
+		}
+		return weaponCsv.get(id);
+	}
+
+	private static Map<String, String[]> weaponCsv;
+
+	/**
+	 * Your ship panel (bottom left) at the game's resolution, two states: an Eagle with its Assault
+	 * groups, Maneuvering Jets cooling down, shields up on some hard flux, a gun knocked out and a
+	 * missile rack part spent, locked on a damaged Enforcer (both holograms); then a Hammerhead on
+	 * zero flux with its Ammo Feeder running and group 2 selected.
+	 */
+	private static void shipPanelScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 1920, h = 1200;
+		int[] target = createCaptureTarget(w, h);
+		String[][] ships = {{"eagle", "eagle_Assault", "ISS Zenith", "Eagle-class", "Assault Heavy Cruiser", "maneuveringjets", "Maneuvering Jets"},
+				{"hammerhead", "hammerhead_Elite", "ISS Lucky Break", "Hammerhead-class", "Elite Destroyer", "ammofeed", "Accelerated Ammo Feeder"}};
+		for (int v = 0; v < ships.length; v++) {
+			String[] d = ships[v];
+			Sim sim = new Sim(t);
+			sim.arenaHalfX = 5000f;
+			sim.arenaHalfZ = 4500f;
+			Ship3D p = makeShip(game, hulls.get(d[0]), t, d[0]);
+			p.name = d[2];
+			p.hullName = d[3];
+			p.variantName = d[4];
+			sim.addShip(p);
+			p.volume = ShipModel.geometry((ShipModel.Source) p.modelSource, t).volume;
+			arm(game, p, d[0], d[1]);
+			p.flux = CombatBench.flux(hulls.get(d[0]), t);
+			p.hullMax = v == 0 ? 8000f : 5000f;
+			p.hull = v == 0 ? 6150f : p.hullMax;
+			p.armor = new s3d.core.ArmorShell(v == 0 ? 1000f : 500f);
+			p.system = new s3d.core.ShipSystem3D(d[5], d[6], s3d.core.ShipSystem3D.kindFor(d[5], false));
+			p.system.chargeUp = p.system.chargeDown = 0.5f;
+			p.system.active = 6f;
+			p.system.cooldown = 12f;
+			sim.setPlayer(p);
+			Ship3D enf = makeShip(game, hulls.get("enforcer"), t, "enforcer");
+			enf.name = "HSS Remember the 200th";
+			enf.owner = 1;
+			sim.addShip(enf);
+			enf.volume = ShipModel.geometry((ShipModel.Source) enf.modelSource, t).volume;
+			arm(game, enf, "enforcer", "enforcer_Assault");
+			enf.flux = CombatBench.flux(hulls.get("enforcer"), t);
+			enf.hullMax = enf.hull = 4000f;
+			enf.armor = new s3d.core.ArmorShell(900f);
+			enf.pos.set(150f, 40f, -1800f);
+			enf.rot.setAxisAngle(0, 1, 0, 2.6f);
+			PilotInput in = new PilotInput();
+			in.screenW = w;
+			in.screenH = h;
+			in.mouseX = w * 0.5f;
+			in.mouseY = h * 0.5f;
+			sim.target = enf;
+			for (int i = 0; i < 30; i++) {
+				sim.update(in, 1f / 60f, 1f / 60f);
+				in.clearPressed();
+			}
+			if (v == 0) {
+				for (int az = 0; az < 3; az++) p.armor.strip(s3d.core.ArmorShell.sector(-40f, 30f, 1) + az - 1, 900f);
+				for (int az = 0; az < 2; az++) enf.armor.strip(s3d.core.ArmorShell.sector(0f, -60f, 1) + az, 800f);
+				enf.hull = 2300f;
+				p.flux.flux = 5200f;
+				p.flux.hardFlux = 2100f;
+				p.flux.shieldOn = true;
+				p.flux.unfold = 1f;
+				p.system.state = s3d.core.ShipSystem3D.State.COOLDOWN;
+				p.system.stateTime = 4f;
+				if (p.weapons.size() > 1) p.weapons.get(1).disabledFor = 6f;
+				for (s3d.core.WeaponMount m : p.weapons) if (m.spec.maxAmmo > 0) m.ammo = 1f;
+				for (s3d.core.WeaponMount m : p.weapons) if (m.spec.maxAmmo <= 0 && m.disabledFor <= 0f) {
+					m.cooldownLeft = m.spec.cooldown * 0.6f; // the guns of group 1 cycling
+					break;
+				}
+				p.selectedGroup = 0;
+			} else {
+				p.flux.flux = p.flux.hardFlux = 0f;
+				p.system.state = s3d.core.ShipSystem3D.State.ACTIVE;
+				p.system.stateTime = 2f;
+				p.selectedGroup = Math.min(1, p.groups.size() - 1);
+			}
+			renderer.renderScene(sim, w, h, target[0]);
+			HudRenderer.Info info = new HudRenderer.Info();
+			renderer.renderHud(sim, in, info, w, h);
+			BufferedImage img = read(w, h);
+			String name = v == 0 ? "ship_panel" : "ship_panel_b";
+			ImageIO.write(img, "png", new File(dir, name + ".png"));
+			ImageIO.write(img.getSubimage(0, h - 380, 760, 380), "png", new File(dir, name + "_crop.png"));
+			StringBuilder groups = new StringBuilder();
+			for (s3d.core.WeaponGroup3D g : p.groups) groups.append(" [").append(g.label()).append(g.autofire ? " auto" : "").append(']');
+			System.out.println("wrote " + name + ".png: " + d[0] + groups);
 		}
 	}
 
@@ -621,7 +860,6 @@ public final class MeshPreview {
 		}
 		renderer.renderScene(sim, w, h, target[0]);
 		HudRenderer.Info sinfo = new HudRenderer.Info();
-		for (String a : t.keys.keySet()) sinfo.keyNames.put(a, t.keys.get(a));
 		renderer.renderHud(sim, spec, sinfo, w, h);
 		ImageIO.write(read(w, h), "png", new File(dir, "spectate.png"));
 		int up = 0;
@@ -743,7 +981,6 @@ public final class MeshPreview {
 		sim.update(in, 1f / 60f, 1f / 60f);
 		renderer.renderScene(sim, w, h, target[0]);
 		HudRenderer.Info hinfo = new HudRenderer.Info();
-		for (String a : t.keys.keySet()) hinfo.keyNames.put(a, t.keys.get(a));
 		renderer.renderHud(sim, in, hinfo, w, h);
 		ImageIO.write(read(w, h), "png", new File(dir, "station_target.png"));
 		int dead = 0;

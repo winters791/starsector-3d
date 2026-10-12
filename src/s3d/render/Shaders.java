@@ -19,8 +19,10 @@ final class Shaders {
 			varying float v_side;
 			varying vec3 v_wpos;
 			varying vec3 v_tan;
+			varying float v_ny;
 			void main() {
 				vec4 wp = u_model * vec4(a_pos, 1.0);
+				v_ny = a_nrm.y;
 				v_wpos = wp.xyz;
 				mat3 m3 = mat3(u_model[0].xyz, u_model[1].xyz, u_model[2].xyz);
 				v_nrm = m3 * a_nrm;
@@ -50,10 +52,20 @@ final class Shaders {
 			varying float v_side;
 			varying vec3 v_wpos;
 			varying vec3 v_tan;
+			varying float v_ny;
 			void main() {
 				vec3 base = texture2D(u_tex, v_uv).rgb;
 				float lum = dot(base, vec3(0.299, 0.587, 0.114));
-				if (v_side > 1.5) {
+				float bumpW = 1.0;
+				if (v_side > 2.5) {
+					// hand-made model: the same three looks, blended by which way the surface faces the ship
+					float wallW = 1.0 - smoothstep(0.3, 0.7, abs(v_ny));
+					float underW = 1.0 - smoothstep(-0.5, -0.1, v_ny);
+					vec3 under = mix(mix(vec3(lum), base, 0.55) * 0.8, u_tint * 0.7, 0.3);
+					base = mix(base, under, underW);
+					base = mix(base, mix(base, u_tint, 0.4) * 0.8, wallW);
+					bumpW = 1.0 - wallW;
+				} else if (v_side > 1.5) {
 					// edge wall: hull colour from the sprite's edge texels, slightly darkened
 					base = mix(base, u_tint, 0.4) * 0.8;
 				} else if (v_side > 0.5) {
@@ -63,12 +75,12 @@ final class Shaders {
 				}
 				vec3 n = normalize(v_nrm);
 				if (!gl_FrontFacing) n = -n;
-				if (v_side < 1.5 && u_bump > 0.0) {
+				if ((v_side < 1.5 || v_side > 2.5) && u_bump > 0.0) {
 					// Panel detail: tangent along the sprite's x axis, bitangent down the image (+z).
 					vec3 T = normalize(v_tan - n * dot(v_tan, n));
 					vec3 B = normalize(cross(T, n));
 					vec2 g = texture2D(u_nrm, v_uv).rg * 2.0 - 1.0;
-					n = normalize(n + (g.x * T + g.y * B) * u_bump);
+					n = normalize(n + (g.x * T + g.y * B) * u_bump * bumpW);
 				}
 				vec3 V = normalize(u_camPos - v_wpos);
 				float ndl = max(dot(n, u_lightDir), 0.0);

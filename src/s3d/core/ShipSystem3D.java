@@ -14,10 +14,11 @@ import s3d.math.Vec3;
  */
 public final class ShipSystem3D {
 	public enum Kind {
-		BURN_DRIVE, MANEUVERING_JETS, PLASMA_JETS, MICROBURN, DISPLACER,
-		AMMO_FEED, HIGH_ENERGY_FOCUS, FAST_MISSILE_RACKS,
+		BURN_DRIVE, MANEUVERING_JETS, PLASMA_JETS, MICROBURN, DISPLACER, PHASE_TELEPORTER,
+		AMMO_FEED, HIGH_ENERGY_FOCUS, FAST_MISSILE_RACKS, MISSILE_AUTOFORGE, LIDAR_ARRAY,
 		FORTRESS_SHIELD, DAMPER, TEMPORAL_SHELL, PHASE_CLOAK,
-		EMP_EMITTER, FLARES, RECALL, UNSUPPORTED
+		EMP_EMITTER, FLARES, RECALL, ENTROPY_AMPLIFIER, MINE_STRIKE, CANISTER_FLAK,
+		TARGETING_FEED, DRONE_STRIKE, UNSUPPORTED
 	}
 
 	public enum State { IDLE, IN, ACTIVE, OUT, COOLDOWN }
@@ -34,14 +35,46 @@ public final class ShipSystem3D {
 	public boolean firingAllowed = true, turningAllowed = true, shieldAllowed = true, dissipationAllowed = true, alwaysAccelerate;
 	/** Vanilla sound ids for using, running and switching off the system (null = none). */
 	public String useSound, loopSound, offSound;
-	/** EMP emitter: range, damage and EMP per arc. */
+	/** EMP emitter: range, damage and EMP per arc. Also the reach of the systems that act at a distance (vanilla map units). */
 	public float range = 1000f, damage, empDamage;
+	/**
+	 * Missile Autoforge: usable once a missile rack is below this fraction of its ammo; refills each by
+	 * its base ammo (reloadBaseOnly) or to full.
+	 */
+	public float reloadBelow = 1f;
+	public boolean reloadBaseOnly;
+	/** Entropy Amplifier: damage-taken multiplier on its target. Targeting Feed: damage multiplier on the carrier's fighters. */
+	public float effectMult = 1f;
+	/** Lidar Array at full effect: range bonus (fraction), rate-of-fire multiplier bonus, shot speed bonus (fraction). */
+	public float lidarRange, lidarRof, lidarSpeed;
+	/** Mine Strike: the mine. Canister Flak: the canister. Termination Sequence: the missile a drone becomes. */
+	public WeaponSpec3D payload;
+	/** Canister Flak: the hidden system slots it throws canisters from, and canisters per slot per use. */
+	public final java.util.List<WeaponMount> slots = new java.util.ArrayList<>();
+	public int burst = 1;
+	/** Termination Sequence: drones turned into missiles per use. */
+	public int dronesPerUse = 1;
+	/** For the log: what the host set up for this system. */
+	public String note;
 
 	// ---- state ----
 	public State state = State.IDLE;
 	public float stateTime, effect, ammo;
 	private float pulseTimer;
 	private boolean fired;
+	/** Entropy Amplifier: the ship it's working on (picked when used). */
+	public Ship3D sysTarget;
+	/** Canister Flak: canisters still to throw from each slot, and each slot's wait until the next. */
+	private int[] slotLeft;
+	private float[] slotWait;
+	/** The sim this system was last stepped in (to find targets when it's used). */
+	private Sim sim;
+	private static final java.util.Random RND = new java.util.Random();
+
+	/** Fixes the random rolls (canister directions, speeds and fuses, slot waits) so a benchmark repeats. */
+	public static void seed(long seed) {
+		RND.setSeed(seed);
+	}
 
 	public ShipSystem3D(String id, String name, Kind kind) {
 		this.id = id;
@@ -51,6 +84,14 @@ public final class ShipSystem3D {
 
 	/** Maps a vanilla system id to the 3D kind that rebuilds it (UNSUPPORTED if there's none yet). */
 	public static Kind kindFor(String id, boolean phaseCloak) {
+		return kindFor(id, phaseCloak, null, null);
+	}
+
+	/**
+	 * As above; a system we don't know by id (another mod's) falls back on its vanilla system type or AI
+	 * type where those pin down what it does (a reload, a skimmer, a teleporter, an entropy amplifier).
+	 */
+	public static Kind kindFor(String id, boolean phaseCloak, String type, String aiType) {
 		if (phaseCloak) return Kind.PHASE_CLOAK;
 		if (id == null) return Kind.UNSUPPORTED;
 		switch (id) {
@@ -58,10 +99,13 @@ public final class ShipSystem3D {
 			case "maneuveringjets": return Kind.MANEUVERING_JETS;
 			case "plasmajets": return Kind.PLASMA_JETS;
 			case "microburn": case "microburn_omega": return Kind.MICROBURN;
-			case "displacer": return Kind.DISPLACER;
+			case "displacer": case "displacer_degraded": case "displacer_threat": return Kind.DISPLACER;
+			case "phaseteleporter": return Kind.PHASE_TELEPORTER;
 			case "ammofeed": return Kind.AMMO_FEED;
 			case "highenergyfocus": return Kind.HIGH_ENERGY_FOCUS;
 			case "fastmissileracks": return Kind.FAST_MISSILE_RACKS;
+			case "forgevats": case "forgevats_station": return Kind.MISSILE_AUTOFORGE;
+			case "lidararray": return Kind.LIDAR_ARRAY;
 			case "fortressshield": return Kind.FORTRESS_SHIELD;
 			case "damper": case "damper_omega": return Kind.DAMPER;
 			case "temporalshell": return Kind.TEMPORAL_SHELL;
@@ -69,7 +113,17 @@ public final class ShipSystem3D {
 			case "emp": return Kind.EMP_EMITTER;
 			case "flarelauncher": case "flarelauncher_active": case "flarelauncher_fighter": return Kind.FLARES;
 			case "recalldevice": return Kind.RECALL;
-			default: return Kind.UNSUPPORTED;
+			case "entropyamplifier": return Kind.ENTROPY_AMPLIFIER;
+			case "mine_strike": case "mine_strike_station": return Kind.MINE_STRIKE;
+			case "canister_flak": return Kind.CANISTER_FLAK;
+			case "targetingfeed": return Kind.TARGETING_FEED;
+			case "drone_strike": return Kind.DRONE_STRIKE;
+			default:
+				if ("ENTROPY_AMPLIFIER".equals(aiType)) return Kind.ENTROPY_AMPLIFIER;
+				if ("AMMO_RELOAD".equals(type)) return Kind.MISSILE_AUTOFORGE;
+				if ("DISPLACER".equals(type)) return Kind.DISPLACER;
+				if ("TELEPORTER".equals(type)) return Kind.PHASE_TELEPORTER;
+				return Kind.UNSUPPORTED;
 		}
 	}
 
@@ -85,7 +139,48 @@ public final class ShipSystem3D {
 		if (!supported() || state != State.IDLE) return false;
 		if (maxAmmo > 0 && ammo < 1f) return false;
 		if (s.flux != null && s.flux.disabled()) return false;
+		if (!usable(s)) return false;
 		return s.flux == null || s.flux.maxFlux <= 0f || s.flux.flux + fluxPerUse <= s.flux.maxFlux;
+	}
+
+	/** Kinds that need something to work on: a low missile rack, a target in reach, a drone. */
+	private boolean usable(Ship3D s) {
+		switch (kind) {
+			case MISSILE_AUTOFORGE:
+				for (WeaponMount m : s.weapons) {
+					if (m.spec.kind == WeaponSpec3D.Kind.MISSILE && m.spec.maxAmmo > 0 && m.ammo < m.spec.maxAmmo * reloadBelow) return true;
+				}
+				return false;
+			case ENTROPY_AMPLIFIER:
+				return sim != null && validTarget(s, aimedShip(s, sim), range * sim.tuning.weaponRangeMult);
+			case DRONE_STRIKE: {
+				if (sim == null || payload == null) return false;
+				if (!validTarget(s, aimedShip(s, sim), payload.range * sim.tuning.weaponRangeMult)) return false;
+				for (Ship3D f : sim.ships) if (isDrone(s, f)) return true;
+				return false;
+			}
+			case MINE_STRIKE:
+				return sim != null && payload != null && (s == sim.player ? sim.hasAimPoint : aimedShip(s, sim) != null);
+			case CANISTER_FLAK:
+				return payload != null && !slots.isEmpty();
+			default:
+				return true;
+		}
+	}
+
+	/** An enemy this system can work on, whose hull is within reach (3D units). */
+	private static boolean validTarget(Ship3D s, Ship3D t, float reach) {
+		return t != null && !t.destroyed && !t.phased && !t.invulnerable && t.owner != s.owner && t.surfaceDistance(s.pos) <= reach;
+	}
+
+	/** The ship a system aims at: yours = your locked target (else the one nearest the reticle); an AI's = its target. */
+	static Ship3D aimedShip(Ship3D s, Sim sim) {
+		if (s == sim.player) return sim.aimTarget;
+		return s.ai != null ? s.ai.target : null;
+	}
+
+	private static boolean isDrone(Ship3D carrier, Ship3D f) {
+		return f.fighter && f.carrier == carrier && !f.destroyed && f.carriedBy == null;
 	}
 
 	/** Use / toggle. Returns true if something happened. */
@@ -104,6 +199,7 @@ public final class ShipSystem3D {
 		fired = false;
 		pulseTimer = 0f;
 		justUsed = true;
+		if (kind == Kind.ENTROPY_AMPLIFIER) sysTarget = aimedShip(s, sim); // usable() made sure it's valid
 		return true;
 	}
 
@@ -124,7 +220,9 @@ public final class ShipSystem3D {
 	 * modifiers (reset by the sim every frame before this runs).
 	 */
 	public void step(Ship3D s, Sim sim, float dt) {
+		this.sim = sim;
 		if (dt <= 0f || !supported()) return;
+		if (kind == Kind.CANISTER_FLAK) throwCanisters(s, sim, dt);
 		if (maxAmmo > 0 && ammo < maxAmmo) ammo = Math.min(maxAmmo, ammo + ammoPerSecond * dt);
 		if (on() && s.flux != null && s.flux.disabled()) {
 			state = State.OUT; // overloaded or venting shuts systems down
@@ -199,7 +297,142 @@ public final class ShipSystem3D {
 			case RECALL:
 				for (Ship3D f : sim.ships) if (f.fighter && f.carrier == s && !f.destroyed) f.landed = true;
 				break;
+			case MISSILE_AUTOFORGE:
+				for (WeaponMount m : s.weapons) {
+					if (m.spec.kind != WeaponSpec3D.Kind.MISSILE || m.spec.maxAmmo <= 0) continue;
+					int add = reloadBaseOnly && m.spec.baseMaxAmmo > 0 ? m.spec.baseMaxAmmo : m.spec.maxAmmo;
+					m.ammo = Math.min(m.spec.maxAmmo, m.ammo + add);
+				}
+				sim.combat.effects.add(new Effect(Effect.Kind.FLASH, s.pos, s.radius * 0.6f, 0.4f).color(1f, 0.7f, 0.3f));
+				break;
+			case PHASE_TELEPORTER:
+				teleport(s, sim);
+				break;
+			case MINE_STRIKE:
+				layMine(s, sim);
+				break;
+			case CANISTER_FLAK:
+				if (slotLeft == null || slotLeft.length != slots.size()) {
+					slotLeft = new int[slots.size()];
+					slotWait = new float[slots.size()];
+				}
+				for (int i = 0; i < slotLeft.length; i++) {
+					slotLeft[i] += Math.max(1, burst);
+					slotWait[i] = 0f;
+				}
+				break;
+			case DRONE_STRIKE:
+				launchDrones(s, sim);
+				break;
 			default:
+		}
+	}
+
+	/**
+	 * Phase Teleporter: a jump to where you aim (an AI picks its own spot), up to the system's range;
+	 * it never ends up inside another hull.
+	 */
+	private void teleport(Ship3D s, Sim sim) {
+		float reach = range * sim.tuning.weaponRangeMult;
+		Vec3 dest = null;
+		if (s == sim.player) {
+			if (sim.hasAimPoint) dest = new Vec3(sim.aimPoint);
+		} else if (s.ai != null) {
+			dest = s.ai.teleportDestination(sim, s, reach);
+		}
+		if (dest == null) dest = new Vec3(s.pos).addScaled(s.rot.forward(new Vec3()), reach);
+		Vec3 d = new Vec3(dest).sub(s.pos);
+		if (d.length() > reach) dest.set(s.pos).addScaled(d.normalize(), reach);
+		for (Ship3D o : sim.ships) {
+			if (o == s || o.destroyed || o.fighter) continue;
+			Vec3 away = new Vec3(dest).sub(o.pos);
+			float clear = o.extent() + s.radius;
+			float len = away.length();
+			if (len >= clear) continue;
+			if (len < 1e-3f) away.set(s.pos).sub(o.pos);
+			if (away.lengthSq() < 1e-6f) away.set(0f, 1f, 0f);
+			dest.set(o.pos).addScaled(away.normalize(), clear);
+		}
+		Vec3 from = new Vec3(s.pos);
+		s.pos.set(dest);
+		sim.combat.effects.add(new Effect(Effect.Kind.FLASH, from, s.radius * 1.6f, 0.5f).color(0.4f, 0.65f, 1f));
+		sim.combat.effects.add(new Effect(Effect.Kind.FLASH, s.pos, s.radius * 1.6f, 0.5f).color(0.4f, 0.65f, 1f));
+	}
+
+	/**
+	 * Mine Strike: a mine appears where you aim (an AI: where its target is heading), within the
+	 * system's range; if that's inside a hull, just outside it on the near side.
+	 */
+	private void layMine(Ship3D s, Sim sim) {
+		float reach = range * sim.tuning.weaponRangeMult + s.radius;
+		Ship3D t = aimedShip(s, sim);
+		Vec3 at;
+		if (s == sim.player) at = new Vec3(sim.aimPoint);
+		else if (t != null) at = new Vec3(t.pos).addScaled(t.vel, payload.mineArmTime + payload.mineWindup);
+		else return;
+		Vec3 d = new Vec3(at).sub(s.pos);
+		if (d.length() > reach) at.set(s.pos).addScaled(d.normalize(), reach);
+		for (Ship3D o : sim.ships) {
+			if (o.destroyed || o.fighter) continue;
+			Vec3 toward = new Vec3(s.pos).sub(o.pos);
+			if (toward.lengthSq() < 1e-6f) continue;
+			if (o.surfaceDistance(at) > payload.missileRadius) continue;
+			// Inside (or touching) a hull: out to its surface on the side facing the layer.
+			toward.normalize();
+			at.set(o.pos).addScaled(toward, o.reachToward(toward) + payload.missileRadius * 2f + 20f);
+		}
+		Vec3 jitter = new Vec3(RND.nextFloat() - 0.5f, RND.nextFloat() - 0.5f, RND.nextFloat() - 0.5f).scale(60f);
+		sim.combat.spawnMissile(s, payload, at.add(jitter), new Vec3(RND.nextFloat() - 0.5f, 0f, RND.nextFloat() - 0.5f), 0f, null);
+		sim.combat.effects.add(new Effect(Effect.Kind.FLASH, at, payload.missileRadius * 6f, 0.5f).color(1f, 0.35f, 0.25f));
+	}
+
+	/**
+	 * Canister Flak: each slot throws its canisters one by one, a quarter to one second apart, at random
+	 * speeds and fuses. Vanilla throws them along the slot's arc in its plane; in 3D they spread through
+	 * a cone round the slot's direction (at least 45 deg half-angle) so the cloud screens from above and
+	 * below too.
+	 */
+	private void throwCanisters(Ship3D s, Sim sim, float dt) {
+		if (slotLeft == null || payload == null || s.destroyed) return;
+		for (int i = 0; i < slotLeft.length; i++) {
+			if (slotLeft[i] <= 0) continue;
+			slotWait[i] -= dt;
+			if (slotWait[i] > 0f) continue;
+			slotWait[i] = 0.25f + 0.75f * RND.nextFloat();
+			slotLeft[i]--;
+			WeaponMount m = slots.get(i);
+			Vec3 dir = randomInCone(m.restDir, Math.max(m.halfArcRad, (float) Math.toRadians(45)));
+			s.rot.rotate(dir, dir);
+			float speed = Math.max(payload.launchSpeed, payload.missileMaxSpeed) * (0.25f + 0.75f * RND.nextFloat());
+			Missile3D c = sim.combat.spawnMissile(s, payload, m.worldPos(s, new Vec3()), dir, speed, null);
+			c.lifeMult = 0.25f + 0.75f * RND.nextFloat();
+			sim.combat.sounds.play(payload.fireSound, c.pos, 0.8f);
+		}
+	}
+
+	/** A random direction within half-angle `half` of unit vector axis, spread evenly over the cone's solid angle. */
+	private static Vec3 randomInCone(Vec3 axis, float half) {
+		float cosMax = (float) Math.cos(Math.min(half, Math.PI));
+		float c = 1f - RND.nextFloat() * (1f - cosMax), sn = (float) Math.sqrt(Math.max(0f, 1f - c * c));
+		double phi = RND.nextDouble() * Math.PI * 2;
+		Vec3 u = new Vec3(Math.abs(axis.y) < 0.9f ? 0f : 1f, Math.abs(axis.y) < 0.9f ? 1f : 0f, 0f).cross(axis).normalize();
+		Vec3 v = new Vec3(axis).cross(u);
+		return new Vec3(axis).scale(c).addScaled(u, sn * (float) Math.cos(phi)).addScaled(v, sn * (float) Math.sin(phi)).normalize();
+	}
+
+	/** Termination Sequence: the drones nearest the target become missiles at it (each drone rides its missile and dies with it). */
+	private void launchDrones(Ship3D s, Sim sim) {
+		Ship3D t = aimedShip(s, sim);
+		if (t == null || payload == null) return;
+		java.util.List<Ship3D> drones = new java.util.ArrayList<>();
+		for (Ship3D f : sim.ships) if (isDrone(s, f)) drones.add(f);
+		drones.sort((a, b) -> Float.compare(a.pos.distance(t.pos), b.pos.distance(t.pos)));
+		for (int i = 0; i < Math.min(dronesPerUse, drones.size()); i++) {
+			Ship3D d = drones.get(i);
+			Vec3 dir = new Vec3(t.pos).sub(d.pos);
+			Missile3D m = sim.combat.spawnMissile(s, payload, d.pos, dir, Math.max(payload.launchSpeed, d.speed()), t);
+			m.vel.set(d.vel).addScaled(m.dir, Math.max(0f, payload.launchSpeed));
+			sim.combat.carry(m, d);
 		}
 	}
 
@@ -208,7 +441,7 @@ public final class ShipSystem3D {
 		Tuning t = sim.tuning;
 		float e = effect;
 		if (!firingAllowed) s.sysNoFire = true;
-		if (!turningAllowed) s.sysTurnMult *= 1f - e;
+		if (!turningAllowed && kind != Kind.BURN_DRIVE) s.sysTurnMult *= 1f - e; // Burn Drive keeps some steering (sysBurnTurnMult)
 		if (!shieldAllowed) s.sysNoShield = true;
 		if (!dissipationAllowed) s.sysNoDissipation = true;
 		if (alwaysAccelerate) s.sysFullThrottle = true;
@@ -268,6 +501,38 @@ public final class ShipSystem3D {
 					}
 				}
 				break;
+			case ENTROPY_AMPLIFIER: {
+				// The target takes more damage from everything, hull, armor and shield (the sim resets every
+				// ship's modifiers before any system runs, so this sticks for the frame).
+				Ship3D tg = sysTarget;
+				if (tg == null || tg.destroyed) break;
+				float k = 1f + (effectMult - 1f) * e;
+				tg.sysDamageTakenMult *= k;
+				tg.sysShieldDamageTakenMult *= k;
+				pulseTimer -= dt;
+				if (pulseTimer <= 0f) {
+					pulseTimer = 0.25f;
+					Effect glow = new Effect(Effect.Kind.FLASH, tg.pos, tg.radius * (0.9f + 0.3f * RND.nextFloat()), 0.35f).color(1f, 0.2f, 0.2f);
+					glow.vel.set(tg.vel);
+					sim.combat.effects.add(glow);
+				}
+				break;
+			}
+			case TARGETING_FEED:
+				for (Ship3D f : sim.ships) {
+					if (f.fighter && f.carrier == s && !f.destroyed) f.sysDamageMult *= 1f + (effectMult - 1f) * e;
+				}
+				break;
+			case LIDAR_ARRAY:
+				if (state == State.IN) {
+					s.sysLidar = 1; // winding up: only missiles may fire
+				} else {
+					s.sysLidar = 2;
+					s.sysLidarRangeMult *= 1f + lidarRange * e;
+					s.sysLidarRofMult *= 1f + lidarRof * e;
+					s.sysLidarSpeedMult *= 1f + lidarSpeed * e;
+				}
+				break;
 			default:
 		}
 	}
@@ -276,6 +541,8 @@ public final class ShipSystem3D {
 		state = State.IDLE;
 		stateTime = effect = 0f;
 		ammo = maxAmmo;
+		sysTarget = null;
+		slotLeft = null;
 	}
 
 	public String status() {

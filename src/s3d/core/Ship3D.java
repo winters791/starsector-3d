@@ -11,6 +11,8 @@ public final class Ship3D {
 	public final String id;
 	public String name;
 	public String hullName;
+	/** Variant and role ("Custom Combat Freighter") for your ship panel; null if unknown. */
+	public String variantName;
 	public int owner;
 
 	public final Vec3 pos = new Vec3();
@@ -95,6 +97,12 @@ public final class Ship3D {
 	public float engineMaxHp = 100f;
 	/** Seconds a disabled weapon / engine takes to come back (hull stats included), and EMP taken multiplier. */
 	public float weaponRepairTime = 10f, engineRepairTime = 8f, empTakenMult = 1f;
+	/** Repair speed of disabled weapons and engines (slowed by Reality Disruptor / Inimical Emanation arcs). */
+	public float repairRateMult = 1f;
+	/** Threat fragment swarm (fragment weapons need it), or null. */
+	public FragmentSwarm fragments;
+	/** Dweller (shrouded) ships: how much of a Hungering Rift heal they take (0 = can't be healed that way). */
+	public float riftHealMult;
 	// ---- ship system ----
 	/** The hull's system (F) and its phase cloak (right click, instead of a shield), or null. */
 	public ShipSystem3D system, cloak;
@@ -103,6 +111,16 @@ public final class Ship3D {
 	public float sysBallisticRofMult = 1f, sysBallisticFluxMult = 1f, sysEnergyDamageMult = 1f;
 	public float sysDamageTakenMult = 1f, sysShieldDamageTakenMult = 1f;
 	public boolean sysNoFire, sysNoShield, sysNoDissipation, sysFullThrottle, sysForceShield;
+	/** Damage multiplier on all of this ship's weapons this frame (a carrier's Targeting Feed on its fighters). */
+	public float sysDamageMult = 1f;
+	/**
+	 * Lidar Array this frame: 1 = winding up (only missiles may fire), 2 = firing (only hardpoint
+	 * ballistic/energy guns, not beams, plus missiles), with these range / rate of fire / shot speed bonuses.
+	 */
+	public int sysLidar;
+	public float sysLidarRangeMult = 1f, sysLidarRofMult = 1f, sysLidarSpeedMult = 1f;
+	/** A drone flying as a Termination Sequence missile: carried along by it instead of flying itself. */
+	public Missile3D carriedBy;
 	/** Time dilation (temporal shell, phase): this ship's own flight and weapons run this much faster. */
 	public float timeMult = 1f;
 	/** Phase cloak: phased = intangible and can't fire; phaseLevel 0..1 for the look. */
@@ -115,6 +133,9 @@ public final class Ship3D {
 		sysBallisticRofMult = sysBallisticFluxMult = sysEnergyDamageMult = 1f;
 		sysDamageTakenMult = sysShieldDamageTakenMult = 1f;
 		sysNoFire = sysNoShield = sysNoDissipation = sysFullThrottle = sysForceShield = false;
+		sysDamageMult = 1f;
+		sysLidar = 0;
+		sysLidarRangeMult = sysLidarRofMult = sysLidarSpeedMult = 1f;
 		timeMult = 1f;
 		phased = false;
 		phaseLevel = 0f;
@@ -130,6 +151,12 @@ public final class Ship3D {
 	public boolean retreatOrdered;
 	/** Standing order from vanilla's command map (escort, hold, capture, attack, avoid); null = fight freely. */
 	public Order3D order;
+	/**
+	 * AI: this ship's guns (missiles left out) by vanilla range, longest first, and the dps of all the guns
+	 * reaching at least that far. Built on first use by ShipAI3D.gunsReaching (other ships' pilots ask it
+	 * how much of this ship's firepower reaches a point).
+	 */
+	public float[] gunRanges, gunDpsReaching;
 
 	// ---- stations and modules ----
 	/**
@@ -201,6 +228,8 @@ public final class Ship3D {
 		if (system != null) system.reset();
 		if (cloak != null) cloak.reset();
 		resetSystemEffects();
+		repairRateMult = 1f;
+		if (fragments != null) fragments.count = fragments.size;
 	}
 
 	/** Back-reference for the host (e.g. the vanilla puppet ShipAPI). Never read by core code. */
@@ -227,6 +256,7 @@ public final class Ship3D {
 
 	/** Counts down disabled weapons and engines; repaired ones come back at full health. */
 	public void stepRepairs(float dt) {
+		dt *= repairRateMult;
 		for (WeaponMount m : weapons) {
 			if (m.disabledFor <= 0f) continue;
 			m.disabledFor -= dt;

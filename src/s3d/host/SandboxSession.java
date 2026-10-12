@@ -58,7 +58,6 @@ final class SandboxSession extends Session3D {
 		spawnReferenceLineup();
 		spawnMovingTarget();
 		freezePuppets();
-		toast("3D sandbox ready. H for controls.");
 		log.info("S3D: sandbox started with " + sim.ships.size() + " ships; tuning #" + cfg.hash
 				+ (cfg.error != null ? " (" + cfg.error + ")" : ""));
 	}
@@ -136,16 +135,6 @@ final class SandboxSession extends Session3D {
 	@Override
 	protected void fillAlerts(List<String> alerts) {
 		// The sandbox has nothing to warn about; the hull name shows as a toast when you switch.
-	}
-
-	@Override
-	protected String[] sessionHelpLines() {
-		return new String[] {
-				"SANDBOX",
-				"  " + k("prevHull") + " / " + k("nextHull") + " ............ previous / next hull",
-				"  " + k("resetTargets") + " ................ repair and rearm everything (you too)",
-				"  " + k("incomingFire") + " ................ incoming fire test: enemy missile launchers shoot at you",
-		};
 	}
 
 	@Override

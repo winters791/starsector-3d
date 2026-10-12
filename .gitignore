@@ -4,3 +4,7 @@ jars/
 
 # Local screenshots and logs
 *.log
+
+# Python bytecode (src-art scripts)
+__pycache__/
+*.pyc

@@ -4,7 +4,8 @@ import s3d.math.Vec3;
 
 /** Short-lived visual events produced by the sim (drawn by the renderer / HUD, never simulated). */
 public final class Effect {
-	public enum Kind { FLASH, SPARK, DAMAGE_TEXT, EXPLOSION, ARC }
+	/** RIFT: a dark tear with a coloured rim (Omega / Dweller rifts). */
+	public enum Kind { FLASH, SPARK, DAMAGE_TEXT, EXPLOSION, ARC, RIFT }
 
 	public final Kind kind;
 	public final Vec3 pos = new Vec3(), vel = new Vec3();

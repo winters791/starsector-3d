@@ -14,6 +14,7 @@ import org.lwjgl.opengl.GL20;
 import com.fs.starfarer.api.Global;
 
 import s3d.core.ChaseCamera;
+import s3d.core.Combat;
 import s3d.core.Effect;
 import s3d.core.Missile3D;
 import s3d.core.EngineMount;
@@ -74,34 +75,41 @@ public final class Renderer3D {
 		log.info("S3D: renderer initialised");
 	}
 
-	/** HUD overlay, then the target hologram the HUD asked for (it needs the 3D mesh). */
+	/** HUD overlay, then the holograms the HUD asked for (they need the 3D mesh): your ship's and the target's. */
 	public void renderHud(Sim sim, s3d.core.PilotInput in, HudRenderer.Info info, int w, int h) {
 		hud.render(sim, in, info, w, h);
-		if (hud.holoShip != null) renderHologram(hud.holoShip, sim.tuning, hud.holoX, hud.holoY, hud.holoW, hud.holoH, sim.time, w, h);
-		hud.holoShip = null;
+		for (HudRenderer.Holo req : new HudRenderer.Holo[] {hud.ownHolo, hud.targetHolo}) {
+			if (req.ship != null) renderHologram(req.ship, sim.tuning, req, sim.time, w, h);
+			req.ship = null;
+		}
 	}
 
 	private final Mat4 holoProj = new Mat4(), holoModel = new Mat4(), holoMvp = new Mat4();
 	private final float[] holoArmor = new float[s3d.core.ArmorShell.AZ * s3d.core.ArmorShell.EL];
 
 	/**
-	 * The target as a slowly turning hologram in a screen box: its own mesh, additive, cyan where the
-	 * armor is whole and amber to red where it's gone (by direction), dimmer as hull drops.
+	 * A ship as a hologram in a screen box: its own mesh, additive, cyan where the armor is whole and
+	 * amber to red where it's gone (by direction), dimmer as hull drops. The target turns slowly; your
+	 * own ship points nose up as vanilla's panel shows it, swaying a little.
 	 */
-	private void renderHologram(Ship3D s, Tuning t, float x, float y, float bw, float bh, float time, int w, int h) {
+	private void renderHologram(Ship3D s, Tuning t, HudRenderer.Holo req, float time, int w, int h) {
 		ShipModel m = modelFor(s, t);
 		if (m == null) return;
-		GL11.glViewport((int) x, (int) y, (int) bw, (int) bh);
+		float bw = req.w, bh = req.h;
+		GL11.glViewport((int) req.x, (int) req.y, (int) bw, (int) bh);
 		GL11.glDisable(GL11.GL_DEPTH_TEST);
 		GL11.glDisable(GL11.GL_CULL_FACE);
 		GL11.glEnable(GL11.GL_BLEND);
 		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
 		float r = Math.max(5f, s.baseRadius);
 		float fov = (float) Math.toRadians(30);
-		float dist = r / (float) Math.tan(fov * 0.5f) * 0.85f;
+		float dist = r / (float) Math.tan(fov * 0.5f) * (req.noseUp ? 0.92f : 0.85f);
 		holoProj.perspective(fov, bw / Math.max(1f, bh), dist * 0.2f, dist * 3f);
-		// Seen from well above (the silhouette is what identifies a hull), turning slowly.
-		Quat q = new Quat().setAxisAngle(1, 0, 0, 0.95f).mulLocal(new Quat().setAxisAngle(0, 1, 0, time * 0.5f));
+		Quat q = req.noseUp
+				// From above and a little behind, nose to the top of the box.
+				? new Quat().setAxisAngle(1, 0, 0, 1.2f).mulLocal(new Quat().setAxisAngle(0, 1, 0, 0.3f * (float) Math.sin(time * 0.35f)))
+				// Seen from well above (the silhouette is what identifies a hull), turning slowly.
+				: new Quat().setAxisAngle(1, 0, 0, 0.95f).mulLocal(new Quat().setAxisAngle(0, 1, 0, time * 0.5f));
 		holoModel.fromRotationTranslation(q, 0f, 0f, -dist);
 		holoMvp.mul(holoProj, holoModel);
 		if (s.armor != null) System.arraycopy(s.armor.frac, 0, holoArmor, 0, holoArmor.length);
@@ -173,6 +181,7 @@ public final class Renderer3D {
 		drawArcs(sim);
 		drawMissileFx(sim);
 		drawEffects(sim);
+		drawRifts(sim);
 		drawDust(sim);
 		if (cam.tacticalBlend() > 0.01f) drawTacticalAids(sim, cam.tacticalBlend());
 		GL11.glDepthMask(true);
@@ -528,6 +537,15 @@ public final class Renderer3D {
 		GL11.glBegin(GL11.GL_QUADS);
 		for (Missile3D ms : sim.combat.missiles) {
 			if (ms.flamedOut()) continue;
+			if (ms.spec.mine) {
+				// A mine: a slow red pulse, quick and bright once it's winding up to blow.
+				float rate = ms.windup >= 0f ? 14f : 3f;
+				float pulse = 0.5f + 0.5f * (float) Math.sin(sim.time * rate + ms.spawnPos.x);
+				float size = ms.spec.missileRadius * (ms.windup >= 0f ? 2.2f : 1.4f);
+				GL11.glColor4f(1f, 0.25f, 0.2f, (ms.windup >= 0f ? 0.6f : 0.3f) + 0.4f * pulse);
+				quad(ms.pos, camR, camU, size);
+				continue;
+			}
 			float[] c = ms.spec.missileGlow;
 			float len = ms.spec.missileRadius;
 			a.set(ms.pos).addScaled(ms.dir, -len);
@@ -597,29 +615,28 @@ public final class Renderer3D {
 
 	private void drawBeams(Sim sim) {
 		ChaseCamera cam = sim.camera;
-		Vec3 o = new Vec3(), d = new Vec3(), toCam = new Vec3(), side = new Vec3();
+		Vec3 o = new Vec3();
 		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
+		java.util.List<Combat.PayloadBeam> payloads = sim.combat.payloads;
 		fxShader.set("u_mode", 6);
 		GL11.glBegin(GL11.GL_QUADS);
 		for (Ship3D s : sim.ships) {
 			for (WeaponMount m : s.weapons) {
 				if (m.beamLevel <= 0f) continue;
 				WeaponSpec3D w = m.spec;
-				m.worldPos(s, o);
-				d.set(m.beamEnd).sub(o);
-				if (d.lengthSq() < 1f) continue;
-				toCam.set(cam.pos).sub(o);
-				side.set(d).cross(toCam);
-				if (side.lengthSq() < 1e-6f) continue;
-				float wid = w.beamWidth * (0.35f + 0.65f * m.beamLevel);
-				side.normalize().scale(wid * 0.5f);
-				GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], m.beamLevel);
-				GL14.glSecondaryColor3f(w.coreColor[0], w.coreColor[1], w.coreColor[2]);
-				GL11.glTexCoord2f(0, 0); GL11.glVertex3f(o.x - side.x, o.y - side.y, o.z - side.z);
-				GL11.glTexCoord2f(0, 1); GL11.glVertex3f(o.x + side.x, o.y + side.y, o.z + side.z);
-				GL11.glTexCoord2f(1, 1); GL11.glVertex3f(m.beamEnd.x + side.x, m.beamEnd.y + side.y, m.beamEnd.z + side.z);
-				GL11.glTexCoord2f(1, 0); GL11.glVertex3f(m.beamEnd.x - side.x, m.beamEnd.y - side.y, m.beamEnd.z - side.z);
+				beamRibbon(cam, m.worldPos(s, o), m.beamEnd, w.beamWidth * (0.35f + 0.65f * m.beamLevel), w.fringeColor, w.coreColor, m.beamLevel);
 			}
+		}
+		for (Combat.PayloadBeam pb : payloads) {
+			WeaponMount m = pb.mount;
+			if (m.beamLevel <= 0f) continue;
+			beamRibbon(cam, pb.origin, m.beamEnd, m.spec.beamWidth * (0.35f + 0.65f * m.beamLevel), m.spec.fringeColor, m.spec.coreColor, m.beamLevel);
+		}
+		for (Missile3D ms : sim.combat.missiles) {
+			if (ms.laserLevel <= 0f || ms.spec.dem == null) continue;
+			float[] c = ms.spec.dem.laserColor;
+			float flick = 0.75f + 0.25f * (float) Math.sin(sim.time * 30f + ms.age * 7f);
+			beamRibbon(cam, ms.pos, ms.laserEnd, 3f, c, c, ms.laserLevel * flick);
 		}
 		GL11.glEnd();
 		fxShader.set("u_mode", 2);
@@ -627,19 +644,41 @@ public final class Renderer3D {
 		for (Ship3D s : sim.ships) {
 			for (WeaponMount m : s.weapons) {
 				if (m.beamLevel <= 0f) continue;
-				WeaponSpec3D w = m.spec;
-				m.worldPos(s, o);
-				GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], 0.6f * m.beamLevel);
-				quad(o, camR, camU, w.beamWidth * 1.2f);
-				if (m.beamHitting) {
-					GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], 0.9f * m.beamLevel);
-					quad(m.beamEnd, camR, camU, w.beamWidth * 2.2f);
-					GL11.glColor4f(1f, 0.95f, 0.9f, 0.8f * m.beamLevel);
-					quad(m.beamEnd, camR, camU, w.beamWidth * 0.8f);
-				}
+				beamGlows(m.worldPos(s, o), m, camR, camU);
 			}
 		}
+		for (Combat.PayloadBeam pb : payloads) {
+			if (pb.mount.beamLevel > 0f) beamGlows(pb.origin, pb.mount, camR, camU);
+		}
 		GL11.glEnd();
+	}
+
+	/** One camera-facing beam ribbon from o to end (inside a QUADS batch, fx mode 6). */
+	private static void beamRibbon(ChaseCamera cam, Vec3 o, Vec3 end, float width, float[] fringe, float[] core, float alpha) {
+		float dx = end.x - o.x, dy = end.y - o.y, dz = end.z - o.z;
+		if (dx * dx + dy * dy + dz * dz < 1f) return;
+		Vec3 side = new Vec3(dx, dy, dz).cross(new Vec3(cam.pos).sub(o));
+		if (side.lengthSq() < 1e-6f) return;
+		side.normalize().scale(width * 0.5f);
+		GL11.glColor4f(fringe[0], fringe[1], fringe[2], alpha);
+		GL14.glSecondaryColor3f(core[0], core[1], core[2]);
+		GL11.glTexCoord2f(0, 0); GL11.glVertex3f(o.x - side.x, o.y - side.y, o.z - side.z);
+		GL11.glTexCoord2f(0, 1); GL11.glVertex3f(o.x + side.x, o.y + side.y, o.z + side.z);
+		GL11.glTexCoord2f(1, 1); GL11.glVertex3f(end.x + side.x, end.y + side.y, end.z + side.z);
+		GL11.glTexCoord2f(1, 0); GL11.glVertex3f(end.x - side.x, end.y - side.y, end.z - side.z);
+	}
+
+	/** Glow at a beam's muzzle, and at its far end while it's hitting something (fx mode 2). */
+	private static void beamGlows(Vec3 o, WeaponMount m, Vec3 camR, Vec3 camU) {
+		WeaponSpec3D w = m.spec;
+		GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], 0.6f * m.beamLevel);
+		quad(o, camR, camU, w.beamWidth * 1.2f);
+		if (m.beamHitting) {
+			GL11.glColor4f(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2], 0.9f * m.beamLevel);
+			quad(m.beamEnd, camR, camU, w.beamWidth * 2.2f);
+			GL11.glColor4f(1f, 0.95f, 0.9f, 0.8f * m.beamLevel);
+			quad(m.beamEnd, camR, camU, w.beamWidth * 0.8f);
+		}
 	}
 
 	private final java.util.Random arcRnd = new java.util.Random();
@@ -712,6 +751,52 @@ public final class Renderer3D {
 			}
 		}
 		GL11.glEnd();
+	}
+
+	/**
+	 * Rifts (Omega / Dweller) and Reality Disruptor orbs: a coloured halo, then a dark core taken away
+	 * from whatever is behind it (reverse-subtract blending), so they read as tears in space.
+	 */
+	private void drawRifts(Sim sim) {
+		java.util.List<Missile3D> orbs = sim.combat.exotic.orbs;
+		boolean any = !orbs.isEmpty();
+		for (int i = 0; !any && i < sim.combat.effects.size(); i++) any = sim.combat.effects.get(i).kind == Effect.Kind.RIFT;
+		if (!any) return;
+		ChaseCamera cam = sim.camera;
+		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
+		fxShader.set("u_mode", 2);
+		for (int pass = 0; pass < 2; pass++) {
+			if (pass == 1) GL14.glBlendEquation(GL14.GL_FUNC_REVERSE_SUBTRACT);
+			GL11.glBegin(GL11.GL_QUADS);
+			for (Effect e : sim.combat.effects) {
+				if (e.kind != Effect.Kind.RIFT) continue;
+				float age = e.age01();
+				float alpha = Math.min(1f, age * 10f) * (float) Math.pow(1f - age, 0.8);
+				float size = e.size * (0.75f + 0.35f * (float) Math.sqrt(age));
+				if (pass == 0) {
+					GL11.glColor4f(e.r, e.g, e.b, alpha * 0.8f);
+					quad(e.pos, camR, camU, size * 1.5f);
+				} else {
+					GL11.glColor4f(0.85f, 0.85f, 0.85f, alpha);
+					quad(e.pos, camR, camU, size);
+				}
+			}
+			for (Missile3D o : orbs) {
+				float f = o.flamedOut() ? Math.max(0f, 1f - o.fade * 2f) : Math.min(1f, o.age * 4f);
+				float pulse = 0.85f + 0.15f * (float) Math.sin(sim.time * 9f + o.spawnPos.x);
+				float r = Math.max(18f, o.spec.missileRadius) * pulse;
+				if (pass == 0) {
+					float[] c = o.spec.fringeColor;
+					GL11.glColor4f(c[0], c[1], c[2], f);
+					quad(o.pos, camR, camU, r * 2.4f);
+				} else {
+					GL11.glColor4f(0.8f, 0.8f, 0.8f, f);
+					quad(o.pos, camR, camU, r);
+				}
+			}
+			GL11.glEnd();
+		}
+		GL14.glBlendEquation(GL14.GL_FUNC_ADD);
 	}
 
 	private static void quad(Vec3 c, Vec3 r, Vec3 u, float s) {

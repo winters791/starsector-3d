@@ -96,8 +96,13 @@ public final class ShieldFlux {
 		if (hasShield() && !disabled()) shieldOn = !shieldOn;
 	}
 
+	/** False for ships whose vent rate is zero (Safety Overrides multiplies it by 0): vanilla won't let them vent. */
+	public boolean canVent() {
+		return maxFlux > 0f && ventRateMult > 0f && dissipation > 0f;
+	}
+
 	public void vent() {
-		if (disabled() || flux <= 0.5f || maxFlux <= 0f) return;
+		if (disabled() || flux <= 0.5f || !canVent()) return;
 		venting = true;
 		shieldOn = false;
 	}
@@ -207,19 +212,22 @@ public final class ShieldFlux {
 		for (int i = 0; i < HITS; i++) hitAge[i] = 9f;
 	}
 
+	private final Vec3 segCentre = new Vec3(), segLocal = new Vec3();
+
 	/**
 	 * Where segment a->b first hits this ship's raised shield from outside, as a 0..1 parameter, or
 	 * -1. Segments that start inside the shield sphere, or enter outside the arc, aren't blocked.
+	 * Runs for every shot near a raised shield every frame, so it works in scratch vectors.
 	 */
 	public float segmentHit(Ship3D s, Vec3 a, Vec3 b, Vec3 hitOut, Vec3 localDirOut) {
 		if (!shieldUp()) return -1f;
-		Vec3 c = s.rot.rotate(centre.x * s.scale, centre.y * s.scale, centre.z * s.scale, new Vec3()).add(s.pos);
+		Vec3 c = s.rot.rotate(centre.x * s.scale, centre.y * s.scale, centre.z * s.scale, segCentre).add(s.pos);
 		float r = radius * s.scale;
-		if (new Vec3(a).sub(c).lengthSq() <= r * r) return -1f;
+		if (segLocal.set(a).sub(c).lengthSq() <= r * r) return -1f;
 		float t = Combat.segmentSphere(a, b, c, r);
 		if (t < 0f) return -1f;
 		hitOut.set(b).sub(a).scale(t).add(a);
-		Vec3 local = s.rot.inverseRotate(new Vec3(hitOut).sub(c), new Vec3()).scale(1f / r);
+		Vec3 local = s.rot.inverseRotate(segLocal.set(hitOut).sub(c), segLocal).scale(1f / r);
 		if (local.dot(facing) < (float) Math.cos(halfAngle())) return -1f;
 		if (localDirOut != null) localDirOut.set(local);
 		return t;

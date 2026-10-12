@@ -50,7 +50,7 @@ public final class FlightModel {
 		if (thrust > 0f) {
 			vb.z = approachAxis(vb.z, desZ, p.fwdAccel * accK, p.fwdDecel * accK, dt);
 			vb.x = approachAxis(vb.x, c.strafeX * p.strafeSpeed * thrust, p.strafeAccel * accK, p.lateralDecel * accK, dt);
-			vb.y = approachAxis(vb.y, c.strafeY * p.strafeSpeed * thrust, p.strafeAccel * accK, p.lateralDecel * accK, dt);
+			vb.y = approachAxis(vb.y, c.strafeY * p.verticalSpeed * thrust, p.verticalAccel * accK, p.verticalDecel * accK, dt);
 		}
 		s.rot.rotate(vb, s.vel);
 

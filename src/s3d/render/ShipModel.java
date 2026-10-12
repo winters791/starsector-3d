@@ -9,7 +9,10 @@ import com.fs.starfarer.api.Global;
 
 import s3d.core.Tuning;
 
-/** GPU-side hull: relief mesh + sprite texture. Built once per sprite and cached for the session. */
+/**
+ * GPU-side hull: relief mesh (or a hand-made {@link ObjHull} model) + sprite texture. Built once per
+ * sprite and cached for the session.
+ */
 public final class ShipModel {
 	private static final Logger log = Global.getLogger(ShipModel.class);
 	private static final Map<String, ShipModel> CACHE = new HashMap<>();
@@ -22,17 +25,28 @@ public final class ShipModel {
 		public final float cx, cyTop;
 		/** Weapon sprites get a flatter, crisper profile than hulls. */
 		public final boolean weapon;
+		/** Hand-made model drawn instead of the relief, or null. */
+		public final ObjHull obj;
 
 		public Source(String spritePath, SpriteImage image, float cx, float cyTop) {
-			this(spritePath, image, cx, cyTop, false);
+			this(spritePath, image, cx, cyTop, false, null);
 		}
 
 		public Source(String spritePath, SpriteImage image, float cx, float cyTop, boolean weapon) {
+			this(spritePath, image, cx, cyTop, weapon, null);
+		}
+
+		public Source(String spritePath, SpriteImage image, float cx, float cyTop, ObjHull obj) {
+			this(spritePath, image, cx, cyTop, false, obj);
+		}
+
+		private Source(String spritePath, SpriteImage image, float cx, float cyTop, boolean weapon, ObjHull obj) {
 			this.spritePath = spritePath;
 			this.image = image;
 			this.cx = cx;
 			this.cyTop = cyTop;
 			this.weapon = weapon;
+			this.obj = obj;
 		}
 
 		ReliefMeshBuilder.Params params(Tuning t) {
@@ -76,19 +90,26 @@ public final class ShipModel {
 
 	/** Cache key shared by the CPU mesh/volume and the GPU model. */
 	public static String key(Source src, Tuning t) {
-		return src.spritePath + "@" + src.cx + "," + src.cyTop + (src.weapon ? "|w" : "") + "|" + t.meshSignature();
+		String at = src.spritePath + "@" + src.cx + "," + src.cyTop;
+		if (src.obj != null) return "obj:" + src.obj.name + "#" + Integer.toHexString(src.obj.hash) + "|" + at + "|c" + t.meshCellsAcross;
+		return at + (src.weapon ? "|w" : "") + "|" + t.meshSignature();
 	}
 
 	/** CPU-only build (mesh + hit volume); safe to call outside rendering. */
 	public static ReliefMeshBuilder.Result geometry(Source src, Tuning t) {
-		return ReliefMeshBuilder.cached(key(src, t), src.image, src.cx, src.cyTop, src.params(t));
+		return build(key(src, t), src, t);
+	}
+
+	private static ReliefMeshBuilder.Result build(String key, Source src, Tuning t) {
+		if (src.obj != null) return ObjHull.cached(key, src.obj, src.image, src.cx, src.cyTop, t.meshCellsAcross);
+		return ReliefMeshBuilder.cached(key, src.image, src.cx, src.cyTop, src.params(t));
 	}
 
 	public static ShipModel get(Source src, Tuning t) {
 		String key = key(src, t);
 		ShipModel m = CACHE.get(key);
 		if (m != null) return m;
-		ReliefMeshBuilder.Result r = ReliefMeshBuilder.cached(key, src.image, src.cx, src.cyTop, src.params(t));
+		ReliefMeshBuilder.Result r = build(key, src, t);
 		Mesh mesh = Mesh.upload(r.verts, r.indices, ReliefMeshBuilder.STRIDE,
 				new int[][] {{0, 3, 0}, {1, 3, 3}, {2, 2, 6}, {3, 1, 8}});
 		int tex = TextureUtil.upload(src.image.dilatedOpaque(12), src.image.w, src.image.h, true, t.anisotropy);
@@ -96,7 +117,7 @@ public final class ShipModel {
 		int[] rgb = src.image.averageTintRgb();
 		m = new ShipModel(key, mesh, tex, nrm, new float[] {rgb[0] / 255f, rgb[1] / 255f, rgb[2] / 255f}, r);
 		CACHE.put(key, m);
-		log.info("S3D: built relief mesh for " + src.spritePath + ": " + r.summary());
+		log.info("S3D: built " + (src.obj != null ? "model " + src.obj.name + " textured with " : "relief mesh for ") + src.spritePath + ": " + r.summary());
 		return m;
 	}
 
@@ -113,5 +134,6 @@ public final class ShipModel {
 		}
 		CACHE.clear();
 		ReliefMeshBuilder.clearCache();
+		ObjHull.clearCache();
 	}
 }
