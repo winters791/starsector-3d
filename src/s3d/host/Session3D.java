@@ -1,6 +1,5 @@
 package s3d.host;
 
-import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.log4j.Logger;
@@ -42,13 +41,13 @@ abstract class Session3D {
 	private final HudRenderer.Info hud = new HudRenderer.Info();
 
 	protected boolean overlay = true;
-	private boolean showHelp, showPerf, showHud = true;
+	private boolean showPerf, showHud = true;
 	private final boolean[] groupKeyDown = new boolean[7];
 	/** Top-row and numpad 1-7 (both select weapon groups). */
 	private static final int[] NUMPAD = {Keyboard.KEY_NUMPAD1, Keyboard.KEY_NUMPAD2, Keyboard.KEY_NUMPAD3, Keyboard.KEY_NUMPAD4,
 			Keyboard.KEY_NUMPAD5, Keyboard.KEY_NUMPAD6, Keyboard.KEY_NUMPAD7};
 	private int groupLogBudget = 30;
-	private boolean lastVanillaUi, loggedFirstFrame;
+	private boolean lastVanillaUi, loggedFirstFrame, shipInfoHidden, shipInfoFailed;
 	private float statRefreshTimer;
 	private String toast;
 	private float toastTime;
@@ -94,8 +93,6 @@ abstract class Session3D {
 
 	/** Short warnings for the player (shown above the status line); usually none. */
 	protected abstract void fillAlerts(List<String> alerts);
-
-	protected abstract String[] sessionHelpLines();
 
 	/** Extra reasons to stay out of the way (e.g. the battle is over). */
 	protected boolean yieldToVanilla() {
@@ -151,29 +148,30 @@ abstract class Session3D {
 		}
 		if (!overlay) return;
 		if (key == cfg.key("allStop")) input.allStop = true;
-		else if (key == cfg.key("autoLevel")) {
-			input.toggleAutoLevel = true;
-			toast(sim.controls.autoLevel ? "Auto-level off" : "Auto-level on");
-		} else if (key == cfg.key("tactical")) input.toggleTactical = true;
+		else if (key == cfg.key("autoLevel")) input.toggleAutoLevel = true; // the status line shows AUTO-LEVEL
+		else if (key == cfg.key("tactical")) input.toggleTactical = true;
 		else if (key == cfg.key("pause")) togglePause();
-		else if (key == cfg.key("help")) showHelp = !showHelp;
 		else if (key == cfg.key("perfHud")) showPerf = !showPerf;
-		else if (cfg.isKey("toggleHud", key)) {
-			showHud = !showHud;
-			if (showHud) toast("HUD on");
-		} else if (key == cfg.key("reloadTuning")) reloadTuning();
+		else if (cfg.isKey("toggleHud", key)) showHud = !showHud;
+		else if (key == cfg.key("reloadTuning")) reloadTuning();
 		else if (key == cfg.key("target")) input.selectTarget = true;
-		else if (key == cfg.key("vent")) input.vent = true;
+		else if (key == cfg.key("vent")) {
+			input.vent = true;
+			Ship3D p = sim.player;
+			if (p != null && p.flux != null && !p.flux.canVent()) {
+				boolean so = p.hostRef instanceof ShipAPI && ((ShipAPI) p.hostRef).getVariant() != null
+						&& ((ShipAPI) p.hostRef).getVariant().hasHullMod("safetyoverrides");
+				toast(so ? "Can't vent: Safety Overrides disables venting" : "This ship can't vent flux");
+			}
+		}
 		else if (key == cfg.key("system")) {
 			input.useSystem = true;
 			if (sim.player != null && sim.player.system != null && !sim.player.system.supported()) toast(sim.player.system.name + " isn't in 3D yet");
 		}
-		else if (key == cfg.key("spectate")) {
-			input.toggleSpectate = true;
-			toast(sim.spectating ? "Back in control" : "Spectating: your ship flies itself");
-		} else if (sim.spectating && key == cfg.key("nextHull")) input.cycleView = 1;
+		else if (key == cfg.key("spectate")) input.toggleSpectate = true;
+		else if (sim.spectating && key == cfg.key("nextHull")) input.cycleView = 1;
 		else if (sim.spectating && key == cfg.key("prevHull")) input.cycleView = -1;
-		else if (groupKey(key) >= 0) input.selectGroup = groupKey(key);
+		else if (groupKey(key) >= 0 && !autofireModifier()) input.selectGroup = groupKey(key); // with Ctrl/Cmd: polled below
 		else onSessionKey(key);
 	}
 
@@ -192,7 +190,8 @@ abstract class Session3D {
 		for (int i = 0; i < groupKeyDown.length; i++) {
 			boolean down = Keyboard.isKeyDown(Keyboard.KEY_1 + i) || Keyboard.isKeyDown(NUMPAD[i]);
 			if (down && !groupKeyDown[i]) {
-				input.selectGroup = i;
+				if (autofireModifier()) input.toggleAutofire = i; // vanilla's Ctrl + number (Cmd on a Mac too)
+				else input.selectGroup = i;
 				if (groupLogBudget > 0) {
 					groupLogBudget--;
 					log.info("S3D: weapon group key " + (i + 1) + " seen by polling");
@@ -274,6 +273,12 @@ abstract class Session3D {
 		input.mouseY = input.screenH * 0.5f;
 	}
 
+	/** Ctrl (vanilla's autofire modifier) or Cmd held. */
+	private static boolean autofireModifier() {
+		return Keyboard.isKeyDown(Keyboard.KEY_LCONTROL) || Keyboard.isKeyDown(Keyboard.KEY_RCONTROL)
+				|| Keyboard.isKeyDown(Keyboard.KEY_LMETA) || Keyboard.isKeyDown(Keyboard.KEY_RMETA);
+	}
+
 	/** 0-6 for top-row or numpad 1-7, else -1. */
 	private static int groupKey(int key) {
 		if (key >= Keyboard.KEY_1 && key <= Keyboard.KEY_7) return key - Keyboard.KEY_1;
@@ -281,16 +286,17 @@ abstract class Session3D {
 		return -1;
 	}
 
-	/** Toast + log after a weapon group key, so a switch (or why it didn't happen) is visible. */
-	private void announceGroup(int requested, int before) {
+	/** Log after Ctrl/Cmd + number (the weapon panel's AUTOFIRE box shows the result). */
+	private void logAutofire(int group) {
+		Ship3D p = sim.player;
+		if (p == null || group >= p.groups.size()) return;
+		log.info("S3D: group " + (group + 1) + " autofire " + (p.groups.get(group).autofire ? "on" : "off"));
+	}
+
+	/** Log after a weapon group key, so a switch (or why it didn't happen) can be traced. */
+	private void logGroup(int requested, int before) {
 		Ship3D p = sim.player;
 		if (p == null) return;
-		if (requested >= p.groups.size()) {
-			toast("No weapon group " + (requested + 1) + " (this ship has " + p.groups.size() + ")");
-		} else {
-			s3d.core.WeaponGroup3D g = p.groups.get(p.selectedGroup);
-			toast("Group " + (p.selectedGroup + 1) + ": " + g.label() + (g.autofire ? "  (also autofires)" : ""));
-		}
 		if (groupLogBudget > 0) {
 			groupLogBudget--;
 			log.info("S3D: weapon group " + (requested + 1) + " requested; selected " + (before + 1) + " -> " + (p.selectedGroup + 1)
@@ -333,6 +339,7 @@ abstract class Session3D {
 		}
 		if (!overlay || vanillaUiActive() || yieldToVanilla()) {
 			CursorHider.restore();
+			showVanillaShipInfo(true);
 			input.clearPressed();
 			if (overlay && !yieldToVanilla() && runWhileVanillaUi()) {
 				handsOff();
@@ -345,13 +352,16 @@ abstract class Session3D {
 		}
 		CombatUIAPI ui = engine.getCombatUI();
 		if (ui != null) ui.setDisablePlayerShipControlOneFrame(true);
+		showVanillaShipInfo(false);
 
 		readHeldInput();
 		float dt = engine.isPaused() ? 0f : amount;
 		int requested = input.selectGroup, before = sim.player != null ? sim.player.selectedGroup : -1;
+		int autofireToggled = input.toggleAutofire;
 		sim.update(input, dt, realDt);
 		input.clearPressed();
-		if (requested >= 0) announceGroup(requested, before);
+		if (requested >= 0) logGroup(requested, before);
+		if (autofireToggled >= 0) logAutofire(autofireToggled);
 		afterSim(dt, realDt);
 		playSounds();
 
@@ -403,9 +413,6 @@ abstract class Session3D {
 		hud.alerts.clear();
 		hud.perf.clear();
 		fillAlerts(hud.alerts);
-		hud.wingsKey = k("wings");
-		for (String action : cfg.tuning.keys.keySet()) hud.keyNames.put(action, k(action));
-		hud.keyNames.put("freeLook", k("freeLook"));
 		if (showPerf) {
 			hud.perf.add(String.format("FPS %.0f  (%.1f ms, worst %.1f)", 1000f / Math.max(0.1f, frameMs), frameMs, worstFrameMs));
 			hud.perf.add(String.format("sim %.2f ms  render %.2f ms", simMs, renderMs));
@@ -414,45 +421,6 @@ abstract class Session3D {
 		}
 		hud.toast = toast;
 		hud.toastAlpha = Math.max(0f, Math.min(1f, toastTime));
-		hud.showHelp = showHelp;
-		hud.helpLines = helpLines();
-	}
-
-	private String[] helpLines() {
-		List<String> lines = new ArrayList<>(List.of(
-				"FLIGHT",
-				"  Mouse ............ steer (reticle; further from centre = faster turn)",
-				"  Left click ....... fire the selected weapon group",
-				"  1 - 7 ............ select weapon group (autofire groups shoot on their own)",
-				"  Lead circle ...... put the reticle in it; the green + marks where your guns hit",
-				"  " + k("target") + " ................ lock the ship nearest the reticle (else it's automatic)",
-				"  " + k("throttleUp") + " / " + k("throttleDown") + " ............ throttle up / down      " + k("allStop") + " ... all stop",
-				"  " + k("strafeLeft") + " / " + k("strafeRight") + " ............ strafe left / right",
-				"  " + k("strafeUp") + " / " + k("strafeDown") + " ............ strafe up / down",
-				"  " + k("rollLeft") + " / " + k("rollRight") + " ............ roll left / right",
-				"  " + k("autoLevel") + " ................ auto-level on/off",
-				"SHIELDS, FLUX, SYSTEM",
-				"  " + k("system") + " ................ ship system",
-				"  Right click ...... shield on/off, or phase cloak on phase ships (omni shields face incoming fire;",
-				"                     hold " + k("freeLook") + " to aim yours where you look)",
-				"  " + k("vent") + " ................ vent flux (no shield or weapons until it's done)",
-				"SPECTATE",
-				"  " + k("spectate") + " ................ spectate on/off (your ship flies itself meanwhile)",
-				"  " + k("prevHull") + " / " + k("nextHull") + " ............ watch the previous / next ship on your side",
-				"  " + k("tactical") + " ................ free camera / follow (mouse turns, move keys fly)",
-				"CAMERA",
-				"  hold " + k("freeLook") + " / middle mouse ... free look",
-				"  " + k("tactical") + " ................ tactical view on/off",
-				"  wheel ............ zoom"));
-		lines.addAll(List.of(sessionHelpLines()));
-		lines.addAll(List.of(
-				"  " + k("pause") + " ................ pause",
-				"  " + k("reloadTuning") + " ................ reload data/config/s3d_tuning.json",
-				"  " + k("perfHud") + " ................ performance readout",
-				"  " + k("toggleHud") + " ................ hide / show the HUD (reticle, panels, radar)",
-				"  " + k("toggleOverlay") + " ................ hide 3D view (debug)",
-				"  Esc .............. game menu"));
-		return lines.toArray(new String[0]);
 	}
 
 	/** Display name(s) for an action's key(s), e.g. "F10 / \ / G". */
@@ -471,6 +439,7 @@ abstract class Session3D {
 		switch (name) {
 			case "LMENU": return "L-Alt";
 			case "SPACE": return "Space";
+			case "LSHIFT": return "Shift";
 			case "LBRACKET": return "[";
 			case "RBRACKET": return "]";
 			case "BACKSLASH": return "\\";
@@ -515,6 +484,7 @@ abstract class Session3D {
 	private void reloadTuning() {
 		TuningLoader next = TuningLoader.load();
 		boolean meshChanged = !next.tuning.meshSignature().equals(cfg.tuning.meshSignature());
+		meshChanged |= HullMeshes.reload(); // edited hull models show up on K too
 		cfg = next;
 		sim.setTuning(next.tuning);
 		if (meshChanged) {
@@ -535,8 +505,28 @@ abstract class Session3D {
 		toastTime = 3f;
 	}
 
+	/**
+	 * Vanilla's ship panel (bottom left: hull, flux, weapon groups, system) describes the frozen 2D
+	 * puppet, never the 3D ship, and sits over the 3D view; the 3D HUD shows all of it. Hidden while
+	 * the 3D view is up, back for vanilla's menus and when the battle is handed back.
+	 */
+	private void showVanillaShipInfo(boolean show) {
+		CombatUIAPI ui = engine.getCombatUI();
+		if (ui == null || shipInfoFailed) return;
+		try {
+			if (!show) ui.hideShipInfo(); // every frame: vanilla may fan it out again (new target, ship change)
+			else if (shipInfoHidden) ui.reFanOutShipInfo();
+			if (show == shipInfoHidden) log.info("S3D: vanilla ship panel " + (show ? "shown again" : "hidden while the 3D view is up"));
+			shipInfoHidden = !show;
+		} catch (Throwable t) {
+			shipInfoFailed = true;
+			log.warn("S3D: could not hide/show vanilla's ship panel", t);
+		}
+	}
+
 	void shutdown() {
 		CursorHider.restore();
+		showVanillaShipInfo(true);
 		try {
 			engine.getViewport().setExternalControl(false);
 		} catch (Throwable ignored) {

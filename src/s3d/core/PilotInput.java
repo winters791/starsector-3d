@@ -20,6 +20,8 @@ public final class PilotInput {
 	public int cycleView;
 	/** Weapon group chosen this frame (0-based), or -1. */
 	public int selectGroup = -1;
+	/** Weapon group whose autofire is switched this frame (0-based; Ctrl/Cmd + number), or -1. */
+	public int toggleAutofire = -1;
 
 	/** Pixels, origin bottom-left. */
 	public float mouseX, mouseY, screenW = 1, screenH = 1;
@@ -34,6 +36,7 @@ public final class PilotInput {
 		useSystem = false;
 		cycleView = 0;
 		selectGroup = -1;
+		toggleAutofire = -1;
 		wheelNotches = 0f;
 	}
 }

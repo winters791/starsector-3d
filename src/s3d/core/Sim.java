@@ -83,9 +83,9 @@ public final class Sim {
 
 	/**
 	 * Spectating: your ship is flown by an AI pilot while the camera follows any ship on your side
-	 * (viewShip; your own included) or flies free.
+	 * (viewShip; your own included).
 	 */
-	public boolean spectating, freeCam;
+	public boolean spectating;
 	public Ship3D viewShip;
 	private Ship3D spectatorPilot;
 
@@ -105,7 +105,6 @@ public final class Sim {
 	public void setSpectating(boolean on) {
 		if (on == spectating) return;
 		spectating = on;
-		freeCam = false;
 		if (on) {
 			viewShip = player;
 			target = autoTarget = aimTarget = null;
@@ -134,7 +133,6 @@ public final class Sim {
 		if (mine.isEmpty()) return;
 		int i = mine.indexOf(viewShip);
 		viewShip = mine.get(Math.floorMod((i < 0 ? 0 : i + dir), mine.size()));
-		freeCam = false;
 		camera.snapTo(viewShip);
 	}
 
@@ -158,6 +156,24 @@ public final class Sim {
 	public Sim(Tuning tuning) {
 		this.tuning = tuning;
 		controls.autoLevel = tuning.autoLevelDefault;
+	}
+
+	/** Wall time of each phase of the last update, for benchmarks; null (the default) = not measured. */
+	public Profile profile;
+
+	public static final class Profile {
+		public static final String[] PHASES = {"setup", "systems", "flux", "ships", "collisions", "player", "projectiles", "missiles", "effects"};
+		public final long[] ns = new long[PHASES.length];
+		/** Slowest single ship step (AI pilot, its flight and its guns) and whose it was. */
+		public long worstShipNs;
+		public Ship3D worstShip;
+	}
+
+	private long lap(int phase, long since) {
+		if (profile == null) return 0L;
+		long now = System.nanoTime();
+		profile.ns[phase] = now - since;
+		return now;
 	}
 
 	public void setTuning(Tuning t) {
@@ -220,15 +236,7 @@ public final class Sim {
 			if (viewShip == null || !ships.contains(viewShip)) cycleView(1);
 			if (in.cycleView != 0) cycleView(in.cycleView);
 		}
-		if (in.toggleTactical) {
-			if (spectating) {
-				freeCam = !freeCam; // T: free camera <-> follow the watched ship
-				if (freeCam) camera.beginFree();
-				else if (viewShip != null) camera.snapTo(viewShip);
-			} else {
-				camera.tactical = !camera.tactical;
-			}
-		}
+		if (in.toggleTactical) camera.tactical = !camera.tactical; // spectating too: tactical view of the watched ship
 		if (in.wheelNotches != 0f) camera.zoom(in.wheelNotches, tuning);
 		if (in.resetTargets) resetTargets();
 		if (in.toggleIncoming) incomingFire = !incomingFire;
@@ -254,15 +262,23 @@ public final class Sim {
 		stickX = controls.stickX;
 		stickY = controls.stickY;
 
+		long lap = profile != null ? System.nanoTime() : 0L;
 		updateFleetCentres();
 		for (Ship3D s : ships) if (!s.destroyed) s.stepRepairs(simDt);
+		lap = lap(0, lap);
 		stepSystems(in, simDt);
+		lap = lap(1, lap);
 		// Your phase cloak / temporal shell slows the rest of the battle instead of speeding you up (as in
 		// vanilla): world time runs at 1/timeMult and your ship at normal speed. AI ships with the same
 		// systems simply run faster than the world.
 		worldTimeScale = player != null && !player.destroyed && !spectating && player.timeMult > 1f ? 1f / player.timeMult : 1f;
 		simDt *= worldTimeScale;
 		stepFlux(in, simDt);
+		lap = lap(2, lap);
+		if (profile != null) {
+			profile.worstShipNs = 0L;
+			profile.worstShip = null;
+		}
 		if (player != null && !player.destroyed && !spectating) FlightModel.step(player, controls, tuning, simDt * player.timeMult);
 		for (Ship3D s : ships) {
 			if (s == player && !s.destroyed && !spectating) continue;
@@ -270,22 +286,30 @@ public final class Sim {
 				// Wreck: keeps drifting, tumbles slowly.
 				s.pos.addScaled(s.vel, simDt);
 				s.rot.integrateBody(s.angVel.x, s.angVel.y, s.angVel.z, simDt);
+			} else if (s.carriedBy != null) {
+				// A drone riding its Termination Sequence missile: the missile moves it.
 			} else if (s.ai != null) {
+				long t0 = profile != null ? System.nanoTime() : 0L;
 				s.ai.step(this, s, simDt * s.timeMult); // temporal shell / phase: the ship's own time runs faster
+				if (profile != null && System.nanoTime() - t0 > profile.worstShipNs) {
+					profile.worstShipNs = System.nanoTime() - t0;
+					profile.worstShip = s;
+				}
 			} else if (s.mover != null) {
 				s.mover.step(s, simDt);
 			}
 		}
 		placeFixedParts(simDt);
 		time += simDt;
+		lap = lap(3, lap);
 		if (tuning.collisions) resolveCollisions(simDt);
 		for (Ship3D s : ships) s.trackAcceleration(simDt);
+		lap = lap(4, lap);
 
 		if (spectating && viewer() != null) {
 			float lookX = (in.mouseX - in.screenW * 0.5f) / (in.screenW * 0.5f);
 			float lookY = (in.mouseY - in.screenH * 0.5f) / (in.screenH * 0.5f);
-			if (freeCam) camera.updateFree(in, tuning, Math.min(realDt, 0.1f), in.screenW / in.screenH);
-			else camera.update(viewer(), tuning, Math.min(realDt, 0.1f), in.freeLook, lookX, lookY, in.screenW / in.screenH);
+			camera.update(viewer(), tuning, Math.min(realDt, 0.1f), in.freeLook, lookX, lookY, in.screenW / in.screenH);
 		} else if (player != null) {
 			float lookX = (in.mouseX - in.screenW * 0.5f) / (in.screenW * 0.5f);
 			float lookY = (in.mouseY - in.screenH * 0.5f) / (in.screenH * 0.5f);
@@ -293,14 +317,22 @@ public final class Sim {
 
 			if (in.selectTarget) target = pickTarget(in);
 			if (in.selectGroup >= 0 && in.selectGroup < player.groups.size()) player.selectedGroup = in.selectGroup;
+			if (in.toggleAutofire >= 0 && in.toggleAutofire < player.groups.size()) {
+				WeaponGroup3D g = player.groups.get(in.toggleAutofire);
+				g.autofire = !g.autofire;
+			}
 			if (target != null && (target.destroyed || !ships.contains(target))) target = null;
 			updateAiming(in);
 			if (!player.destroyed) stepPlayerWeapons(in.fire && !camera.tactical, simDt * player.timeMult);
 		}
 		if (incomingFire) stepIncomingFire(simDt);
+		lap = lap(5, lap);
 		combat.stepProjectiles(ships, simDt);
+		lap = lap(6, lap);
 		combat.stepMissiles(ships, simDt);
+		lap = lap(7, lap);
 		combat.stepEffects(simDt);
+		lap(8, lap);
 		camera.addShake(combat.shake * tuning.cameraShake);
 		combat.shake = 0f;
 		for (Ship3D s : ships) {
@@ -320,8 +352,10 @@ public final class Sim {
 				in.toggleShield = false; // phase ships have no shield; right click is the cloak
 			}
 		}
+		// Clear everyone's modifiers first: some systems work on other ships (Entropy Amplifier on its
+		// target, Targeting Feed on fighters), whichever order the ships are stepped in.
+		for (Ship3D s : ships) s.resetSystemEffects();
 		for (Ship3D s : ships) {
-			s.resetSystemEffects();
 			if (s.destroyed) continue;
 			if (s.system != null) {
 				s.system.step(s, this, dt);
@@ -357,7 +391,7 @@ public final class Sim {
 				combat.sounds.play(player.flux.shieldOn ? "shield_lower" : "shield_raise", player.pos, 0.8f);
 			}
 			if (in.toggleShield) player.flux.toggleShield();
-			if (in.vent && !player.flux.venting && !player.flux.disabled() && player.flux.flux > 0.5f) combat.sounds.play("vent_flux", player.pos, 1f);
+			if (in.vent && !player.flux.venting && !player.flux.disabled() && player.flux.flux > 0.5f && player.flux.canVent()) combat.sounds.play("vent_flux", player.pos, 1f);
 			if (in.vent) player.flux.vent();
 		}
 		Ship3D heard = viewer();
@@ -403,20 +437,35 @@ public final class Sim {
 		}
 		for (Missile3D m : combat.missiles) {
 			if (m.owner == s.owner || m.flamedOut()) continue;
+			if (m.demTarget == s && (m.demState == 1 || m.demState == 2)) {
+				// A DEM missile lining up on (or painting) this ship: its payload is coming from there.
+				float w = m.spec.dem.payload.dps * m.spec.dem.payload.shieldMult;
+				rel.set(m.pos).sub(s.pos);
+				float len = rel.length();
+				if (len > 1e-3f) dirOut.addScaled(rel, w / len);
+				total += w;
+				continue;
+			}
 			total += incoming(s, m.pos, m.vel, m.spec.damage * m.spec.shieldMult, 2.5f, reach, rel, rv, dirOut);
 		}
 		for (Ship3D o : ships) {
 			if (o.owner == s.owner || o.destroyed) continue;
-			for (WeaponMount m : o.weapons) {
-				if (!m.beamHitting || m.beamEnd.distance(s.pos) > reach * 1.3f) continue;
-				float w = m.spec.dps * m.spec.shieldMult * m.beamLevel;
-				m.worldPos(o, rel).sub(s.pos);
-				float len = rel.length();
-				if (len > 1e-3f) dirOut.addScaled(rel, w / len);
-				total += w;
-			}
+			for (WeaponMount m : o.weapons) if (m.beamHitting) total += beamThreat(s, m, m.worldPos(o, rel), reach, dirOut);
+		}
+		for (Combat.PayloadBeam pb : combat.payloads) {
+			if (pb.owner != s.owner) total += beamThreat(s, pb.mount, rel.set(pb.origin), reach, dirOut);
 		}
 		return total;
+	}
+
+	/** An enemy beam hitting near this ship: its shield-weighted dps, direction added from its origin. */
+	private static float beamThreat(Ship3D s, WeaponMount m, Vec3 origin, float reach, Vec3 dirOut) {
+		if (!m.beamHitting || m.beamEnd.distance(s.pos) > reach * 1.3f) return 0f;
+		float w = m.spec.dps * m.spec.shieldMult * m.beamLevel;
+		Vec3 rel = new Vec3(origin).sub(s.pos);
+		float len = rel.length();
+		if (len > 1e-3f) dirOut.addScaled(rel, w / len);
+		return w;
 	}
 
 	private static float incoming(Ship3D s, Vec3 pos, Vec3 vel, float weight, float window, float reach, Vec3 rel, Vec3 rv, Vec3 dirOut) {
@@ -688,24 +737,49 @@ public final class Sim {
 		}
 	}
 
+	private final Vec3 aimMount = new Vec3(), aimLead = new Vec3(), aimTmp = new Vec3(), shieldTmp = new Vec3();
+
+	/**
+	 * How far off a weapon's arc a ship's centre may be and still be engaged: half its bounding radius
+	 * (the hull reaches about that far). As in vanilla, a ship counts as in the arc when part of it is.
+	 * In 3D this matters most for hardpoints on big hulls: their mounts sit on top of the hull, tens of
+	 * units off the centreline, so with the nose on a target's centre a 5 deg hardpoint (a Ziggurat's
+	 * tachyon lances, measured 4-6 deg off at 1000-1300) never had it in its arc.
+	 */
+	static float arcPad(Ship3D target) {
+		return target.radius * 0.5f;
+	}
+
 	/**
 	 * Autofire: point-defence weapons take the nearest enemy missile they can reach first (pdOnly
 	 * weapons never shoot ships); otherwise the aim target if this mount can reach its lead, else the
 	 * nearest enemy it can reach. Writes the aim point and (for missiles) the ship to home on.
+	 * Runs for every mount every frame, so it works in scratch vectors rather than allocating.
 	 */
 	public boolean autofireAim(Ship3D self, WeaponMount m, Ship3D preferred, Vec3 aimOut, Ship3D[] targetOut) {
+		return autofireAim(self, m, preferred, null, 0f, aimOut, targetOut);
+	}
+
+	/**
+	 * As above, never picking `exclude` (a shot at it is blocked), and with opportunism > 0 (AI pilots)
+	 * choosing among the other enemies in reach by how good the shot is, not just how near: one that's
+	 * overloaded or venting first, then one the shot finds unshielded (no shield, shield down or facing
+	 * away from this mount), or nearly dead.
+	 */
+	public boolean autofireAim(Ship3D self, WeaponMount m, Ship3D preferred, Ship3D exclude, float opportunism, Vec3 aimOut, Ship3D[] targetOut) {
 		targetOut[0] = null;
 		if (!m.spec.supported) return false;
+		if (m.spec.flareLauncher) return combat.exotic.flareWanted(self, m, aimOut); // decoys: only while missiles are inbound
 		float speed = shotSpeed(m.spec);
 		if (speed <= 0f) return false;
-		Vec3 mw = m.worldPos(self, new Vec3());
-		Vec3 lead = new Vec3();
+		Vec3 mw = m.worldPos(self, aimMount);
+		Vec3 lead = aimLead;
 		if (m.spec.pd) {
 			float best = Float.MAX_VALUE;
 			for (Missile3D ms : combat.missiles) {
 				if (ms.owner == self.owner || ms.flamedOut()) continue;
 				if (!Combat.intercept(mw, self.vel, ms.pos, ms.vel, speed, lead)) continue;
-				if (!Combat.canReach(self, m, lead, tuning)) continue;
+				if (!Combat.canReach(self, m, mw, lead, 0f, 0f, tuning, aimTmp)) continue;
 				float d = ms.pos.distance(mw);
 				if (d < best) {
 					best = d;
@@ -720,13 +794,14 @@ public final class Sim {
 		for (int pass = 0; pass < 2 && targetOut[0] == null; pass++) {
 			float bestDist = Float.MAX_VALUE;
 			for (Ship3D s : ships) {
-				if (s == self || s.destroyed || s.owner == self.owner) continue;
+				if (s == self || s == exclude || s.destroyed || s.owner == self.owner) continue;
 				if (m.spec.pdOnly && !s.fighter) continue;
 				if (s.phased || s.invulnerable) continue; // shots would pass straight through / do nothing
 				if (pass == 0 && !self.fighter && s.fighter != anti) continue;
 				if (!Combat.interceptCurved(mw, self.vel, s.pos, s.vel, s.accel, speed, lead)) continue;
-				if (!Combat.canReach(self, m, lead, nearSide(s, mw), tuning)) continue;
+				if (!Combat.canReach(self, m, mw, lead, nearSide(s, mw), arcPad(s), tuning, aimTmp)) continue;
 				float d = s == preferred ? -1f : s.pos.distance(mw);
+				if (opportunism > 0f && d > 0f && !s.fighter) d *= 1f - (1f - shotValue(s, mw)) * Math.min(1f, opportunism);
 				if (d < bestDist) {
 					bestDist = d;
 					targetOut[0] = s;
@@ -735,6 +810,25 @@ public final class Sim {
 			}
 		}
 		return targetOut[0] != null;
+	}
+
+	/** How much nearer than it is an enemy counts when picking among shots (lower = better shot). */
+	private float shotValue(Ship3D s, Vec3 from) {
+		ShieldFlux f = s.flux;
+		if (f != null && f.disabled()) return 0.35f; // can't shoot back or block
+		float v = 1f;
+		if (!shieldCovers(s, from, shieldTmp)) v *= 0.75f;
+		if (s.hull < s.hullMax * 0.35f) v *= 0.75f;
+		return v;
+	}
+
+	/** True if the target's shield is up and faces `from` (world), so a shot from there meets it. */
+	public static boolean shieldCovers(Ship3D target, Vec3 from, Vec3 tmp) {
+		ShieldFlux f = target.flux;
+		if (f == null || !f.shieldUp()) return false;
+		Vec3 local = target.rot.inverseRotate(tmp.set(from).sub(target.pos), tmp);
+		float len = local.length();
+		return len < 1e-3f || local.dot(f.facing) / len >= (float) Math.cos(f.halfAngle());
 	}
 
 	/**

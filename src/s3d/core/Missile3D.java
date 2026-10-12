@@ -23,6 +23,25 @@ public final class Missile3D {
 	public boolean alive = true;
 	/** Engine burned out (flight time over): drifts and fades. */
 	public float fade = -1f;
+	/** Where it was launched (a warhead: where it split off). */
+	public final Vec3 spawnPos = new Vec3();
+	/** Damage multiplier fixed at launch (Targeting Feed), and flight-time multiplier (Canister Flak's random fuses). */
+	public float damageMult = 1f, lifeMult = 1f;
+	/** Mine: seconds since it sensed an enemy (< 0 = not yet). */
+	public float windup = -1f;
+	/** Termination Sequence: the drone flying as this missile; it dies when the missile ends. */
+	public Ship3D rider;
+
+	// ---- DEM attack (spec.dem != null) ----
+	/** 0 cruising, 1 turning onto the target, 2 painting it, 3 firing the payload, 4 spent. */
+	public int demState;
+	float demTimer, demTrigger, demHoldMin, demHoldMax, demAngle, strafeLeft;
+	int strafeDir;
+	Ship3D demTarget;
+	Combat.PayloadBeam payload;
+	/** Targeting laser (drawn while painting): 0..1 and where it ends. */
+	public float laserLevel;
+	public final Vec3 laserEnd = new Vec3();
 
 	// Render-only trail ring buffer
 	public final float[] trail = new float[TRAIL * 3];

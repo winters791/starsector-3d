@@ -5,6 +5,418 @@ known issues and next steps. Newest status first.
 
 ## Status
 
+- **2026-10-13 — UI/UX cleanup (user: "too many hotkeys"); fighters no longer hold a battle open; Burn Drive steers.
+  Headless checks pass; awaiting in-game test.**
+  - Keys: `H` (help overlay) removed, along with the overlay itself; the controls are listed under How to test.
+    Free camera removed (user's choice over moving it to J): `T` is always tactical view, also while spectating
+    (tactical view of the watched ship). `camera.freeSpeed` is gone from the tuning file.
+  - Text removed from the HUD: the spectate banner and its key hints (a one-word SPECTATING joins the bottom status
+    line instead), the pitch/roll readout under the attitude ball, the `[F]` / `[Z]` key labels in the ship panel,
+    "LOCKED" on the locked ship's bracket (the double bracket marks it; the target panel still says LOCKED),
+    INCOMING MISSILES (the red markers on the missiles stay), the battle-start hint, and toasts for weapon group
+    switches, autofire on/off, auto-level, HUD on, spectate on/off, wings engage/regroup. Kill-feed toasts are gone
+    too: ships destroyed/lost, sections, stations, retreats, reinforcements, objectives taken. Kept: failure
+    feedback (can't vent, system not in 3D yet, no wings), the F9 confirm, command transfer, tuning reload, alerts.
+  - Gun pippers ("+" per weapon at the lead point) are red-orange instead of green.
+  - AUTOFIRE box: shows the group's setting even for the selected group (it used to stay empty while selected,
+    so Ctrl/Cmd+number on the selected group looked like it did nothing). The selected group is still fired by hand.
+  - Fighters: a wing whose carrier retreats (or leaves the battle any other way) leaves with it (twin removed,
+    puppet removed from the engine); wings whose carrier died fight on only while their side still has a ship in
+    3D; parked fighter puppets whose carrier or side is gone are removed too. Their puppets are pinned to the 3D
+    twins and never reach an edge, which is what kept vanilla from ending the battle. AI carriers ordered to
+    retreat call their wings back (regroup + vanilla pull-back). Log: `fighter ... left the battle: <why>`, and the
+    10 s fighter line counts "left with their side".
+  - Burn Drive: vanilla's spec says no turning, which zeroed steering on top of the burn's own turn penalty. The
+    3D Burn Drive now ignores that flag and keeps `systems.burnDriveTurnMult` of the turn rate (0.2 -> 0.5): bench
+    Wolf turns 49 deg in 3 s at full stick while burning (about 90 normally). Bench check updated to use vanilla's
+    no-turning flag.
+
+- **2026-10-12 — M5 (hull-by-hull model pass) cut from the roadmap** (user). Relief meshes stay; the OBJ loader and
+  Blender kit below stay in, unused. See Next steps.
+
+- **2026-10-12 (late) — Hull models (M5 groundwork): hand-made OBJ hulls load in place of the relief; first model (Wolf)
+  previewed offline, staged, not in game yet.**
+  - Game side: `data/meshes/hulls/<hullId>.obj` replaces the sprite relief for that hull (skins and (D) hulls fall back
+    to their base hull's file and repaint it with their own sprite). Looked up once per hull through the game's loader
+    (`host/HullMeshes`), so other mods can ship models for their hulls. `render/ObjHull` parses the OBJ (ship-local
+    pixels, +Y up, -Z forward = Blender's default export of a nose-to-+Y model), projects the sprite from above as the
+    texture, and rasterises the hit volume from the model (lowest to highest surface per grid column). `K` re-reads
+    model files. A sprite of another size than the header's `# s3d sprite w h` keeps the relief.
+  - Shading: model faces use a new "auto" class in the ship shader that blends the relief's top / side-plating /
+    underside looks by the surface normal (relief meshes render exactly as before).
+  - Authoring: `src-art/` (see its README). One Blender Python script per hull lays parts over the sprite with
+    `s3d_kit.py` (sprite-outline plate, lofted bodies, domes, rings, engine bells, mirroring) and exports the OBJ;
+    `src-art/build.sh <hullId>` runs Blender headless (under a second), `--grid <hullId>` draws the sprite with a pixel
+    grid to read part positions off. No game art is copied: the sprite is read at build time, only geometry is written.
+  - Wolf (`src-art/hulls/wolf.py`, 6.8k triangles vs the relief's 13.5k): spine over a ventral keel, bridge canopy,
+    shoulder nacelles, missile pods on thin pylons, rear turret blisters with rings, three engine bells sunk into the
+    stern. Hit volume checked against the relief: same solid volume (x0.99), same outline at the mid-plane, 26 px tall
+    instead of 19; turrets now sit on the modelled rings. Preview: `build/preview/model_wolf.png` (relief vs model,
+    6 angles) and `model_wolf_close.png`.
+  - Staged in `build/art/hulls/wolf.obj` (the game doesn't read it) until you've looked; to try it in game, build it
+    without `S3D_MODEL_DIR` (writes `data/meshes/hulls/wolf.obj`); the 23:27 jar already has the loader.
+  - Preview tool: `S3D_PREVIEW_ONLY=hullModels`, `S3D_MESH=relief` (ignore models), `S3D_MODEL_DIR` (staging folder).
+
+- **2026-10-12 (late) — AI: more opportunistic shooting, more caution; ranges halved, speed +50%, armor -30%. Headless
+  bench 100/100 pass; awaiting in-game test.**
+  - Balance (tuning file + code defaults): `weapons.rangeMult` 2 -> 1 (vanilla ranges; missile flight time and system
+    ranges scale with it as before); `flight.speedMult` 0.575 -> 0.8625 (+50% top speed; acceleration, turning,
+    strafe share unchanged); new `weapons.armorReductionMult` 0.7: armor's damage reduction is vanilla's x0.7 (the 85%
+    cap becomes 59.5%; e.g. 50 kinetic hit strength on 1500 armor: 20.25 of 100 gets through instead of 7.5), one
+    formula `Combat.armorDamageMult` for every hit. `weapons.convergence` 1200 -> 600 (unaimed fire converges at
+    about the new ranges).
+  - Caution (`ai.caution`, 0 = off): AI ships work out how much enemy gun dps reaches a point (each ship's guns by
+    range, missiles left out; overloaded/venting guns count a quarter, guns facing away a bit over half). Against a
+    target they outrange they fight from just outside its guns (backing off in full reverse; a faster ship that can't
+    back off fast enough turns and runs out, then comes about); enemies other than the target that have them under
+    their guns push them out sideways (and further back when those guns are round the target); at 75% flux they back
+    out of the target's reach until under 40%; they vent only once no guns reach them; flank spots, targets and gun
+    runs inside the enemy's crowd count against; no gun runs at a target they outrange (or a bigger hull whose guns
+    are on them); they don't dive onto a venting target they already outrange.
+  - Opportunism (`ai.opportunism`, 0 = off): a mount whose shot is blocked (friendly in the line, missile not worth it)
+    turns to another enemy it can reach, also while still swinging on (no flip-flopping between the two); among
+    enemies in reach a mount takes the better shot (helpless > unshielded from where it is / nearly dead > nearest);
+    zero-flux weapons never hold for flux; shots that land on armor fire up to 95% flux (others 85%); ships prefer
+    targets that are hurt, flux-locked, already in front of their guns, or outranged; fighters dogfight enemy
+    fighters at about their speed instead of flashing past.
+  - Fixes the halved ranges needed: big hulls' "fight from 2.5 radii" floor is now capped at 85% of their guns'
+    reach (counting how far out the mounts sit), or capitals sat out of range for good (bench Conquest: 0% -> 95% in
+    range); avoiding station sections now counts the hull beside the line to the section's centre, where it is
+    within a second, and pushes harder inside the margin (attackers fight close beside sections now and were
+    scraping the neighbouring one: 8 of 10 seeds clean, the rest graze for a tenth of a second).
+  - Bench: new-vs-old AI, mirrored 6v6 (Wolf, Lasher, Hammerhead, Enforcer, Eagle, Dominator), 6 seeds x both sides:
+    new wins all 12 on damage (360k vs 75k dealt, 16 vs 71 ships lost); mounts with an enemy in reach fire 82% of the
+    time (old 50%; flux holds 8% vs 31%), time inside enemy guns' reach 25% (old 34%). Set pieces: a Wolf with
+    800-range guns vs an Enforcer with 600: in its reach 10% of the time (careless 82%), no damage taken, 3.8x the
+    damage dealt; a Hammerhead fighting beside a second enemy: in the second's reach 5% (careless 33%); a gun
+    platform with a friendly in its line of fire: 71 shots at another enemy (careless 0); Talons vs fighters 3/3
+    (careless 1/3). New-AI 4v4 battle pace: contact at 30-37 s (old setup 23-31 s), 4-7 of 8 dead in 4 min, ships
+    move and turn about twice as fast relative to each other.
+  - Bench fixtures laid out for 2x ranges now scale with `rangeMult` (`CombatBench.fk`); `S3D_ONLY=<method>` runs any
+    one check group, `S3D_AB=<seeds>` the new-vs-old fleet battles. Two thresholds relaxed at rangeMult 1, both
+    from fighting at half the distance: hardpoint lances land 70%+ (85% measured; 100% at 2x), station attackers may
+    graze a section up to 15 frames.
+  - Watch in game: capitals at 2.5x scale now fight nearly hull to hull (vanilla ranges barely exceed their length);
+    whether cautious ships feel too passive against equal-range fleets (they don't stand off unless they outrange
+    the target); whether fast frigates kiting slow brawlers looks good or silly; station fights at close quarters.
+    Knobs: `ai.caution` / `ai.opportunism` (0..1, K reloads), `weapons.armorReductionMult`.
+
+- **2026-10-12 — Fixes from your play session: venting stuck forever, Ctrl/Cmd+number autofire; lag measured.**
+  - Venting: your Eradicator (Chantico) has Safety Overrides, whose script multiplies the vent rate by 0 (vanilla:
+    "prevents the use of active venting"). The 3D side let the vent start and then drained at 0/s, so the ship sat in
+    VENTING (no shields, no guns) for good; AI ships with Safety Overrides could lock themselves the same way. Now
+    `ShieldFlux.canVent()` (vent rate and dissipation above 0) gates every vent: the key does nothing but a toast ("Can't
+    vent: Safety Overrides disables venting"), no vent sound, and the mirror log says "can't vent". Headless: SO ship
+    never enters VENTING and keeps dissipating; normal ship vents 5000 flux in under 12 s.
+  - Autofire: Ctrl + 1-7 (vanilla's binding) and Cmd + 1-7 toggle that group's autofire (`PilotInput.toggleAutofire`,
+    edge-polled once per press; the number-key event no longer selects the group while Ctrl/Cmd is held). Toast "Group 2
+    autofire ON/OFF"; turning it on for the selected group says it starts once you switch away. In the H help.
+  - Lag (17-30 fps, 200-700 ms hitches, 43-46 ships): this battle's sim and render ran 5-20x slower than the same code
+    paths in yesterday's 44-69 ship battles (58 fps, sim 0.2-0.5 ms, render 2 ms). During it the Mac was at load average
+    16-30 (Chrome ~390% CPU, a Minecraft launcher JVM ~85%) with swap in use; the game has a fixed 6 GB heap on a 16 GB
+    Mac, so GCs that touch swapped heap stall for hundreds of ms. Offline A/B under the same load, committed baseline vs
+    now: render benchmark (60 ships) 9.4-14.6 ms vs 8.8-12.8 ms; 15v15 + 40 fighters sim 1.32-1.33 ms vs 1.06-1.36 ms.
+    No regression in the mod's code; jar rebuilt 19:10. If it lags again, check Activity Monitor for Chrome / other JVMs
+    and swap before blaming the mod (the in-game "S3D perf" log lines give sim/render ms per 10 s).
+
+- **2026-10-12 — Your ship panel (bottom left) redone in vanilla's layout, hologram style; previewed offline, jar rebuilt
+  18:42, awaiting in-game test.**
+  - Replaces the plain text weapon list (`HudRenderer.drawShipPanel`). Same arrangement as vanilla's green panel, in
+    the target display's cyan: your hull as a hologram (same shader as the target's: armor damage by direction, dimmer
+    as hull drops), 160x148 px against the target's 192x162, nose up, swaying +/-17 deg, with corner brackets. Under it
+    the ship's name, class and variant ("ISS ZENITH / EAGLE-CLASS / ASSAULT HEAVY CRUISER"; new `Ship3D.variantName`
+    from the variant's display name + designation). A slanted divider runs from the bottom edge up to a rule.
+  - Above the rule: FLUX bar (hard part darker) + flux value, "0-FLUX BOOST" when it's on; HULL bar (cyan, amber under
+    50%, red under 25%) + hull points, then the ship state where vanilla says HOLDING FIRE (SHIELDS UP/DOWN, OVERLOADED
+    n s, VENTING FLUX, PHASED, DESTROYED); the system: name, charges, a bar (time left while running, cooldown progress,
+    next charge), status + key; phase cloak the same with [RMB]. Wings / fragments / reality-disrupted lines on top.
+  - Under the rule: WEAPON GROUPS, each row stepping left along the divider: number, mount icon (vanilla's slot shapes:
+    square ballistic, circle energy, diamond missile, sized by mount), "2X HEAVY NEEDLER" (+n for other weapon kinds),
+    LINKED/ALTERNATING, readiness bar (amber while cycling), "DMG: KINETIC", AUTOFIRE box (filled = autofiring; the
+    selected group is fired by hand), ammo, "n OFF" / "OFF n s" when EMP'd. Selected group: brighter, on a band.
+  - Flux bar colours on both panels are a little bluer (soft 0.62/0.7/1, hard 0.42/0.38/1).
+  - Preview: `S3D_PREVIEW_ONLY=shipPanel ./build.sh preview` writes `build/preview/ship_panel.png` (Eagle: jets cooling
+    down, shields up, a gun knocked out, torpedoes part spent, locked on a damaged Enforcer) and `ship_panel_b.png`
+    (Hammerhead: zero flux, ammo feeder on), plus `_crop` close-ups. The preview's weapons now carry their real names,
+    sizes and damage types (weapon_data.csv). The full preview suite runs clean.
+  - Not done: vanilla's separate selected-weapon box (bottom centre); readiness and ammo sit in each group row instead.
+    Unverified in game: text size at your resolution (0.8 of the 13 px HUD font, like the target panel), and whether
+    vanilla's CR / peak-performance readout (above where its panel was) still shows and crowds the hologram.
+
+- **2026-10-12 — Playtest feedback round (your list of 8); headless-tested, awaiting in-game test.**
+  - Speed +15%: `flight.speedMult` 0.5 -> 0.575 (acceleration and turning unchanged).
+  - Up/down: **Shift** down (was C), Space up. Vertical strafe speed, acceleration and braking x1.3 (`flight.verticalMult`).
+    The AI's weave keeps its old vertical pace (jink goals / verticalMult): at the faster pace the weave carried AI ships
+    out of their own Canister Flak screen (bench, 11 seeds: 0-5 missiles killed of 8 instead of 3-5).
+  - Runway: `battle.deployFrac` (0.4 of the half-map, 1800 on an 18000 map) replaced by `battle.deployDistance` 2700
+    from the centre line (at most 85% of the way to the edge), so 5400 apart. Bench fleets, frigates to capitals: first
+    shots after 22-37 s (was 10-20 s), first hits 33-46 s.
+  - Vanilla's green ship panel (bottom left: the frozen puppet's hull/flux/weapon groups/system, which is why weapon
+    changes, ammo and system recharge never showed there) is hidden while the 3D view is up (`CombatUIAPI.hideShipInfo`
+    every frame; `reFanOutShipInfo` for vanilla's menus and when the battle is handed back). The 3D HUD's own panel shows
+    all of it. Unverified: whether that hides everything you meant; the API has no way to hide the rest of vanilla's HUD.
+  - AI shields: vanilla's unfold times are 2.2-3.7 s (log: Eagle 3.65, Omen 3.33), but the AI raised its shield only for
+    fire at most 1.2 s out and dropped it after 0.6 s of quiet, so the shield was never fully up. Now it stays up while an
+    enemy has the ship within its weapons' reach (plus closing speed x unfold time) and flux is under `ai.shieldFlux` 0.6;
+    above that the old rule (up for inbound fire, down when quiet so hard flux drains). New check "AI keeps its shield up
+    under the guns": fully up 100% of the time and 0 hull/armor lost, against 0% and 53 with the old rule. 4v4 skirmish:
+    shields up 25% of ship-time (was 12%).
+  - AI weapons, Ziggurat's tachyon lances: its lances sit in 5 deg (+/-2.5) hardpoints, and at 2.5x scale the mounts are
+    80 units above and 52 beside the centreline. With the nose on the target's centre, the target was 4-6 deg off the
+    lance's axis at 1000-1300, so it almost never fired (probe: 6 bursts in four 90 s fights). Two fixes, both for every
+    weapon: a ship counts as in a weapon's arc when part of it is (centre within the arc widened by asin(half its radius /
+    distance), as vanilla does), and nose ships point their forward hardpoints, firepower-weighted, at the target rather
+    than their centre (when the hardpoints carry 30%+ of the nose's firepower). Probe: 112 bursts per four fights,
+    landing 100% against an Eagle, a Dominator and a Hammerhead. New check "AI fires its hardpoint lances" (28 bursts in
+    90 s; the old code fails it). Limited-ammo missiles are still held for openings on purpose (`missileWorthFiring`).
+  - Blackout after clicking outside the game: you saw it in the campaign too, so it's vanilla's fullscreen, not the mod.
+    The game runs as an undecorated 1920x1200 window on a 2560x1664 screen; clicking the border deactivates it. Try the
+    native resolution in the launcher, or windowed mode.
+  - Side note: the SpeedUp mod's "hold middle mouse = 2x speed" also fires when you hold middle mouse for free look.
+  - Bench: every check passes except "AI 15v15 sim cost", which failed only while the Mac was loaded (Chrome ~390% CPU,
+    load average 8-10). Interleaved before/after runs under the same load showed no regression (1.75-2.26 ms before,
+    1.61-2.14 ms after). Arc tests no longer call cos/asin per candidate (cos/sin of each mount's arc are cached), which
+    cancels the extra work. "AI omni shield faces the fire" now allows under 1 point lost when the shield was already up
+    before the first shot (its old ratio test needed early losses).
+  - Unverified until played: `hideShipInfo`; whether vanilla also reacts to Shift (your controls bind it to ship strafe
+    and fast-forward); how the always-up shields' upkeep changes AI firing in real fights; hardpoint aiming on odd layouts.
+
+- **2026-10-12 — 15v15 load check spikes: JIT warm-up under Rosetta, plus a NaN aim bug and GC. Fixed what the code can
+  fix; the check now judges a warm JVM; the full bench passes (93 checks).**
+  - Cause, from a per-frame breakdown the check now prints: slow frames come the first time something happens in the JVM
+    (first missile shot down ~9 s, first death 11.4 s, first shot 28 s, first overloads...). HotSpot throws away its
+    optimised code for the hot per-ship methods (`Sim.update/threat/autofireAim`, `ShipAI3D.step/manageFlux`,
+    `Combat.stepMount`, `ShieldFlux.*`; ~100 deopts per battle), and every ship runs slowly until they're recompiled.
+    The cost lands in every phase at once. Under Rosetta (the bench and the game both run the x86_64 JRE) each recompile
+    is also retranslated: 10-50 ms frames, some of them stalls (40 ms wall, 2 ms thread CPU). Same battle on the native
+    arm64 JDK: avg 0.7 ms, worst under 3 ms even cold. Same battle 3x in one JVM: 19 -> 4 -> 0 frames over 8 ms. No
+    algorithmic burst (projectile/missile phases stay under ~3 ms).
+  - Bug: `Combat.interceptCurved` let a NaN lead through when the target nearly outruns the shot (t^2 overflows: px Inf,
+    py NaN, t NaN, and `t > 30` is false for NaN). The turret's aim stayed NaN for the rest of the battle (bench: a
+    Dagger's torpedoes flew as NaN from 11.4 s), and the NaN reaching other ships' threat/shield code set off the biggest
+    deopt burst. Now any non-finite answer keeps the linear lead. **Changes combat where the bug hit:** the bench 15v15
+    ends 37 destroyed instead of 25 (the bombers' torpedoes land).
+  - GC: 77% of the sim's garbage was two temporary vectors in `Combat.canReach`, run for every mount x candidate target by
+    `Sim.autofireAim`; more in `ShieldFlux.segmentHit` / `Combat.shieldOnSegment`. Now scratch vectors (new `canReach`
+    overload taking the mount's world position), with the same arithmetic in the same order: the battle's end state is
+    bit-identical. 30-280 KB/frame (depending on the JIT's escape analysis) -> 4-12 KB; no GC during the battle (was a
+    2-4 ms young GC every ~0.6 s).
+  - Bench `aiLoad`: battle run twice; the first (other seeds) is reported as JIT warm-up, not judged. Frames over 8 ms are
+    broken down (phases via the opt-in `Sim.Profile`, slowest ship, thread CPU vs wall, GC, JIT ms, allocation, shots /
+    missiles / effects, deaths). New check "AI 15v15 state stays finite". `Combat.seed(long)` repeats the battle.
+  - Numbers, this Mac, `S3D_ONLY=aiLoad`, 3 runs each (the game was running during the "after" runs):
+
+    | | before | after |
+    |---|---|---|
+    | first battle in the JVM | 12-18 frames over 8 ms, worst 25-51 ms | 7-14 (all while the JIT compiled), worst 18-24 ms |
+    | judged battle | 1 (a GC frame), worst 9.5-11 ms, avg 1.23-1.25 | 0, worst 4.2-5.4 ms, avg 1.06-1.24 |
+    | NaN | Dagger turret aim from 11.47 s | none |
+
+    The old single cold battle was 8-19 frames over 8 ms, worst 15-31 ms. Full `./build.sh combat` (identical steps into a
+    scratch dir, since the game had the jar open): before, 1 failure (this check); after, all pass, judged battle worst
+    3.4 ms.
+  - In game: the first 3D battle of a session will still hitch at first contact (a few 15-25 ms frames); later battles
+    run warm. If that shows, the options are a JIT warm-up (a short headless throwaway battle on a background thread at
+    game load) or running the game on a native arm64 JVM (needs arm64 LWJGL 2 natives; outside the mod). Not built:
+    your call.
+
+- **2026-10-12 — Weapon scripts, batch 2: Omega, Threat and Dweller weapons, flare launchers, missile blasts (user:
+  "start working on weapon batch 2"); headless-tested, awaiting in-game test.**
+  - Same approach as batch 1: rebuilt natively, vanilla's scripts never run. Numbers are read from the scripts' public
+    constants (`RiftCascadeEffect.MAX_RIFTS`, `KineticFragmentMissileEffect.OTHER_FRAGMENT_DAMAGE`, ...), the minelayer
+    weapons vanilla spawns rifts with (damage, EMP, blast radius/core, friendly fire, fuse delay from the mine's .proj),
+    and the weapon's own `FragmentWeapon.getNumFragmentsToFire()` (so mods' fragment weapons count too). Numbers that are
+    inline in vanilla's code are in the tuning file under `weaponFx2`. Core: `ExoticWeapons` (+ `FragmentSwarm`), host:
+    `ExoticBridge`; Combat has small hooks where shots fire, beams play, hits and missile impacts land.
+  - Omega:
+    - Rift Beam: every ~0.5 s at full power a small rift (200 energy, radius 50) opens by the beam, on an enemy missile or
+      fighter within 100 of it if there is one, else somewhere along it.
+    - Rift Cascade: once a burst is on a target, 1-5 rifts (more the closer the target: one per 200 of unused range) open
+      0.1 s apart, walking round its hull from the hit in the direction the beam travels, each 0.5 s after it appears;
+      1000 energy x0.75 rising to x1.25, radius 100, friendly fire (vanilla's PROJECTILE_FF). A beam reaching full range
+      opens one where it ends.
+    - Rift Lance: vanilla's mine chance is 0, so visual only (if a mod raises it, the rift is modelled).
+    - Rift Torpedo: area blast (175 / full within 75), flies through fighters and missiles, flares don't fool it, a rift
+      tear where it hits.
+    - Reality Disruptor: a slow orb that passes through everything (nothing can shoot it) and, after 0.5 s, arcs ~10x a
+      second to the nearest enemy ship or missile within 600 (x rangeMult): 25 energy + 1500 EMP (a raised shield stops
+      it); ships it reaches repair weapons/engines at half speed for 5 s ("REALITY DISRUPTED" on your HUD). Fizzles at
+      its range.
+  - Threat:
+    - Fragment swarm: ships with the Fragment Swarm hullmod get a pool (vanilla sizes 20/40/60/100 by hull size with the
+      ship's swarm stat mods, regrowing 1/2/3/5 per second; a swarm fighter's 50, no regrowth, and it pays hull for
+      fragments it throws). Fragment weapons need that many to fire (Voltaic Discharge 10, spends none); fragment missiles
+      spend theirs (Kinetic 5, Seeker 10, Unstable 1, Defabrication 6). Your HUD shows "FRAGMENTS n / size" (red when too
+      few). The swarm itself isn't drawn yet.
+    - Voltaic Discharge: an instant arc from a point in the swarm to the nearest enemy all round (360 deg), shot damage
+      + EMP, PD too.
+    - Voltaic Cannon: a hit throws 10-14 EMP arcs (500 each) into the ship's weapons and engines; through a raised shield
+      each pierces as often as an ion arc. Flies through fighters and missiles.
+    - Voidblaster: shield hits are soft flux. Neutron Torpedo: launched at x0.33 speed.
+    - Kinetic Fragments: the 4 escort fragments strike with the missile, 100 kinetic each (fewer as it's shot up).
+    - Defabrication Swarm: a hull hit does nothing up front; its damage eats in over 11 ticks (~10 s, armor then hull),
+      each damaging tick 75% likely to give the firer a fragment back.
+    - Swarm Launcher: not fired in 3D (it launches fighter wings; logged as "launches fighter wings (not in 3D yet)").
+  - Dweller:
+    - Abyssal Glare: rifts where the beam lands (always when it first lands, then 20% a quarter-second, at least every
+      0.5 s): 100 energy (vanilla's half-damage outside Darkened Gaze), radius 75, friendly fire; lightning along it.
+    - Rift Lightning: no shell; lightning from the shroud to the first missile / shield / hull along the barrel within
+      range (missing: 50-100% of the range out), and a rift there (500 energy + 1000 EMP, radius 80).
+    - Inimical Emanation: arc from the shroud to the nearest enemy within 30 deg, reaches phased ships, slows repairs 5 s.
+    - Hungering Rift: a hull hit heals a damaged friendly shrouded (Dweller) ship 1000 x its heal stat; non-Dweller
+      ships can have at most 10 out at once (battle-wide, like vanilla); blows up on contact (80 / 30, friendly fire).
+    - Pseudoparticle Jet: visual only. Vortex Launcher: not fired (launches fighter wings).
+  - Flare launchers (missiles of type FLARE, e.g. UAF's Flare Launcher Pod): fire decoy flares that lure enemy guided
+    missiles like the flare system's (same tuning); autofire/AI fire them only while an enemy guided missile is coming
+    for the ship.
+  - Missile area blasts (any missile with a vanilla `explosionSpec`, not just batch 2): on a hit the missile's damage also
+    hits everything else in the blast (core full, edge half), friendly fire if vanilla's collision class says so. Affects
+    Reaper, Hammer, Atropos, Terminator drone, cluster bombs, Seeker Fragments, Rift Torpedo. Also new for every
+    missile: `fizzleOnReachingWeaponRange` (flames out at its range) and pass-through flags; projectiles' pass-through
+    flags too.
+  - Rifts are drawn as dark tears (reverse-subtract blending) with a coloured halo; orbs the same, pulsing.
+  - Bench (`S3D_ONLY=weaponScripts2 ./build.sh combat`): 17 checks, all pass: cascade 4 rifts round an Eagle at 500, all
+    within 68 of the hull, 584 -> 4303 damage; rift beam kills 4 of 4 missiles 60 off the beam (0 without); glare 7 rifts
+    in 3 s; rift lightning 500, no shell; orb flies through a ship, knocks out 4/4 and 3/4 guns, repairs x0.5, gone at
+    range; Voltaic Cannon 8/8 components from one hull hit, 0 through a zero-hard-flux shield; Voidblaster 100 soft / 0
+    hard; fragment launcher fires 4 from 20 then waits, regrows, none without a swarm; Kinetic +400; Defabrication 0 at
+    impact, 220 over 11 ticks, firer 10 -> 21 fragments; Hungering Rift heals a Dweller 5000 -> 6000 (not a non-Dweller),
+    cap 2 holds; flares cut 6 missiles' damage 1800 -> 1200; blasts hit the neighbour (873), a friend only with FF;
+    pass-through misses the fighter, hits the ship behind; Voltaic Discharge hits behind, spends nothing, silent with 5
+    fragments; Inimical hits a phased ship (plain arc gun can't); fizzle at 1009 for range 1000.
+  - Full bench: everything passes except "AI 15v15 + 40 fighters sim cost" (pre-existing frame spikes, avg 1.28 ms;
+    the frame-spike session is on it).
+  - Unverified until played: everything host-side (this was written without the game): the minelayer specs' behaviour
+    JSON keys, `MissileSpecAPI.getTypeString()` = "FLARE", `getExplosionSpec()` on missiles, the Fragment Swarm hullmod
+    check and `FragmentWeapon` on puppets, `DwellerShroud.getShroudFor` / `DwellerHullmod` detection, heal stat default.
+    Look for the weapon lines at battle start ("rifts", "uses N fragments", "decoy flares", "blast ...") and the
+    "fragment swarm" / "shrouded" lines under each ship. Also: rift sizes at 3D scale, cascade placement on stations,
+    the darkening blend on your GPU, whether area blasts change torpedo balance.
+  - Not modelled: Swarm Launcher / Vortex Launcher (spawning fighter wings from a weapon needs a host bridge to vanilla's
+    fleet manager); the Threat/Dweller ships' own systems (energy lash, construction swarm, Darkened Gaze...); fragment
+    swarm visuals and swarms trading fragments between ships; EMP on missiles (orb arcs only damage them).
+  - Noticed, not changed (out of scope, ask): missiles of vanilla type ROCKET / BOMB with a turn rate home in 3D (Hammer
+    30, several bombs incl. Canister Flak's 10, UAF's AWP / Lion Roar / Semibreve rockets); vanilla flies rockets straight.
+
+- **2026-10-12 — Ship systems, batch 2 (user: "start with the next step"); headless-tested, awaiting in-game test.**
+  - Picked by what the logs showed in the user's battles as "NOT IN 3D YET": Heavy Missile Autoforge (station modules,
+    12x), UAF's "Targeting Laser System" (an entropy amplifier, 7x), Mine Strike (3x), Lidar Array, Termination Sequence,
+    Canister Flak (2x each), Phase Teleporter, Degraded Phase Skimmer; plus Targeting Feed (Heron) as a cheap common one.
+    Same approach as batch 1: rebuilt natively (`ShipSystem3D` kinds), numbers from the vanilla scripts' public
+    constants (`EntropyAmplifierStats.DAM_MULT`, `MineStrikeStats.getRange/LIVE_TIME`, `MineStrikeStationStats.
+    MINE_RANGE_STATION`, `TargetingFeedStats.DAMAGE_INCREASE_PERCENT`, `LidarArrayStats.*_BONUS`), the system's JSON
+    (`minFractionToReload`, `reloadBaseAmmoAmountOnly`, range, weapon id) and its weapon specs; the few that are inline
+    in vanilla are in the tuning file's "systems" block.
+  - Mapping: by id, and for other mods' systems by their vanilla system type / AI type where that pins down what they do
+    (AMMO_RELOAD -> autoforge, DISPLACER -> skimmer, TELEPORTER -> teleporter, AI type ENTROPY_AMPLIFIER -> entropy
+    amplifier; this is what picks up UAF's). The log line says what each was set up as.
+  - What each does in 3D:
+    - Missile Autoforge / Heavy Missile Autoforge: usable once a missile rack is below `minFractionToReload` (0.6 / 0.5);
+      refills every missile rack by its base ammo (Autoforge) or to full (Heavy). AI: uses it as soon as it can.
+    - Degraded / Threat Phase Skimmer: the existing skimmer.
+    - Entropy Amplifier (and UAF's): needs an enemy within 1500 x system range bonus x rangeMult; for its duration the
+      target takes x1.5 (DAM_MULT) hull, armor and shield damage (red flashes on it). Yours: your locked target, else the
+      one nearest the reticle. AI: its target, once in weapon range.
+    - Phase Teleporter: at the end of its 0.5 s charge you jump to the aim point (up to range x rangeMult); an AI jumps
+      to its fighting distance off the side of its target, or straight away from incoming fire when badly hurt. Never
+      ends up inside a hull.
+    - Mine Strike (Doom; station version range 3500): a heavy mine (`minelayer2`: 2000 HE, blast 250 / full within 200)
+      appears at the aim point (AI: where its target will be), just outside any hull it would be inside. Arms in 0.5 s;
+      an enemy hull within its fuse range (175) starts a 1 s windup (ping sound, fast red pulse); it blows then, or at
+      the end of its 5 s life. PD can shoot it (500 hp). AI: one live mine at a time (it laid all 5 charges into one
+      target in 4 s otherwise: 10000 damage).
+    - Canister Flak (Sarissa, Manticore): each hidden system slot throws its burst (5) one canister at a time, 0.25-1 s
+      apart, at random speed (x0.25-1) and fuse (x0.25-1), as vanilla's plugin does; the canister's proximity fuse (40)
+      bursts on enemy missiles and fighters. 3D change: canisters spread through a cone round the slot direction (at
+      least 45 deg half-angle) instead of a flat line, so the cloud also screens from above and below. AI: throws it when
+      a missile is ~1.5 s out or fighters are within 500. **Caveat:** the slots throw sideways-forward (vanilla's
+      angles), so missiles coming straight at the nose mostly slip between canisters (bench: 0 of 8 nose-on, 4 of 8 along
+      the slots' diagonals). Worth watching in game.
+    - Targeting Feed (Heron): the carrier's fighters deal x1.5 damage (shots, beams, missiles) while it runs. AI: when
+      its wings are engaged. Needed a sim change: every ship's system modifiers are now reset before any system runs
+      (before, a system acting on another ship could be wiped if that ship was stepped later).
+    - Lidar Array (Invictus): 3.25 s wind-up in which nothing but missiles fires, then only hardpoint ballistic/energy
+      guns (not beams) fire, with +100% range, x3 rate of fire and +50% shot speed; missiles always may. AI: lined up on a
+      target within the boosted range, flux under 60%. (Recoil reduction and the passive +35% range after first use are
+      not modelled.)
+    - Termination Sequence (Tempest, Apex): the drone nearest the target becomes a `terminator_missile` (1200 energy +
+      600 EMP, homing); the drone rides the missile (drawn as itself) and dies when it hits or is shot down; vanilla then
+      rebuilds it like any lost fighter. Needs a target in missile range and a drone.
+  - Bench (`S3D_ONLY=systemsBatch2`): autoforge 2/10 -> 8 (base ammo 6), not usable when full; entropy x1.50 hull and
+    shield while on, x1.00 after, not usable at 8000; teleporter: you land on the aim point, the AI makes a 3000 jump at
+    a target 9000 away; mine strike: the AI lays mines one at a time, 4000 hull lost in 4 s; canister flak as above;
+    targeting feed: fighter and its shot x1.50, carrier x1.00; lidar: wind-up 0 gun shots (missiles 6), active 14
+    hardpoint shots in 4.5 s vs 3 in 3 s normally, turret 0, reaches 1.8x normal range only while active; termination
+    sequence: drone rides, dies, target takes exactly 1200.
+    Later fix (weapon batch 2 session): the canister flak check was flaky (unseeded `ShipSystem3D.RND`: 2-5 kills of 8,
+    failing ~1 run in 4). Now seeded (`ShipSystem3D.seed`, `S3D_FLAK_SEED`, default 31 -> 4 kills); over seeds 1-10 it
+    kills 2-5 and seed 6 fails the >= 3 bar, so the bar sits at the low tail of a real spread.
+  - Unverified until played: everything above in the real game; UAF's amplifier (mapped by AI type, uses vanilla's
+    x1.5, its own script may differ); `MineStrikeStats` getRange on a station; how system slots read on real hulls.
+
+- **2026-10-12 — Weapon scripts, batch 1: vanilla on-hit / on-fire / beam effects rebuilt in 3D (user: "move to the next
+  step"); headless-tested, awaiting in-game test.**
+  - Before: only the ion/tachyon family had a 3D version. Breach, Disintegrator, Graviton, Paladin, Pilum, Sabot, Squall,
+    Shock Repeater and every DEM missile fired as plain damage; on-fire scripts weren't even read, so Shock Repeater,
+    Squall and the DEM launchers never showed up as "not modelled".
+  - Same approach as ship systems: rebuilt natively, vanilla scripts never run. Numbers are read at runtime from the
+    scripts' public constants (`BreachOnHitEffect.DAMAGE`, `GravitonBeamEffect.DAMAGE_PERCENT_*`, ...), so a mod that
+    rebalances them carries over; the two that are inline in vanilla (Paladin's blast, Sabot's arc chance) are in the
+    tuning file under `weaponFx`.
+  - What each does in 3D:
+    - Breach SRM (+250), Mining Blaster (+100): armor stripped round a hull hit on top of the damage; armor doesn't
+      reduce it; never hull. Floating armor number.
+    - Disintegrator: a burn stays on the hull where it hit, 11 ticks about a second apart, 1000 armor in all; armor
+      only (a burn on bare hull does nothing); blue sparks and vanilla's loop sound while it burns; ends if the ship dies.
+    - Graviton Beam: a shield it plays on (at full power) takes +5/8/10% damage from everything with 1/2/3+ such beams
+      on it, lasting 1 s after the beam leaves.
+    - Paladin PD: once per burst, at full power, a 100 frag blast (radius 75, full damage within 50) where the beam
+      lands, sparing what the beam itself is burning; kills missile clusters and fighters round the target.
+    - Pilum (second stage): an EMP-only arc to a component anywhere on the ship on every hit; through a raised shield
+      with the ion chance (hard flux - 10%). Sabot warheads: 25% chance of the same on a hull hit (not through shields).
+    - Squall: +150 damage (x the ship's missile damage bonus) when it hits a shield.
+    - Shock Repeater: no shell any more (vanilla's shell has no collision). Each shot is an instant arc to the nearest
+      enemy ship or missile within range and a 30 deg cone of the barrel, with the shot's damage and EMP; a raised
+      shield in the way takes it. Nothing there: the arc crackles out ahead.
+    - DEM missiles (Gorgon, Gazer, Dragonfire, Hydra's warheads), driven by the missile's own behaviour JSON: cruise in
+      like any guided missile; within the trigger distance of the hull (after the minimum delay, or sooner once it has
+      swung `triggerAngle` round the target, or if it's already inside its stand-off) it holds a stand-off band (backs
+      off / closes in / bleeds speed to a drift, Gazer sidesteps), turns its nose on (turn rate boosted), paints the
+      target with its targeting laser (colour from the laser's spec) for the targeting time, then fires the payload
+      beam (read from `getWeaponSpec(payloadWeaponId)`: dps x the ship's missile damage bonus, burst, charge, range,
+      type, colours) along its nose. Bomb-pumped (Dragonfire): blows apart and the beam fires from where it was.
+      Then it explodes or flames out per its JSON. Shot down mid-burst = the beam stops. All distances x rangeMult.
+      AI: a DEM lining up on / painting a ship counts as incoming fire from its direction (omni shields turn to it),
+      and payload beams count like any enemy beam.
+    - MIRV warheads that are missiles of their own now stay missiles (read from the warhead's .proj through the game's
+      loader): Pilum's second stage homes (before: a straight shell at the first stage's speed, which a sidestep
+      dodged), Hydra spills six DEM warheads backwards (`arcOffset`) that swing round and attack, Hurricane's warheads
+      are unguided missiles. Warhead on-hit scripts are read too (Sabot's arc). `spreadSpeedRange` is used.
+    - Visual-only scripts are recognised and named in the log as "visual only" (Cryoblaster, Cryoflamer, Heavy
+      Adjudicator muzzle flash, lights/blinkers, sensor dish, VPDriver (unused in vanilla)). Anything else, now including
+      on-fire and every-frame scripts, is logged as "not modelled".
+  - **Also fixed (existing bug, affects every missile): missile flight time now scales with `weapons.rangeMult`.** Ranges
+    are x2 in 3D but flight time wasn't, so a missile launched from near its (3D) range flamed out about halfway: the
+    AI launches from the full range. Missiles now fly flightTime x rangeMult (one line in `Combat.stepMissiles`), so
+    they reach as far as their range says; they also stay in the air longer for PD to work on.
+  - Bench (`./build.sh combat`, real hull shapes; `S3D_ONLY=weaponScripts` runs just these): breach strips +150 armor
+    reading at the hit (45 plain vs 195), hull untouched; disintegrator 300 -> 2 armor over ~12 s, hull unchanged;
+    graviton x1.050 / x1.100 hard flux from a gun under 1 / 3 beams; Paladin leaves 0 of 4 packed missiles (3
+    without the blast); Pilum arc knocks out a tail turret from a nose hit (plain hit can't); Squall 500 hard flux
+    from 100 kinetic; shock repeater hits the ship ahead, never the one beside, no shells; Gorgon-like DEM holds 900+
+    from the hull, paints, its burst does 840 (expected 840) and it's gone; Pilum second stage hits a target that
+    sidesteps after the split (straight shell: 0 hits); Hydra-like: 6 warheads, 6 payloads, ~3140 damage.
+  - Full bench: everything passes except "AI 15v15 + 40 fighters sim cost", which **already fails on the merged code
+    before this step** (3 runs each on this Mac: baseline avg 1.30-1.36 ms, 8-17 frames over 8 ms, worst 15-24 ms;
+    with this step avg 1.23-1.26 ms, 13-16 frames over 8 ms, worst 21-30 ms). Averages are fine; the single-frame
+    spikes need their own look (GC? a volley of PD work?). In game the S3D perf line showed 58 fps with 28 ships.
+  - Unverified until played: the warhead .proj load path for other mods' MIRVs (falls back to a shell, logged);
+    whether the payload/laser look right at 3D scale; DEM hover band feel; Shock Repeater as PD in a real missile
+    storm; the longer missile flight (balance: watch PD vs missile-heavy fleets).
+  - Not in this batch: Omega/Threat/Dweller weapons (Rift Lance, Rift Cascade, Rift Beam, Rift Torpedo, Voltaic,
+    Neutron torpedo, Dweller fragments/swarms...), other mods' scripts (UAF's Racun, Kanshee, Selemene pods were seen
+    in the log), flare-launcher weapons (CUSTOM behaviour), canister flak / mines (ship systems).
+
 - **2026-10-12 — Orders and objectives in 3D (user: "proceed to the next step"); awaiting in-game test.**
   - Before: 3D pilots ignored every command-map order except retreat, objectives weren't shown, and their
     bonuses never reached the 3D ships.
@@ -589,6 +1001,7 @@ src/s3d/core     ... plus ShipAI3D (AI pilot)
 src/s3d/host     Starsector glue: CombatHostPlugin, Session3D (shared) -> SandboxSession / BattleSession,
                  ShipBridge, TuningLoader
 src-tools/       Dev-only tools (not in the mod jar): FlightBench, MeshPreview
+src-art/         Blender scripts that build hand-made hull models (s3d_kit.py + hulls/<hullId>.py)
 ```
 
 **Hosting (decision, M1; built M4):** the vanilla battle starts normally. `CombatHostPlugin` (registered for
@@ -612,7 +1025,8 @@ alpha silhouette → exact EDT signed distance field (lightly blurred) → march
 plateau at the rounding radius, plus small brightness relief → flatter keel-shaped underside → thin
 edge wall. Sprite texture is edge-dilated so mipmaps don't bleed black. Underside shading: same
 panels, desaturated, darker, pulled toward the hull tint; cool fill light from below keeps it readable.
-Hand-made OBJ override per hull (option B) is planned, not implemented.
+Hand-made OBJ override per hull (option B): `data/meshes/hulls/<hullId>.obj`, built from Blender scripts in
+`src-art/` (see its README); hulls without one keep the relief.
 
 **Stats:** read from the live puppet `ShipAPI.getMutableStats()` (so hullmods, skills, D-/S-mods and
 CR penalties are already applied); sprite via `Global.getSettings().openStream(hullSpec.getSpriteName())`;
@@ -657,8 +1071,14 @@ Bench (`./build.sh bench`, default tuning):
    battle starts when the deployment dialog closes. Check afterwards: losses, hull damage and CR on
    the fleet screen, salvage. Log lines: `S3D: campaign battle in 3D`, `entered the 3D battle`,
    `destroyed in 3D`, `vanilla registered the loss`, `retreated`, and any `WARN` from S3D.
-3. `H` shows controls. Tune feel in `data/config/s3d_tuning.json`, press `K` in game to reload (the HUD
-   shows the file hash, so you can tell whether the reload picked up your edit).
+3. Controls (no in-game help since 2026-10-13; keys live in `keys` in the tuning file): mouse steers, left click
+   fires the selected group, right click shield / phase, 1-7 select group, Ctrl/Cmd+1-7 toggle autofire, W/S
+   throttle, X all stop, A/D strafe, Space/Shift up/down, Q/E roll, L auto-level, F system, V vent, R lock target,
+   Z wings engage/regroup, hold L-Alt or middle mouse to look around, wheel zoom, T tactical view, J spectate
+   ([ / ] other ships), P pause, Tab command map, F9 twice = finish in vanilla 2D, G / F10 / \ hide HUD,
+   I perf readout, O hide 3D view (debug), K reload tuning. Sandbox: [ / ] hull, N repair, B incoming fire.
+   Tune feel in `data/config/s3d_tuning.json`, press `K` in game to reload (the perf readout shows the file hash,
+   so you can tell whether the reload picked up your edit).
 4. Log: `Starsector.app/logs/starsector.log`, lines starting with `S3D`.
 5. Dev tools: `./build.sh` (jar), `./build.sh bench`, `./build.sh preview [hullIds…]`
    (writes `build/preview/*.png`, flight strip, benchmark, mission icon).
@@ -671,7 +1091,7 @@ Bench (`./build.sh bench`, default tuning):
 - `engine.isUIShowingDialog()` semantics are a guess; transitions are logged ("vanilla UI opened/closed").
 - Tuning reload uses `SettingsAPI.loadText(path, modId)`; if the game caches it, edits won't show
   until restart (watch the hash).
-- No weapons drawn on hulls yet (turret/hardpoint sprites are separate in Starsector) → M3/M5.
+- No weapons drawn on hulls yet (turret/hardpoint sprites are separate in Starsector) → M3.
 - No sound yet. No collisions between 3D ships yet.
 - No mesh LOD; fine at sandbox scale, revisit for big battles.
 - GL resources live for the session; a display-mode change that recreates the GL context would need
@@ -709,14 +1129,27 @@ Bench (`./build.sh bench`, default tuning):
 
 ## Next steps
 
-(Updated 2026-10-12. Done since the last list: stations at 5x with AI that copes, orders and objectives.)
+(Updated 2026-10-12. Done since the last list: stations at 5x with AI that copes, orders and objectives (both built and
+run on the real install: a station battle played at 58 fps with 28 ships, enemy DEFEND / HEAVY_ESCORT orders followed),
+weapon scripts batch 1, ship systems batch 2, weapon scripts batch 2.)
 
-1. On the real install: `./build.sh` and `./build.sh combat` (this round was built without the game; a
-   compile error would most likely be in one of the API calls listed under "Orders and objectives").
-2. In-game test of stations at 5x (attack a pirate or Pather base) and of orders and objectives (a fleet
-   battle with objectives: give escort / capture / defend / engage / avoid orders on the Tab map; watch the
-   `S3D: ... ordered:` and objective log lines, and whether vanilla flips objectives without the fallback).
-3. Gaps by impact: weapon on-hit / every-frame scripts; remaining ship systems (drone strike, canister flak,
-   entropy amplifier, phase teleporter, reserve wings, mine strike, targeting feed, lidar array, ...); mesh
-   LOD for big battles; other mods' ships.
-4. M5: hull-by-hull pass (OBJ override for hulls the sprite relief doesn't suit; stations would benefit).
+1. In-game test of weapon scripts batch 1: a fight with Breach / Pilum / Sabot / Squall / Gorgon / Hydra / Dragonfire
+   boats and a Graviton / Paladin / Disintegrator / Shock Repeater ship (simulator is fine). Watch the weapon lines in
+   the log at battle start ("strips 250 armor", "DEM: ...", "visual only", "not modelled") and how DEM missiles look
+   holding off and painting.
+2. In-game test of ship systems batch 2: fly (or fight) an Afflictor (Entropy Amplifier), Hyperion (Phase Teleporter),
+   Doom (Mine Strike), Manticore / Sarissa (Canister Flak), Heron (Targeting Feed), Invictus (Lidar Array), Tempest
+   (Termination Sequence), and a station with Heavy Missile Autoforge. The system's log line at battle start says what
+   it was set up as.
+3. Still to test from earlier: your own orders on the Tab map (escort / capture / defend / engage / avoid) in a battle
+   with objectives; only enemy orders have shown up in the log so far.
+4. In-game test of weapon scripts batch 2: the simulator with Omega / Threat / Dweller ships if unlocked, or Console
+   Commands (installed) to put Rift Cascade / Rift Beam / Reality Disruptor / Voltaic / fragment weapons on your ship
+   and spawn a Threat or Dweller fleet. Watch the weapon and "fragment swarm" lines in the log at battle start.
+5. Gaps by impact: Swarm / Vortex Launcher (wing-spawning weapons); rocket/bomb homing (see batch 2 entry); remaining
+   ship systems (Reserve Deployment, Combat Burn, Orion Device, Nova Burst, Quantum Disruptor, Mote
+   Attractor, station drone launchers, the Shrouded / Threat units' systems); mesh LOD for big battles; other mods'
+   ships and scripts (UAF is installed).
+
+Cut from the roadmap (2026-10-12, user): M5, the hull-by-hull model pass. Ships keep the sprite relief meshes. The OBJ
+loader and the Blender kit stay in the mod, unused (the Wolf is still only staged in `build/art/hulls/`).

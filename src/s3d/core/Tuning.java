@@ -27,11 +27,17 @@ public final class Tuning {
 	public float rollRateMinDeg = 12.5f;
 	/** Multiplies hull turn acceleration (after the curve keeps the hull's spin-up time). Higher = snappier. */
 	public float turnAccelMult = 2f;
-	public float speedMult = 0.5f;
+	/**
+	 * User (2026-10-12): "a tad faster", +15% top speed (0.5 -> 0.575); later the same day +50% on top
+	 * (0.575 -> 0.8625), with weapon ranges halved. Acceleration and turning unchanged.
+	 */
+	public float speedMult = 0.8625f;
 	public float accelMult = 0.5f;
 	public float decelMult = 0.5f;
 	public float strafeSpeedMult = 0.6f;
 	public float strafeAccelMult = 0.7f;
+	/** Up/down strafe speed, acceleration and braking relative to sideways strafe (user 2026-10-12: 30% faster). */
+	public float verticalMult = 1.3f;
 	public float reverseSpeedMult = 0.5f;
 	/** How hard flight assist kills sideways drift, as a multiple of hull deceleration. */
 	public float lateralDampMult = 1f;
@@ -74,8 +80,6 @@ public final class Tuning {
 	public float camTransition = 0.35f;
 	public float camZoomMin = 0.5f;
 	public float camZoomMax = 3f;
-	/** Spectator free camera speed (units/s; the wheel scales it 0.5x-3x). */
-	public float camFreeSpeed = 300f;
 
 	// ---- render ----
 	public int msaaSamples = 4;
@@ -99,8 +103,13 @@ public final class Tuning {
 	public float shieldBrightness = 0.45f;
 
 	// ---- weapons ----
-	/** Global multiplier on vanilla weapon ranges (1 = vanilla). */
-	public float weaponRangeMult = 2f;
+	/** Global multiplier on vanilla weapon ranges (1 = vanilla). User (2026-10-12): halved, 2 -> 1. */
+	public float weaponRangeMult = 1f;
+	/**
+	 * Scales how much damage armor stops: vanilla's reduction (hit strength vs armor, capped at
+	 * maxArmorDamageReduction) times this. User (2026-10-12): 30% less, so 0.7 (the 85% cap becomes 59.5%).
+	 */
+	public float armorReductionMult = 0.7f;
 	/** Radius of the mouse reticle circle, pixels. */
 	public float reticleRadiusPx = 11f;
 	/** Lead circle radius relative to the reticle (1.1 = 10% bigger). Reticle inside it = shots go to the lead. */
@@ -108,9 +117,24 @@ public final class Tuning {
 	/** Enemies within this many degrees of the reticle get an automatic lead pip (no need to press R). */
 	public float autoTargetDeg = 25f;
 	/** Aim distance along the reticle ray when no target is selected or under the reticle. */
-	public float weaponConvergence = 1200f;
+	public float weaponConvergence = 600f;
 	public float radarRange = 5000f;
 	public boolean damageNumbers = true;
+	/**
+	 * Weapon scripts whose numbers aren't public in vanilla's code (the rest are read from the scripts):
+	 * Paladin PD's once-per-burst blast (damage, radius, full-damage core) and Sabot's EMP arc chance.
+	 */
+	public float fxPaladinBlastDamage = 100f, fxPaladinBlastRadius = 75f, fxPaladinBlastCore = 50f;
+	public float fxSabotArcChance = 0.25f;
+	/**
+	 * Weapon scripts batch 2, numbers inline in vanilla's code: Rift Beam's seconds between rifts,
+	 * Reality Disruptor's seconds between arcs and before the first, Abyssal Glare's rift (seconds between
+	 * chances, chance, longest gap, radius, full-damage core), Defabrication Swarm's chance a damaging tick
+	 * gives its ship a fragment back.
+	 */
+	public float fx2RiftBeamInterval = 0.5f, fx2DisruptorArcInterval = 0.1f, fx2DisruptorArcDelay = 0.5f;
+	public float fx2GlareInterval = 0.25f, fx2GlareChance = 0.2f, fx2GlareMaxGap = 0.5f, fx2GlareRadius = 75f, fx2GlareCore = 50f;
+	public float fx2DevouringRefundChance = 0.75f;
 
 	// ---- per-class 3D size (relative to the sprite's 1 px = 1 unit) ----
 	public final Map<String, Float> hullScale = new LinkedHashMap<>();
@@ -178,8 +202,8 @@ public final class Tuning {
 	public float weaponRepairTime = 10f, engineRepairTime = 8f;
 
 	// ---- ship systems (effect sizes; timing, charges and flux come from the game data) ----
-	/** Burn Drive: extra top speed (before speedMult), acceleration multiplier, what's left of turning. */
-	public float sysBurnSpeed = 300f, sysBurnAccelMult = 4f, sysBurnTurnMult = 0.2f;
+	/** Burn Drive: extra top speed (before speedMult), acceleration multiplier, what's left of turning (steering stays: vanilla's no-turning flag isn't applied). */
+	public float sysBurnSpeed = 300f, sysBurnAccelMult = 4f, sysBurnTurnMult = 0.5f;
 	/** Maneuvering / Plasma Jets: extra speed (fraction), acceleration multiplier, extra turn rate (fraction). */
 	public float sysJetsSpeed = 0.5f, sysJetsAccelMult = 2f, sysJetsTurn = 0.5f, sysPlasmaSpeed = 1f;
 	/** Microburn: extra top speed during the burst (before speedMult). */
@@ -200,6 +224,16 @@ public final class Tuning {
 	/** Flare launchers: flares per use and how long they burn; distract enemy guided missiles nearby. */
 	public int sysFlareCount = 3;
 	public float sysFlareLife = 4f, sysFlareLure = 800f, sysFlareLureChance = 0.6f;
+	/**
+	 * Systems whose numbers aren't public in vanilla's code (the rest are read from the scripts): Entropy
+	 * Amplifier's reach (vanilla map units, before system range bonuses); the mine Mine Strike lays (a weapon
+	 * id), how long it takes to arm and its windup once an enemy is near; the missile Termination
+	 * Sequence turns a drone into (a weapon id).
+	 */
+	public float sysEntropyRange = 1500f;
+	public String sysMineWeapon = "minelayer2";
+	public float sysMineArmTime = 0.5f, sysMineWindup = 1f;
+	public String sysDroneStrikeWeapon = "terminator_missile";
 
 	// ---- collisions ----
 	public boolean collisions = true;
@@ -239,8 +273,13 @@ public final class Tuning {
 	public boolean battleEnabled = true;
 	/** 3D units per vanilla map unit when mapping positions and map edges between 2D and 3D. */
 	public float battleMapScale = 0.5f;
-	/** Ships enter at this fraction of the (scaled) half map height from the centre, on their own side. */
-	public float battleDeployFrac = 0.4f;
+	/**
+	 * How far from the centre line each side enters (3D units; at most 85% of the way to its map edge).
+	 * User (2026-10-12): about 30 s of runway before the fighting. Measured with bench fleets: 2700
+	 * (5400 apart) gives first shots after 22-37 s, frigates to capitals; it was 0.4 of the half-map
+	 * (1800 on an 18000 map), first shots after 10-20 s.
+	 */
+	public float battleDeployDistance = 2700f;
 	/** Squeezes vanilla's sideways deployment spread (1 = vanilla's spread at mapScale). */
 	public float battleDeploySpread = 0.5f;
 	/** Spread of entry altitudes (+/- units) so fleets don't arrive on one flat plane. */
@@ -273,6 +312,13 @@ public final class Tuning {
 	public float aiRetargetTime = 2f;
 	/** AI fires a ship-killing weapon only when its lead point is within this many degrees of the barrel. */
 	public float aiFireConeDeg = 6f;
+	/**
+	 * AI ships keep their shield up while an enemy has them within its weapons' reach, as long as flux is
+	 * below this level (above it the shield only goes up for fire that's about to land, so hard flux can
+	 * drain). User (2026-10-12): the AI "doesn't use its shields". Vanilla shields take 2-4 s to unfold,
+	 * so raising one for a shot already on its way was always too late.
+	 */
+	public float aiShieldFlux = 0.6f;
 	/** An AI ship with nothing in range drifts back once it's this far from its own fleet's centre. */
 	public float aiCohesion = 2000f;
 	/** AI ships stay within this height of the fight's mean altitude. */
@@ -283,6 +329,20 @@ public final class Tuning {
 	public float aiPassChance = 0.5f;
 	/** Chance per plan that a nose-gun ship slides round its target to a new angle. */
 	public float aiFlankChance = 0.6f;
+	/**
+	 * How hard AI ships keep out of enemy guns' reach (0 = off, 1 = default): standing off at the edge of
+	 * a target they outrange, sliding out of other enemies' reach, backing out to cool off at high flux,
+	 * picking fighting spots and targets away from enemy crowds, no gun runs into a crowd.
+	 */
+	public float aiCaution = 1f;
+	/**
+	 * How readily AI ships take their shots (0 = off, 1 = default): guns turn to another enemy when a
+	 * friendly blocks the shot or a missile isn't worth it, prefer enemies that can't fight back or whose
+	 * shield won't stop the shot, fire harder at high flux when the shot lands on armor, ships pick
+	 * targets that are hurt, exposed or already in front of their guns, and fighters dogfight enemy
+	 * fighters instead of flashing past them.
+	 */
+	public float aiOpportunism = 1f;
 
 	// ---- keys (LWJGL Keyboard names) ----
 	public final Map<String, String> keys = new LinkedHashMap<>();
@@ -301,14 +361,13 @@ public final class Tuning {
 		keys.put("strafeLeft", "A");
 		keys.put("strafeRight", "D");
 		keys.put("strafeUp", "SPACE");
-		keys.put("strafeDown", "C");
+		keys.put("strafeDown", "LSHIFT");
 		keys.put("rollLeft", "Q");
 		keys.put("rollRight", "E");
 		keys.put("autoLevel", "L");
 		keys.put("freeLook", "LMENU");
 		keys.put("tactical", "T");
 		keys.put("pause", "P");
-		keys.put("help", "H");
 		keys.put("prevHull", "LBRACKET");
 		keys.put("nextHull", "RBRACKET");
 		keys.put("reloadTuning", "K");
@@ -344,6 +403,7 @@ public final class Tuning {
 			t.decelMult = num(f, "decelMult", t.decelMult);
 			t.strafeSpeedMult = num(f, "strafeSpeedMult", t.strafeSpeedMult);
 			t.strafeAccelMult = num(f, "strafeAccelMult", t.strafeAccelMult);
+			t.verticalMult = num(f, "verticalMult", t.verticalMult);
 			t.reverseSpeedMult = num(f, "reverseSpeedMult", t.reverseSpeedMult);
 			t.lateralDampMult = num(f, "lateralDampMult", t.lateralDampMult);
 			t.throttleRate = num(f, "throttleRate", t.throttleRate);
@@ -375,7 +435,6 @@ public final class Tuning {
 			t.camTransition = num(c, "transition", t.camTransition);
 			t.camZoomMin = num(c, "zoomMin", t.camZoomMin);
 			t.camZoomMax = num(c, "zoomMax", t.camZoomMax);
-			t.camFreeSpeed = num(c, "freeSpeed", t.camFreeSpeed);
 		}
 		JSONObject r = root.optJSONObject("render");
 		if (r != null) {
@@ -400,12 +459,32 @@ public final class Tuning {
 		JSONObject wp = root.optJSONObject("weapons");
 		if (wp != null) {
 			t.weaponRangeMult = num(wp, "rangeMult", t.weaponRangeMult);
+			t.armorReductionMult = num(wp, "armorReductionMult", t.armorReductionMult);
 			t.weaponConvergence = num(wp, "convergence", t.weaponConvergence);
 			t.reticleRadiusPx = num(wp, "reticleRadiusPx", t.reticleRadiusPx);
 			t.leadCircleScale = num(wp, "leadCircleScale", t.leadCircleScale);
 			t.autoTargetDeg = num(wp, "autoTargetDeg", t.autoTargetDeg);
 			t.radarRange = num(wp, "radarRange", t.radarRange);
 			t.damageNumbers = wp.optBoolean("damageNumbers", t.damageNumbers);
+		}
+		JSONObject fx = root.optJSONObject("weaponFx");
+		if (fx != null) {
+			t.fxPaladinBlastDamage = num(fx, "paladinBlastDamage", t.fxPaladinBlastDamage);
+			t.fxPaladinBlastRadius = num(fx, "paladinBlastRadius", t.fxPaladinBlastRadius);
+			t.fxPaladinBlastCore = num(fx, "paladinBlastCore", t.fxPaladinBlastCore);
+			t.fxSabotArcChance = num(fx, "sabotArcChance", t.fxSabotArcChance);
+		}
+		JSONObject fx2 = root.optJSONObject("weaponFx2");
+		if (fx2 != null) {
+			t.fx2RiftBeamInterval = num(fx2, "riftBeamInterval", t.fx2RiftBeamInterval);
+			t.fx2DisruptorArcInterval = num(fx2, "disruptorArcInterval", t.fx2DisruptorArcInterval);
+			t.fx2DisruptorArcDelay = num(fx2, "disruptorArcDelay", t.fx2DisruptorArcDelay);
+			t.fx2GlareInterval = num(fx2, "glareInterval", t.fx2GlareInterval);
+			t.fx2GlareChance = num(fx2, "glareChance", t.fx2GlareChance);
+			t.fx2GlareMaxGap = num(fx2, "glareMaxGap", t.fx2GlareMaxGap);
+			t.fx2GlareRadius = num(fx2, "glareRadius", t.fx2GlareRadius);
+			t.fx2GlareCore = num(fx2, "glareCore", t.fx2GlareCore);
+			t.fx2DevouringRefundChance = num(fx2, "devouringRefundChance", t.fx2DevouringRefundChance);
 		}
 		JSONObject sc = root.optJSONObject("scale");
 		if (sc != null) {
@@ -490,6 +569,11 @@ public final class Tuning {
 			t.sysFlareLife = num(sy, "flareLife", t.sysFlareLife);
 			t.sysFlareLure = num(sy, "flareLureRange", t.sysFlareLure);
 			t.sysFlareLureChance = num(sy, "flareLureChance", t.sysFlareLureChance);
+			t.sysEntropyRange = num(sy, "entropyAmplifierRange", t.sysEntropyRange);
+			t.sysMineWeapon = sy.optString("mineStrikeWeapon", t.sysMineWeapon);
+			t.sysMineArmTime = num(sy, "mineArmTime", t.sysMineArmTime);
+			t.sysMineWindup = num(sy, "mineWindup", t.sysMineWindup);
+			t.sysDroneStrikeWeapon = sy.optString("droneStrikeWeapon", t.sysDroneStrikeWeapon);
 		}
 		JSONObject co = root.optJSONObject("collisions");
 		if (co != null) {
@@ -523,7 +607,7 @@ public final class Tuning {
 		if (bt != null) {
 			t.battleEnabled = bt.optBoolean("enabled", t.battleEnabled);
 			t.battleMapScale = num(bt, "mapScale", t.battleMapScale);
-			t.battleDeployFrac = num(bt, "deployFrac", t.battleDeployFrac);
+			t.battleDeployDistance = num(bt, "deployDistance", t.battleDeployDistance);
 			t.battleDeploySpread = num(bt, "deploySpread", t.battleDeploySpread);
 			t.battleDeployAltitude = num(bt, "deployAltitude", t.battleDeployAltitude);
 			t.battleTransferDelay = num(bt, "transferDelay", t.battleTransferDelay);
@@ -540,11 +624,14 @@ public final class Tuning {
 			t.aiStrafe = num(ai, "strafe", t.aiStrafe);
 			t.aiRetargetTime = num(ai, "retargetTime", t.aiRetargetTime);
 			t.aiFireConeDeg = num(ai, "fireConeDeg", t.aiFireConeDeg);
+			t.aiShieldFlux = num(ai, "shieldFlux", t.aiShieldFlux);
 			t.aiCohesion = num(ai, "cohesion", t.aiCohesion);
 			t.aiAltitudeBand = num(ai, "altitudeBand", t.aiAltitudeBand);
 			t.aiWeave = num(ai, "weave", t.aiWeave);
 			t.aiPassChance = num(ai, "passChance", t.aiPassChance);
 			t.aiFlankChance = num(ai, "flankChance", t.aiFlankChance);
+			t.aiCaution = num(ai, "caution", t.aiCaution);
+			t.aiOpportunism = num(ai, "opportunism", t.aiOpportunism);
 		}
 		JSONObject k = root.optJSONObject("keys");
 		if (k != null) {

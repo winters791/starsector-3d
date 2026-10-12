@@ -8,11 +8,12 @@
 		"rollRateMult":1.6,
 		"rollRateMinDeg":12.5,
 		"turnAccelMult":2.0,
-		"speedMult":0.5,
+		"speedMult":0.8625,
 		"accelMult":0.5,
 		"decelMult":0.5,
 		"strafeSpeedMult":0.6,
 		"strafeAccelMult":0.7,
+		"verticalMult":1.3,
 		"reverseSpeedMult":0.5,
 		"lateralDampMult":1.0,
 		"throttleRate":0.8,
@@ -41,8 +42,7 @@
 		"tacticalPitchDeg":55,
 		"transition":0.35,
 		"zoomMin":0.5,
-		"zoomMax":3.0,
-		"freeSpeed":300
+		"zoomMax":3.0
 	},
 	"render":{
 		"msaaSamples":4,
@@ -64,13 +64,31 @@
 		"shieldBrightness":0.45
 	},
 	"weapons":{
-		"rangeMult":2.0,
+		"rangeMult":1.0,
+		"armorReductionMult":0.7,
 		"reticleRadiusPx":11,
 		"leadCircleScale":1.1,
 		"autoTargetDeg":25,
-		"convergence":1200,
+		"convergence":600,
 		"radarRange":5000,
 		"damageNumbers":true
+	},
+	"weaponFx":{
+		"paladinBlastDamage":100,
+		"paladinBlastRadius":75,
+		"paladinBlastCore":50,
+		"sabotArcChance":0.25
+	},
+	"weaponFx2":{
+		"riftBeamInterval":0.5,
+		"disruptorArcInterval":0.1,
+		"disruptorArcDelay":0.5,
+		"glareInterval":0.25,
+		"glareChance":0.2,
+		"glareMaxGap":0.5,
+		"glareRadius":75,
+		"glareCore":50,
+		"devouringRefundChance":0.75
 	},
 	"scale":{
 		"fighter":0.8,
@@ -126,7 +144,7 @@
 	"systems":{
 		"burnDriveSpeed":300,
 		"burnDriveAccelMult":4,
-		"burnDriveTurnMult":0.2,
+		"burnDriveTurnMult":0.5,
 		"jetsSpeed":0.5,
 		"jetsAccelMult":2,
 		"jetsTurn":0.5,
@@ -145,7 +163,12 @@
 		"flareCount":3,
 		"flareLife":4,
 		"flareLureRange":800,
-		"flareLureChance":0.6
+		"flareLureChance":0.6,
+		"entropyAmplifierRange":1500,
+		"mineStrikeWeapon":"minelayer2",
+		"mineArmTime":0.5,
+		"mineWindup":1.0,
+		"droneStrikeWeapon":"terminator_missile"
 	},
 	"collisions":{
 		"enabled":true,
@@ -174,7 +197,7 @@
 	"battle":{
 		"enabled":true,
 		"mapScale":0.5,
-		"deployFrac":0.4,
+		"deployDistance":2700,
 		"deploySpread":0.5,
 		"deployAltitude":250,
 		"transferDelay":3,
@@ -190,11 +213,14 @@
 		"strafe":0.35,
 		"retargetTime":2,
 		"fireConeDeg":6,
+		"shieldFlux":0.6,
 		"cohesion":2000,
 		"altitudeBand":700,
 		"weave":0.6,
 		"passChance":0.5,
-		"flankChance":0.6
+		"flankChance":0.6,
+		"caution":1.0,
+		"opportunism":1.0
 	},
 	"keys":{
 		"throttleUp":"W",
@@ -203,14 +229,13 @@
 		"strafeLeft":"A",
 		"strafeRight":"D",
 		"strafeUp":"SPACE",
-		"strafeDown":"C",
+		"strafeDown":"LSHIFT",
 		"rollLeft":"Q",
 		"rollRight":"E",
 		"autoLevel":"L",
 		"freeLook":"LMENU",
 		"tactical":"T",
 		"pause":"P",
-		"help":"H",
 		"prevHull":"LBRACKET",
 		"nextHull":"RBRACKET",
 		"reloadTuning":"K",

@@ -47,9 +47,6 @@ public final class ChaseCamera {
 		shake *= (float) Math.exp(-dt / 0.22f);
 	}
 
-	// Free camera (spectating)
-	private float freeYaw, freePitch;
-
 	public void snapTo(Ship3D s) {
 		chaseRot.set(s.rot);
 		s.rot.forward(tacHeading);
@@ -120,39 +117,6 @@ public final class ChaseCamera {
 		proj.perspective(fovYRad, aspect, near, far);
 		view.view(rot, pos);
 		viewProj.mul(proj, view);
-	}
-
-	/** Starts the free camera from wherever the camera is now. */
-	public void beginFree() {
-		Vec3 f = rot.forward(new Vec3());
-		freeYaw = (float) Math.atan2(-f.x, -f.z);
-		freePitch = (float) Math.asin(FlightModel.clamp(f.y, -1f, 1f));
-	}
-
-	/**
-	 * Free-flying spectator camera: the mouse turns it (offset from the centre = turn rate, like
-	 * steering), throttle/strafe keys move it along its axes, strafe up/down along world up. The
-	 * wheel (zoom) sets the speed.
-	 */
-	public void updateFree(PilotInput in, Tuning t, float dt, float aspect) {
-		dt = Math.max(dt, 0f);
-		float[] st = MouseSteering.stick(in.mouseX, in.mouseY, in.screenW, in.screenH, t);
-		freeYaw -= st[0] * 1.6f * dt;
-		freePitch = FlightModel.clamp(freePitch + st[1] * 1.2f * dt, -1.5f, 1.5f);
-		rot.setAxisAngle(0, 1, 0, freeYaw).mulLocal(new Quat().setAxisAngle(1, 0, 0, freePitch));
-		float speed = t.camFreeSpeed * zoomChase;
-		Vec3 f = rot.forward(new Vec3()), r = rot.right(new Vec3());
-		float fwd = (in.throttleUp ? 1f : 0f) - (in.throttleDown ? 1f : 0f);
-		float side = (in.strafeRight ? 1f : 0f) - (in.strafeLeft ? 1f : 0f);
-		float upDown = (in.strafeUp ? 1f : 0f) - (in.strafeDown ? 1f : 0f);
-		pos.addScaled(f, fwd * speed * dt).addScaled(r, side * speed * dt).add(new Vec3(0f, upDown * speed * dt, 0f));
-		this.aspect = aspect;
-		fovYRad = (float) Math.toRadians(t.camFovDeg);
-		near = 2f;
-		proj.perspective(fovYRad, aspect, near, far);
-		view.view(rot, pos);
-		viewProj.mul(proj, view);
-		initialized = false; // re-snap when going back to a chase view
 	}
 
 	/** World-space direction of the ray through normalised screen coords (-1..1). */
