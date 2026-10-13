@@ -103,8 +103,8 @@ public final class Tuning {
 	public float shieldBrightness = 0.45f;
 
 	// ---- weapons ----
-	/** Global multiplier on vanilla weapon ranges (1 = vanilla). User (2026-10-12): halved, 2 -> 1. */
-	public float weaponRangeMult = 1f;
+	/** Global multiplier on vanilla weapon ranges (1 = vanilla). User: halved 2 -> 1 (2026-10-12), then +20% flat, 1.2 (2026-10-13). */
+	public float weaponRangeMult = 1.2f;
 	/**
 	 * Scales how much damage armor stops: vanilla's reduction (hit strength vs armor, capped at
 	 * maxArmorDamageReduction) times this. User (2026-10-12): 30% less, so 0.7 (the 85% cap becomes 59.5%).
@@ -290,10 +290,10 @@ public final class Tuning {
 	public boolean battleStations = true;
 	/**
 	 * How fast stations with Axial Rotation turn in 3D, degrees per second. The outer sections' speed
-	 * grows with the station scale: 1 at scale 5 moves them as fast as 2 did at scale 2.5, slow
-	 * enough for ships to keep a section in their sights.
+	 * grows with the station scale: 1 at scale 5 moves them as fast as 2 did at scale 2.5. User
+	 * (2026-10-13): 4x faster, 1 -> 4 (a full turn in 90 s).
 	 */
-	public float stationSpinDeg = 1f;
+	public float stationSpinDeg = 4f;
 	/**
 	 * Battle objectives, in vanilla map units: how close a ship must be to take one (vanilla's own
 	 * figure isn't exposed, so the 3D pilots sit well inside this), and how long one side may hold

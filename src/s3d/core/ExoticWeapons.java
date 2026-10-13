@@ -437,6 +437,44 @@ public final class ExoticWeapons {
 	// ---- firing: fragments, Hungering Rift's cap ----------------------------------------------------
 
 	/** False while the weapon can't fire: its ship's swarm is short of fragments, or too many Hungering Rifts are out. */
+	/** As below, and a wing launcher (Swarm Launcher) holds once it has its full count out, until only one is left. */
+	boolean mayFire(Ship3D s, WeaponMount m) {
+		WeaponSpec3D w = m.spec;
+		if (!mayFire(s, w)) return false;
+		if (w.launchWing != null && w.launchMaxOut > 0) {
+			int out = 0;
+			for (Ship3D o : c.world) if (o.launchedBy == m && !o.destroyed) out++;
+			for (SpawnRequest r : c.spawnRequests) if (r.launcher == m) out++;
+			if (out >= w.launchMaxOut) m.launchHold = true;
+			if (m.launchHold) {
+				if (out > 1) return false;
+				m.launchHold = false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Swarm Launcher / Churning Locus: the wing comes out of the mount (within the weapon's spread)
+	 * instead of a shot; the host spawns it through vanilla's fleet manager. A Swarm Launcher's swarm
+	 * takes its fragments with it (spent by fired()). Launched more than 150 deg off the ship's nose,
+	 * a vortex leaves at half speed (vanilla).
+	 */
+	void launchWing(Ship3D s, WeaponMount m, Vec3 dir) {
+		WeaponSpec3D w = m.spec;
+		Vec3 at = m.worldPos(s, new Vec3());
+		Vec3 d = new Vec3(dir);
+		if (w.launchArcDeg > 0f) Combat.jitterDir(d, (float) Math.toRadians(w.launchArcDeg * 0.5f), c.randomSource());
+		float speed = d.dot(s.rot.forward(new Vec3())) < (float) Math.cos(Math.toRadians(150)) ? 0.5f : 1f;
+		SpawnRequest r = new SpawnRequest(w.launchWing, true, s, at, d, speed, w.launchBehaviour);
+		r.launcher = m;
+		c.spawnRequests.add(r);
+		if (w.maxAmmo > 0) m.ammo -= 1f;
+		m.flash = 0.08f;
+		m.firedThisFrame = true;
+		c.sounds.play(w.fireSound, at, 1f);
+	}
+
 	boolean mayFire(Ship3D s, WeaponSpec3D w) {
 		if (w.fragmentsNeeded > 0 && (s.fragments == null || s.fragments.active() < w.fragmentsNeeded)) return false;
 		if (w.riftCap > 0) {
@@ -636,7 +674,7 @@ public final class ExoticWeapons {
 		beamRifts.keySet().removeIf(m -> m.beamLevel <= 0f);
 		stepOrbs(dt);
 		stepDots(dt);
-		for (Ship3D s : c.world) if (s.fragments != null && !s.destroyed) s.fragments.step(dt);
+		for (Ship3D s : c.world) if (s.fragments != null && !s.destroyed) s.fragments.step(dt * s.sysFragmentRegenMult); // Fragment Volley: x10
 		for (Iterator<Map.Entry<Ship3D, Float>> it = slowed.entrySet().iterator(); it.hasNext(); ) {
 			Map.Entry<Ship3D, Float> e = it.next();
 			float left = e.getValue() - dt;

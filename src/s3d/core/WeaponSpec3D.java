@@ -31,8 +31,13 @@ public final class WeaponSpec3D {
 	public float emp;
 	/** Vanilla ion/tachyon effects: EMP arcs that can pierce a shield (more likely the more hard flux it holds). */
 	public boolean empArcs;
-	/** Proximity fuse: detonates within proxRange of an enemy missile; blast radius / full-damage core radius. */
+	/**
+	 * Proximity fuse: detonates within proxRange of an enemy missile, fighter or hull, and where its
+	 * flight or range runs out; blast radius / full-damage core radius.
+	 */
 	public float proxRange, proxRadius, proxCore;
+	/** Fused shell: its range is cut by up to this fraction (rolled per shot, with chance proxVarianceChance) so it bursts short (Devastator). */
+	public float proxRangeVariance, proxVarianceChance = 1f;
 	/** Sound of a fused blast (null = flak's). */
 	public String blastSound;
 	/**
@@ -50,6 +55,11 @@ public final class WeaponSpec3D {
 	public int mirvCount;
 	public float mirvSplitRange, mirvSplitRangeRandom, mirvMinTime, mirvArcDeg, mirvArcOffsetDeg;
 	public float mirvSpreadSpeed, mirvSpreadSpeedRandom;
+	/** Warheads evenly over the arc (else at random in it), plus up to this many degrees of scatter each. */
+	public boolean mirvEvenSpread = true;
+	public float mirvInaccuracyDeg;
+	/** May split before mirvMinTime if it would reach its split range before then (fired from close in). */
+	public boolean mirvSplitEarly;
 	public WeaponSpec3D mirvWarhead;
 	/** Vanilla sound ids: played per shot / launch, or looped while a beam is on; null = none. */
 	public String fireSound, beamLoopSound;
@@ -136,6 +146,17 @@ public final class WeaponSpec3D {
 	public boolean softOnShields;
 	/** Threat fragment weapons: fragments the ship's swarm needs to fire, and spends per shot. */
 	public int fragmentsNeeded, fragmentsSpent;
+	/**
+	 * Swarm Launcher / Churning Locus: the wing it puts into the battle instead of firing a shot (null
+	 * = an ordinary weapon), what it does once out, how many it keeps out at once (0 = no limit), and
+	 * the spread it launches them in (degrees).
+	 */
+	public String launchWing;
+	/** Extra damage when it hits a fighter (Mote Attractor's motes). */
+	public float antiFighterDamage;
+	public Ship3D.Behaviour launchBehaviour;
+	public int launchMaxOut;
+	public float launchArcDeg;
 	/** Kinetic Fragments: the escort fragments that strike with a hit (fewer as the missile is shot up), each this hit. */
 	public WeaponSpec3D fragmentStrike;
 	public int fragmentStrikes;
@@ -170,6 +191,14 @@ public final class WeaponSpec3D {
 	public float launchSpeed, missileMaxSpeed, missileAccel, missileTurnRate, missileTurnAccel;
 	public float flightTime, missileHp, missileRadius = 10f, explosionRadius = 30f;
 	public boolean guided;
+	/**
+	 * How a guided missile goes for its target, from vanilla's missile type: HOMING (MISSILE) all the
+	 * way; TWO_STAGE (Squall, Hurricane's warheads) coasts while it turns onto the lead, locks that
+	 * heading and burns straight; HEATSEEKER (Salamander) circles round to the target's tail before it
+	 * goes in; AIM_POINT (Proximity Charge) flies to where it was aimed, stops there and waits.
+	 */
+	public enum Guidance { HOMING, TWO_STAGE, HEATSEEKER, AIM_POINT }
+	public Guidance guidance = Guidance.HOMING;
 	public float[] missileGlow = {1f, 0.6f, 0.3f};
 	/** Render-side model source for the missile sprite (ShipModel.Source). */
 	public Object missileModelSource, missileModel;

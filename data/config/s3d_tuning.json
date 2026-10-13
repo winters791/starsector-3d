@@ -64,7 +64,7 @@
 		"shieldBrightness":0.45
 	},
 	"weapons":{
-		"rangeMult":1.0,
+		"rangeMult":1.2,
 		"armorReductionMult":0.7,
 		"reticleRadiusPx":11,
 		"leadCircleScale":1.1,
@@ -202,7 +202,7 @@
 		"deployAltitude":250,
 		"transferDelay":3,
 		"stations":true,
-		"stationSpinDeg":1,
+		"stationSpinDeg":4,
 		"captureRadius":600,
 		"captureFallback":30,
 		"holdRadius":1000,

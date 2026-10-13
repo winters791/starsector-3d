@@ -18,7 +18,12 @@ public final class ShipSystem3D {
 		AMMO_FEED, HIGH_ENERGY_FOCUS, FAST_MISSILE_RACKS, MISSILE_AUTOFORGE, LIDAR_ARRAY,
 		FORTRESS_SHIELD, DAMPER, TEMPORAL_SHELL, PHASE_CLOAK,
 		EMP_EMITTER, FLARES, RECALL, ENTROPY_AMPLIFIER, MINE_STRIKE, CANISTER_FLAK,
-		TARGETING_FEED, DRONE_STRIKE, UNSUPPORTED
+		TARGETING_FEED, DRONE_STRIKE, COMBAT_BURN, ORION_DEVICE, NOVA_BURST, RESERVE_DEPLOYMENT, ACAUSAL_DISRUPTOR,
+		/** Station / ship drone launchers: vanilla's puppet launches the drones (the host keeps that system on); 3D flies them. */
+		DRONE_LAUNCHER,
+		ENERGY_LASH, FRAGMENT_VOLLEY, INCURSION_MODE, EXTRACTION_PROTOCOL, CONSTRUCTION_SWARM,
+		CONVULSIVE_LUNGE, DARKENED_GAZE, TENEBROUS_EXPULSION, MOTE_CONTROL,
+		UNSUPPORTED
 	}
 
 	public enum State { IDLE, IN, ACTIVE, OUT, COOLDOWN }
@@ -58,6 +63,19 @@ public final class ShipSystem3D {
 	public String note;
 	/** How it looks while it runs (vanilla's jitter, weapon glow, engine and shield colours). */
 	public SystemLook look;
+	/** Orion Device / Nova Burst: the charges, the push and the train (null for other kinds). */
+	public OrionDrive orion;
+	/** Threat and Shrouded systems: their own state and numbers (null for other kinds). */
+	public ExoticSystems ex;
+	/** Mote Attractor: the motes and the attractor (null for other kinds). */
+	public MoteControl motes;
+	/** Quantum Disruptor: how long its target is knocked into overload (vanilla's DISRUPTION_DUR). */
+	public float disruptSeconds = 1f;
+	/**
+	 * Set when the system does something only the host can (Reserve Deployment's extra fighters come
+	 * from the vanilla carrier's bays); the host does it and clears this.
+	 */
+	public boolean hostRequest;
 
 	// ---- state ----
 	public State state = State.IDLE;
@@ -83,6 +101,30 @@ public final class ShipSystem3D {
 		this.name = name;
 		this.kind = kind;
 		this.look = SystemLook.defaults(kind);
+		if (kind == Kind.ORION_DEVICE) orion = OrionDrive.orion();
+		else if (kind == Kind.NOVA_BURST) orion = OrionDrive.nova();
+		switch (kind) {
+			case ENERGY_LASH: case FRAGMENT_VOLLEY: case INCURSION_MODE: case EXTRACTION_PROTOCOL: case CONSTRUCTION_SWARM:
+			case CONVULSIVE_LUNGE: case DARKENED_GAZE: case TENEBROUS_EXPULSION:
+				ex = new ExoticSystems();
+				break;
+			case MOTE_CONTROL:
+				motes = new MoteControl();
+				break;
+			default:
+		}
+	}
+
+	/** Threat units' systems that only an Overseer's Energy Lash can fire (they hold no charge of their own). */
+	public boolean lashActivated() {
+		return kind == Kind.FRAGMENT_VOLLEY || kind == Kind.INCURSION_MODE || kind == Kind.EXTRACTION_PROTOCOL;
+	}
+
+	/** An Overseer's lash hit this ship: its system gets a charge and goes off (vanilla's hitWithEnergyLash). */
+	public void lashed(Ship3D s) {
+		if (state != State.IDLE) return;
+		ammo = Math.max(ammo, 1f);
+		activate(s);
 	}
 
 	/** Maps a vanilla system id to the 3D kind that rebuilds it (UNSUPPORTED if there's none yet). */
@@ -121,7 +163,24 @@ public final class ShipSystem3D {
 			case "canister_flak": return Kind.CANISTER_FLAK;
 			case "targetingfeed": return Kind.TARGETING_FEED;
 			case "drone_strike": return Kind.DRONE_STRIKE;
+			case "combat_burn": return Kind.COMBAT_BURN;
+			case "orion_device": return Kind.ORION_DEVICE;
+			case "nova_burst": return Kind.NOVA_BURST;
+			case "reservewing": return Kind.RESERVE_DEPLOYMENT;
+			case "acausaldisruptor": return Kind.ACAUSAL_DISRUPTOR;
+			case "energy_lash": return Kind.ENERGY_LASH;
+			case "fragment_volley": return Kind.FRAGMENT_VOLLEY;
+			case "incursion_mode": return Kind.INCURSION_MODE;
+			case "extraction_protocol": return Kind.EXTRACTION_PROTOCOL;
+			case "construction_swarm": return Kind.CONSTRUCTION_SWARM;
+			case "convulsive_lunge": case "shrouded_vortex": return Kind.CONVULSIVE_LUNGE;
+			case "darkened_gaze": return Kind.DARKENED_GAZE;
+			case "tenebrous_expulsion": return Kind.TENEBROUS_EXPULSION;
+			case "mote_control": return Kind.MOTE_CONTROL;
 			default:
+				if ("DRONE_LAUNCHER".equals(type)) return Kind.DRONE_LAUNCHER;
+				if ("RESERVE_DEPLOYMENT".equals(aiType)) return Kind.RESERVE_DEPLOYMENT;
+				if ("ACAUSAL_DISRUPTOR".equals(aiType)) return Kind.ACAUSAL_DISRUPTOR;
 				if ("ENTROPY_AMPLIFIER".equals(aiType)) return Kind.ENTROPY_AMPLIFIER;
 				if ("AMMO_RELOAD".equals(type)) return Kind.MISSILE_AUTOFORGE;
 				if ("DISPLACER".equals(type)) return Kind.DISPLACER;
@@ -148,6 +207,7 @@ public final class ShipSystem3D {
 
 	/** Kinds that need something to work on: a low missile rack, a target in reach, a drone. */
 	private boolean usable(Ship3D s) {
+		if (ex != null && sim != null && !ex.usable(s, this, sim)) return false;
 		switch (kind) {
 			case MISSILE_AUTOFORGE:
 				for (WeaponMount m : s.weapons) {
@@ -196,6 +256,7 @@ public final class ShipSystem3D {
 		}
 		if (!ready(s)) return false;
 		if (fluxPerUse > 0f && s.flux != null && !s.flux.addSystemFlux(fluxPerUse, hardFlux)) return false;
+		boolean train = orion != null && orion.trainLeft > 0; // a train's own next detonation
 		if (maxAmmo > 0) ammo -= 1f;
 		state = State.IN;
 		stateTime = 0f;
@@ -203,7 +264,34 @@ public final class ShipSystem3D {
 		pulseTimer = 0f;
 		justUsed = true;
 		if (kind == Kind.ENTROPY_AMPLIFIER) sysTarget = aimedShip(s, sim); // usable() made sure it's valid
+		if (kind == Kind.ACAUSAL_DISRUPTOR) sysTarget = disruptorTarget(s);
+		if (ex != null && sim != null) ex.activated(s, this, sim);
+		if (motes != null && sim != null) motes.used(s, this, sim);
+		if (orion != null) orion.trainLeft = train ? orion.trainLeft - 1 : maxAmmo > 0 ? Math.max(0, (int) ammo) : 0; // one press: every charge left
 		return true;
+	}
+
+	/**
+	 * Quantum Disruptor's pick, as vanilla's: the ship's target if it's within reach (hull edges), else
+	 * the nearest enemy ship (not a fighter) that is; null = nothing to disrupt.
+	 */
+	private Ship3D disruptorTarget(Ship3D s) {
+		if (sim == null) return null;
+		float reach = range * sim.tuning.weaponRangeMult;
+		Ship3D t = aimedShip(s, sim);
+		if (t != null && (t.fighter || t.owner == s.owner || t.destroyed || t.pos.distance(s.pos) > reach + s.radius + t.radius)) t = null;
+		if (t == null) {
+			float best = Float.MAX_VALUE;
+			for (Ship3D o : sim.ships) {
+				if (o.owner == s.owner || o.destroyed || o.fighter || o.invulnerable || o.unarmedPart()) continue;
+				float d = o.pos.distance(s.pos);
+				if (d <= reach + s.radius + o.radius && d < best) {
+					best = d;
+					t = o;
+				}
+			}
+		}
+		return t != null && t.flux != null && !t.flux.disabled() ? t : null;
 	}
 
 	/** Set by activate/switch-off for the sim to turn into a sound (cleared after). */
@@ -225,6 +313,15 @@ public final class ShipSystem3D {
 	public void step(Ship3D s, Sim sim, float dt) {
 		this.sim = sim;
 		if (dt <= 0f || !supported()) return;
+		if (ex != null) ex.step(s, this, sim, dt);
+		if (motes != null) motes.step(s, this, sim, dt);
+		if (orion != null) {
+			orion.step(s, sim, dt);
+			if (orion.trainLeft > 0 && state == State.IDLE) {
+				if (ready(s)) activate(s); // the train's next detonation, a cooldown after the last
+				else orion.trainLeft = 0; // overloaded, out of flux: the train stops
+			}
+		}
 		if (kind == Kind.CANISTER_FLAK) throwCanisters(s, sim, dt);
 		if (maxAmmo > 0 && ammo < maxAmmo) ammo = Math.min(maxAmmo, ammo + ammoPerSecond * dt);
 		if (on() && s.flux != null && s.flux.disabled()) {
@@ -323,6 +420,26 @@ public final class ShipSystem3D {
 			case DRONE_STRIKE:
 				launchDrones(s, sim);
 				break;
+			case ORION_DEVICE:
+			case NOVA_BURST:
+				orion.fire(s, this, sim);
+				break;
+			case RESERVE_DEPLOYMENT:
+				hostRequest = true; // extra fighters from the vanilla carrier's bays
+				break;
+			case ENERGY_LASH:
+			case CONSTRUCTION_SWARM:
+				ex.fullyActive(s, this, sim);
+				break;
+			case ACAUSAL_DISRUPTOR: {
+				Ship3D tg = sysTarget;
+				if (tg != null && !tg.destroyed && tg.flux != null && !tg.flux.disabled()) {
+					tg.flux.disrupt(disruptSeconds);
+					tg.overloadTint = new float[] {1f, 0.61f, 1f}; // vanilla's disruption overload colour
+					sim.combat.sounds.play("disabled_large", tg.pos, 0.8f);
+				}
+				break;
+			}
 			default:
 		}
 	}
@@ -460,6 +577,17 @@ public final class ShipSystem3D {
 				s.sysAccelMult *= 1f + (t.sysJetsAccelMult - 1f) * e;
 				s.sysTurnMult *= 1f + t.sysJetsTurn * e;
 				break;
+			case FRAGMENT_VOLLEY: case INCURSION_MODE: case EXTRACTION_PROTOCOL:
+			case CONVULSIVE_LUNGE: case DARKENED_GAZE: case TENEBROUS_EXPULSION:
+				ex.apply(s, this, sim, e, dt);
+				break;
+			case COMBAT_BURN: {
+				// Vanilla: +100 top speed and +100 acceleration while it runs (top speed falls back as it powers down).
+				if (state != State.OUT) s.sysSpeedFlat += 100f * e;
+				float acc = s.params != null ? Math.max(1f, s.params.accel) : 100f;
+				s.sysAccelMult *= 1f + 100f * e / acc;
+				break;
+			}
 			case MICROBURN:
 				if (state == State.ACTIVE) {
 					s.sysSpeedFlat += t.sysMicroburnSpeed;

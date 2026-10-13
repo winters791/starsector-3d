@@ -96,12 +96,58 @@ public final class Ship3D {
 	// ---- looks only (render) ----
 	/** Extra thrusters that light only while a movement system runs (vanilla's system-activated engines). */
 	public final java.util.List<EngineMount> systemEngines = new java.util.ArrayList<>();
+	/** Darkened Gaze's beams (vanilla decorative beam weapons on the Eye): fire only while the system is fully on. */
+	public final java.util.List<WeaponMount> gazeBeams = new java.util.ArrayList<>();
 	/** Lidar dishes (vanilla decorative weapons): fire their ranging beams while a Lidar Array winds up. Never fire for real. */
 	public final java.util.List<WeaponMount> lidarDishes = new java.util.ArrayList<>();
 	/** Vent clouds: core and fringe colour (the hull style's). */
 	public float[] ventCore = {1f, 1f, 1f}, ventFringe = {0.49f, 0f, 0.61f};
 	/** Overload arcs (the hull style's). */
 	public float[] overloadColor = {0.75f, 0.6f, 1f};
+	/** This overload's arcs in another colour (a Quantum Disruptor's pink); cleared when it ends. */
+	public float[] overloadTint;
+
+	// ---- spawned in battle (Threat swarms, Shrouded ejecta and vortices) ----
+	public enum Behaviour {
+		/** Threat attack swarm: a fighter made of fragments (no hull drawn, just its swarm). */
+		SWARM,
+		/** Threat construction swarm: drifts out slowly, then builds a ship where it stops. */
+		CONSTRUCTION,
+		/** Shrouded ejecta: a drifting lump of shroud that slows to a crawl, decays, and blows up when it dies. */
+		EJECTA,
+		/** Shrouded vortex: seeks enemy ships, decays, and blows up when it dies. */
+		VORTEX
+	}
+	public Behaviour behaviour;
+	/** Share of its hull lost per second by itself (ejecta 6.67%, vortex 5%). */
+	public float decayPerSecond;
+	/** Blows up when it dies (ejecta, vortices: energy, enemies only); null = an ordinary death. */
+	public WeaponSpec3D deathBlast;
+	/** Vortex: times it has rammed something (each makes it decay faster, vanilla). */
+	public int rams;
+	/** Drawn as its swarm / shroud only, no hull (vanilla's do-not-render: attack and construction swarms). */
+	public boolean noHull;
+	/** A Shrouded (Dweller) ship: drawn with its shroud cloud. */
+	public boolean shrouded;
+	/** How its fragment swarm / shroud looks (vanilla's parameters for it; null = vanilla's defaults). */
+	public SwarmLook swarmLook;
+	/** Construction swarm: seconds still to travel, then to build; the variant it builds (null until the host picks). */
+	public float travelLeft, buildLeft, buildTotal;
+	public String buildVariant;
+	/** Construction swarm: done, the host spawns the ship and removes the swarm. */
+	public boolean buildDone;
+	/** Hull points worth (vanilla's deployment points); Energy Lash's cooldown on a friendly target uses it. */
+	public float dp;
+	/** The launcher (Swarm Launcher) it came out of, if any. */
+	public WeaponMount launchedBy;
+
+	// ---- drones (vanilla drone launchers): ride an orbit round their mothership (carrier) ----
+	public boolean drone;
+	/** Orbit radius beyond the mothership's radius, speed along it (units/s), direction (+1 / -1), current angle (rad). */
+	public float droneOrbitRadius, droneOrbitSpeed, droneOrbitAngle;
+	public int droneOrbitDir = 1;
+	/** Turn to face an enemy in reach (PD drones), else point away from the mothership (station drones). */
+	public boolean droneFaceEnemy;
 	/** Engine health (EMP), per entry in engines; down = seconds until repaired. Null until initComponents. */
 	public float[] engineHp, engineDown;
 	public float engineMaxHp = 100f;
@@ -128,6 +174,15 @@ public final class Ship3D {
 	 * ballistic/energy guns, not beams, plus missiles), with these range / rate of fire / shot speed bonuses.
 	 */
 	public int sysLidar;
+	/** Threat / Dweller systems: fragment weapons' range and the swarm's regrowth (Fragment Volley), ammo regrowth and
+	 * flux dissipation (Incursion Mode), hull damage taken (Darkened Gaze). */
+	public float sysFragmentRangeMult = 1f, sysFragmentRegenMult = 1f, sysAmmoRegenMult = 1f, sysDissipationMult = 1f, sysHullTakenMult = 1f;
+	/** Fragment Volley: fragment weapons fire at will, everything else holds. */
+	public boolean sysFragmentVolley;
+	/** Incursion Mode: the pilot throws caution away (no backing off, no venting). Extraction Protocol: it backs off. */
+	public boolean sysReckless, sysBackOff;
+	/** Convulsive Lunge: no thrust of its own while the lunge pulls it (vanilla's forced decelerate). */
+	public boolean sysBrake;
 	public float sysLidarRangeMult = 1f, sysLidarRofMult = 1f, sysLidarSpeedMult = 1f;
 	/** A drone flying as a Termination Sequence missile: carried along by it instead of flying itself. */
 	public Missile3D carriedBy;
@@ -146,9 +201,24 @@ public final class Ship3D {
 		sysDamageMult = 1f;
 		sysLidar = 0;
 		sysLidarRangeMult = sysLidarRofMult = sysLidarSpeedMult = 1f;
+		sysFragmentRangeMult = sysFragmentRegenMult = sysAmmoRegenMult = sysDissipationMult = sysHullTakenMult = 1f;
+		sysFragmentVolley = sysReckless = sysBackOff = sysBrake = false;
+		if (flux != null) {
+			flux.arcOverrideDeg = -1f;
+			flux.facingOverride = null;
+		}
 		timeMult = 1f;
 		phased = false;
 		phaseLevel = 0f;
+	}
+
+	/** Phased, even if its cloak hasn't stepped yet this frame (for systems that act on other ships). */
+	public boolean phasedNow() {
+		return phased || cloaked(system) || cloaked(cloak);
+	}
+
+	private static boolean cloaked(ShipSystem3D c) {
+		return c != null && c.kind == ShipSystem3D.Kind.PHASE_CLOAK && c.effect > 0.5f;
 	}
 
 	/** Extra top speed this frame (vanilla zero-flux boost). */
@@ -182,6 +252,17 @@ public final class Ship3D {
 	public float spinRate;
 	/** Takes no damage (vanilla Vast Bulk, a station's core); shots and ships still stop on it. */
 	public boolean invulnerable;
+	/** Has fighter launch bays (a carrier, or a station's hangar module). */
+	public boolean hasBays;
+
+	/**
+	 * A section with no guns and no bays (station structural spurs, armour, struts; a ship's armour
+	 * modules): nobody picks it as a target, it only soaks up the shots that hit it. Vanilla ends a
+	 * station once its armed sections are gone (user, 2026-10-13: ships kept grinding through spurs).
+	 */
+	public boolean unarmedPart() {
+		return parent != null && weapons.isEmpty() && !hasBays;
+	}
 
 	/** The free ship or station this part belongs to (itself if it isn't a module). */
 	public Ship3D root() {

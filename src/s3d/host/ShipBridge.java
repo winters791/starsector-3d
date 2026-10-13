@@ -3,7 +3,9 @@ package s3d.host;
 import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.imageio.ImageIO;
@@ -35,6 +37,18 @@ import com.fs.starfarer.api.combat.ShipEngineControllerAPI.ShipEngineAPI;
 import com.fs.starfarer.api.graphics.SpriteAPI;
 import com.fs.starfarer.api.impl.combat.BreachOnHitEffect;
 import com.fs.starfarer.api.impl.combat.DisintegratorEffect;
+import com.fs.starfarer.api.impl.combat.threat.EnergyLashSystemScript;
+import com.fs.starfarer.api.impl.combat.threat.FragmentVolleySystemScript;
+import com.fs.starfarer.api.impl.combat.threat.IncursionModeSystemScript;
+import com.fs.starfarer.api.impl.combat.threat.ExtractionProtocolSystemScript;
+import com.fs.starfarer.api.impl.combat.threat.ConstructionSwarmSystemScript;
+import com.fs.starfarer.api.impl.combat.dweller.ConvulsiveLungeSystemScript;
+import com.fs.starfarer.api.impl.combat.dweller.DarkenedGazeSystemScript;
+import com.fs.starfarer.api.impl.combat.dweller.TenebrousExpulsionSystemScript;
+import com.fs.starfarer.api.impl.combat.dweller.DwellerCombatStrategyAI;
+import com.fs.starfarer.api.impl.combat.MoteControlScript;
+import s3d.core.ExoticSystems;
+import com.fs.starfarer.api.impl.combat.AcausalDisruptorStats;
 import com.fs.starfarer.api.impl.combat.EntropyAmplifierStats;
 import com.fs.starfarer.api.impl.combat.GravitonBeamEffect;
 import com.fs.starfarer.api.impl.combat.LidarArrayStats;
@@ -141,6 +155,8 @@ final class ShipBridge {
 		s.flux = readFlux(ship, t);
 		s.empTakenMult = st.getEmpDamageTakenMult().getModifiedValue();
 		s.system = readSystem(ship, ship.getSystem(), false, s.volume, t);
+		if (s.system != null && s.system.kind == ShipSystem3D.Kind.DARKENED_GAZE) gazeBeams(s, ship, t);
+		s.dp = ship.getHullSpec() != null ? ship.getHullSpec().getSuppliesToRecover() : 0f;
 		ShieldAPI defence = ship.getShield();
 		if (ship.getPhaseCloak() != null && (defence == null || defence.getType() == ShieldAPI.ShieldType.PHASE || defence.getType() == ShieldAPI.ShieldType.NONE)) {
 			s.cloak = readSystem(ship, ship.getPhaseCloak(), true, s.volume, t);
@@ -232,6 +248,7 @@ final class ShipBridge {
 		// Carriers: fighters land on the first launch bay (else the middle of the hull's top).
 		s.landingLocal.set(0f, s.volume != null ? s.volume.topAt(0f, 0f) + 2f : 0f, 0f);
 		java.util.List<com.fs.starfarer.api.combat.FighterLaunchBayAPI> bays = ship.getLaunchBaysCopy();
+		s.hasBays = bays != null && !bays.isEmpty();
 		if (bays != null && !bays.isEmpty() && bays.get(0).getWeaponSlot() != null) launchPoint(s, bays.get(0).getWeaponSlot(), s.landingLocal);
 
 		if (ship.isFighter() && !LOGGED_FIGHTERS.add(ship.getHullSpec().getHullId())) return s;
@@ -423,6 +440,116 @@ final class ShipBridge {
 				}
 				break;
 			}
+			case ORION_DEVICE:
+			case NOVA_BURST: {
+				// Charges drop from the hull's system slots (the Retribution's is at the stern, behind its push plate).
+				for (WeaponSlotAPI slot : ship.getHullSpec().getAllWeaponSlotsCopy()) {
+					if (!slot.isSystemSlot()) continue;
+					Vector2f loc = slot.getLocation(); // ship space: x forward, y left
+					float x = -loc.y, z = -loc.x;
+					float y = volume != null ? volume.topAt(x, z) * 0.5f : 0f;
+					double a = Math.toRadians(slot.getAngle());
+					s.slots.add(new WeaponMount(slot.getId(), new WeaponSpec3D(), new Vec3(x, y, z),
+							new Vec3((float) -Math.sin(a), 0f, (float) -Math.cos(a)), slot.getArc(), false));
+				}
+				s.note = String.format("%d charges, one press fires them all a cooldown apart; %d charge slot(s)", s.maxAmmo, s.slots.size());
+				break;
+			}
+			case ENERGY_LASH: {
+				ExoticSystems x = s.ex;
+				s.range = EnergyLashSystemScript.getRange(ship);
+				x.lashEmp = EnergyLashSystemScript.EMP_DAMAGE;
+				x.lashDamage = EnergyLashSystemScript.DAMAGE;
+				x.lashMinCooldown = EnergyLashSystemScript.MIN_COOLDOWN;
+				x.lashMaxCooldown = EnergyLashSystemScript.MAX_COOLDOWN;
+				x.lashCooldownPerDp = EnergyLashSystemScript.COOLDOWN_DP_MULT;
+				x.lashMinEnemyCooldown = EnergyLashSystemScript.MIN_HIT_ENEMY_COOLDOWN;
+				x.lashMaxEnemyCooldown = EnergyLashSystemScript.MAX_HIT_ENEMY_COOLDOWN;
+				x.lashPhaseCooldownMult = EnergyLashSystemScript.HIT_PHASE_ENEMY_COOLDOWN_MULT;
+				x.lashPhaseOverload = EnergyLashSystemScript.PHASE_OVERLOAD_DUR;
+				s.slots.addAll(systemSlots(ship, volume, new WeaponSpec3D()));
+				s.note = String.format("lashes a friendly unit's system (or an enemy, %.0f EMP x %d) within %.0f", x.lashEmp, Math.max(1, s.slots.size()), s.range);
+				break;
+			}
+			case FRAGMENT_VOLLEY:
+				s.ex.volleyRangeMult = FragmentVolleySystemScript.FRAGMENT_RANGE_MULT;
+				s.ex.volleyRegenMult = FragmentVolleySystemScript.FRAGMENT_REGEN_RATE_MULT;
+				s.ammo = 0f; // only an Overseer's lash charges it
+				s.note = "fires when an Overseer lashes it: fragment weapons x" + s.ex.volleyRangeMult + " range, at will";
+				break;
+			case INCURSION_MODE:
+				s.ex.incursionSpeed = IncursionModeSystemScript.SPEED_BONUS;
+				s.ex.incursionAmmoRegen = IncursionModeSystemScript.AMMO_REGEN_MULT;
+				s.ex.incursionDissipation = IncursionModeSystemScript.FLUX_DISSIPATION_MULT;
+				s.ammo = 0f;
+				s.note = "fires when an Overseer lashes it: +" + (int) s.ex.incursionSpeed + " speed, reckless";
+				break;
+			case EXTRACTION_PROTOCOL:
+				s.ex.extractionSpeed = ExtractionProtocolSystemScript.SPEED_BONUS;
+				s.ammo = 0f;
+				s.note = "fires when an Overseer lashes it: backs off, then vents and reloads";
+				break;
+			case CONSTRUCTION_SWARM:
+				ConstructionSwarmSystemScript.init();
+				s.ex.minFragments = ConstructionSwarmSystemScript.MIN_FRAGMENTS;
+				s.slots.addAll(systemSlots(ship, volume, new WeaponSpec3D()));
+				s.note = "sends out a swarm that builds a Threat ship (needs " + s.ex.minFragments + "+ fragments)";
+				break;
+			case CONVULSIVE_LUNGE:
+				s.ex.lungeDistance = ConvulsiveLungeSystemScript.PULL_DIST;
+				s.ex.lungeSpring = ConvulsiveLungeSystemScript.SPRING_CONSTANT;
+				s.ex.lungeFriction = ConvulsiveLungeSystemScript.FRICTION;
+				s.ex.maw = DwellerCombatStrategyAI.isMaw(ship);
+				s.note = String.format("lunges %.0f toward the aim", s.ex.lungeDistance);
+				break;
+			case DARKENED_GAZE:
+				s.ex.gazeOpeningDeg = DarkenedGazeSystemScript.SHIELD_OPENING;
+				s.ex.gazeTurnReduction = DarkenedGazeSystemScript.TURN_RATE_REDUCTION;
+				s.ex.gazeHullTakenMult = DarkenedGazeSystemScript.DAMAGE_TAKEN_MULT;
+				s.note = "shield to the back, opens at the front, gaze beams fire through";
+				break;
+			case TENEBROUS_EXPULSION:
+				s.ex.expelInterval = TenebrousExpulsionSystemScript.REFIRE_DELAY;
+				s.ex.expelArcDeg = TenebrousExpulsionSystemScript.LAUNCH_ARC;
+				s.ex.expelBackOff = TenebrousExpulsionSystemScript.BACK_OFF_ACCEL;
+				s.ex.ejectaWing = TenebrousExpulsionSystemScript.EJECTA_WING;
+				s.note = "spits out shroud ejecta every " + s.ex.expelInterval + " s, then backs off";
+				break;
+			case MOTE_CONTROL: {
+				s3d.core.MoteControl mc = s.motes;
+				mc.maxMotes = MoteControlScript.getMaxMotes(ship);
+				mc.range = MoteControlScript.getRange(ship);
+				mc.antiFighterDamage = MoteControlScript.getAntiFighterDamage(ship);
+				mc.attractorSeconds = MoteControlScript.ATTRACTOR_DURATION;
+				mc.attractorLockSeconds = MoteControlScript.ATTRACTOR_DURATION_LOCK;
+				mc.pdFromSource = MoteControlScript.MAX_DIST_FROM_SOURCE_TO_ENGAGE_AS_PD;
+				mc.pdFromAttractor = MoteControlScript.MAX_DIST_FROM_ATTRACTOR_TO_ENGAGE_AS_PD;
+				Color ec = MoteControlScript.getEMPColor(ship);
+				if (ec != null) mc.arcColor = new float[] {ec.getRed() / 255f, ec.getGreen() / 255f, ec.getBlue() / 255f};
+				mc.mote = systemMissile(MoteControlScript.getWeaponId(ship), ship, t);
+				if (mc.mote != null) {
+					mc.mote.antiFighterDamage = mc.antiFighterDamage;
+					mc.mote.ignoresFlares = true;
+					mc.mote.guided = true;
+				}
+				s.slots.addAll(systemSlots(ship, volume, new WeaponSpec3D()));
+				s.note = String.format("up to %d motes (%s), attractor within %.0f", mc.maxMotes, mc.mote != null ? mc.mote.name : "no mote weapon", mc.range);
+				break;
+			}
+			case ACAUSAL_DISRUPTOR:
+				s.range = AcausalDisruptorStats.getMaxRange(ship);
+				s.disruptSeconds = AcausalDisruptorStats.DISRUPTION_DUR;
+				s.note = String.format("overloads a ship within %.0f for %.1f s", s.range, s.disruptSeconds);
+				break;
+			case RESERVE_DEPLOYMENT:
+				s.note = "extra fighters from the carrier's bays (host)";
+				break;
+			case DRONE_LAUNCHER:
+				s.note = "vanilla launches the drones; they orbit in 3D";
+				break;
+			case COMBAT_BURN:
+				s.note = "+100 top speed and acceleration while on";
+				break;
 			case CANISTER_FLAK: {
 				String wid = spec != null && spec.getWeaponId() != null ? spec.getWeaponId() : "canister_flak";
 				s.payload = systemMissile(wid, ship, t);
@@ -671,6 +798,56 @@ final class ShipBridge {
 		return ws;
 	}
 
+	/** The hull's system slots as mounts (where system launches, lashes and charges come from), facing their slot angle. */
+	private static List<WeaponMount> systemSlots(ShipAPI ship, HullVolume volume, WeaponSpec3D spec) {
+		List<WeaponMount> out = new ArrayList<>();
+		for (WeaponSlotAPI slot : ship.getHullSpec().getAllWeaponSlotsCopy()) {
+			if (!slot.isSystemSlot()) continue;
+			Vector2f loc = slot.getLocation(); // ship space: x forward, y left
+			float x = -loc.y, z = -loc.x;
+			float y = volume != null ? volume.topAt(x, z) + 1f : 0f;
+			double a = Math.toRadians(slot.getAngle());
+			WeaponSpec3D ws = spec;
+			if (slot.getSlotSize() != null) {
+				ws = new WeaponSpec3D();
+				ws.size = slot.getSlotSize().name();
+			}
+			out.add(new WeaponMount(slot.getId(), ws, new Vec3(x, y, z), new Vec3((float) -Math.sin(a), 0f, (float) -Math.cos(a)), slot.getArc(), false));
+		}
+		return out;
+	}
+
+	/** Darkened Gaze's beams: the Eye's decorative beam weapons, fired by the system only. */
+	private static void gazeBeams(Ship3D s, ShipAPI ship, Tuning t) {
+		for (WeaponAPI w : ship.getAllWeapons()) {
+			if (w.getSlot() == null || !w.getSlot().isDecorative() || !w.isBeam()) continue;
+			try {
+				WeaponSlotAPI slot = w.getSlot();
+				Vector2f loc = slot.getLocation();
+				float x = -loc.y, z = -loc.x;
+				float y = s.volume != null ? s.volume.topAt(x, z) + 1f : 0f;
+				WeaponMount m = new WeaponMount(slot.getId(), weaponSpec(w, ship, t), new Vec3(x, y, z), new Vec3(0f, 0f, -1f), 10f, true);
+				m.hostRef = w;
+				s.gazeBeams.add(m);
+			} catch (Throwable e) {
+				log.warn("S3D: gaze beam " + w.getId() + " on " + ship.getName() + " left out (" + e + ")");
+			}
+		}
+	}
+
+	/** Vanilla flies rockets and bombs straight whatever turn rate their engine has (Hammer, Reaper, Sabot warheads, canisters...). */
+	static boolean fliesStraight(String missileType) {
+		return "ROCKET".equals(missileType) || "BOMB".equals(missileType) || "BOMB_WITH_SLOW".equals(missileType);
+	}
+
+	/** How vanilla's missile AI for this missile type goes for its target (see WeaponSpec3D.Guidance). */
+	static WeaponSpec3D.Guidance guidance(String missileType) {
+		if ("MISSILE_TWO_STAGE_SECOND_UNGUIDED".equals(missileType)) return WeaponSpec3D.Guidance.TWO_STAGE;
+		if ("HEATSEEKER".equals(missileType)) return WeaponSpec3D.Guidance.HEATSEEKER;
+		if ("PHASE_CHARGE".equals(missileType)) return WeaponSpec3D.Guidance.AIM_POINT;
+		return WeaponSpec3D.Guidance.HOMING;
+	}
+
 	/** Missile flight comes from the missile's own hull/engine spec, plus the firing ship's missile bonuses. */
 	private static void fillMissile(WeaponSpec3D ws, MissileSpecAPI ms, ShipAPI ship, Tuning t) {
 		ShipHullSpecAPI hs = ms.getHullSpec();
@@ -691,7 +868,9 @@ final class ShipBridge {
 		ws.missileRadius = Math.max(4f, hs.getCollisionRadius());
 		ws.flightTime = ms.getMaxFlightTime();
 		ws.explosionRadius = ms.getExplosionRadius() > 0f ? ms.getExplosionRadius() : ws.missileRadius * 3f;
-		ws.guided = ws.missileTurnRate > 1f;
+		ws.guidance = guidance(ms.getTypeString());
+		// A proximity charge flies to its aim point, not after a ship.
+		ws.guided = ws.missileTurnRate > 1f && !fliesStraight(ms.getTypeString()) && ws.guidance != WeaponSpec3D.Guidance.AIM_POINT;
 		ws.projectileSpeed = ws.missileMaxSpeed;
 		Color glow = ms.getGlowColor() != null ? ms.getGlowColor() : ms.getExplosionColor();
 		if (glow != null) ws.missileGlow = rgb(glow);
@@ -921,7 +1100,10 @@ final class ShipBridge {
 		h.missileHp = st.getMissileHealthBonus().computeEffective((float) mirv.optDouble("hitpoints", parent.missileHp));
 		h.missileRadius = Math.max(4f, (float) wj.optDouble("collisionRadius", 8));
 		h.explosionRadius = (float) wj.optDouble("explosionRadius", h.missileRadius * 3f);
-		h.guided = h.missileTurnRate > 1f && !wj.optString("missileType", "").contains("UNGUIDED");
+		String type = wj.optString("missileType", "");
+		// Hurricane's warheads (two-stage: "second unguided") still aim at the target before they lock on and burn.
+		h.guidance = guidance(type);
+		h.guided = h.missileTurnRate > 1f && !fliesStraight(type) && h.guidance != WeaponSpec3D.Guidance.AIM_POINT;
 		h.projectileSpeed = h.missileMaxSpeed;
 		h.range = parent.range;
 		h.missileGlow = parent.missileGlow;
@@ -943,6 +1125,8 @@ final class ShipBridge {
 				JSONObject ex = p.optJSONObject("explosionSpec");
 				ws.proxRadius = ex != null ? (float) ex.optDouble("radius", ws.proxRange * 1.5f) : ws.proxRange * 1.5f;
 				ws.proxCore = ex != null ? (float) ex.optDouble("coreRadius", ws.proxRange) : ws.proxRange;
+				ws.proxRangeVariance = (float) p.optDouble("shotRangeVariance", 0);
+				ws.proxVarianceChance = (float) p.optDouble("probOfVariance", 1);
 				break;
 			}
 			case "MIRV": {
@@ -954,6 +1138,9 @@ final class ShipBridge {
 				ws.mirvArcOffsetDeg = (float) p.optDouble("arcOffset", 0);
 				ws.mirvSpreadSpeed = (float) p.optDouble("spreadSpeed", 800);
 				ws.mirvSpreadSpeedRandom = (float) p.optDouble("spreadSpeedRange", 0);
+				ws.mirvEvenSpread = p.optBoolean("evenSpread", false);
+				ws.mirvInaccuracyDeg = (float) p.optDouble("spreadInaccuracy", 0);
+				ws.mirvSplitEarly = p.optBoolean("canSplitEarly", false);
 				WeaponSpec3D h = new WeaponSpec3D();
 				h.id = ws.id + "_warhead";
 				h.name = ws.name + " warhead";
@@ -976,7 +1163,7 @@ final class ShipBridge {
 				h.damage = ship.getMutableStats().getMissileWeaponDamageMult().getModifiedValue() * h.damage;
 				h.projectileSpeed = ws.mirvSpreadSpeed;
 				h.impact = (float) p.optDouble("impact", ws.impact);
-				h.range = ws.mirvSplitRange * 2f + ws.mirvSplitRangeRandom;
+				h.range = (float) p.optDouble("projectileRange", ws.mirvSplitRange * 2f + ws.mirvSplitRangeRandom);
 				h.projLength = 30f;
 				h.projWidth = 6f;
 				h.coreColor = new float[] {1f, 1f, 1f};
@@ -997,17 +1184,28 @@ final class ShipBridge {
 		}
 	}
 
+	private static String guidanceName(WeaponSpec3D ws) {
+		switch (ws.guidance) {
+			case TWO_STAGE: return ws.guided ? "two-stage (aims, locks, burns straight)" : "unguided";
+			case HEATSEEKER: return ws.guided ? "heatseeker (goes for the tail)" : "unguided";
+			case AIM_POINT: return "to the aim point, then waits";
+			default: return ws.guided ? "guided" : "unguided";
+		}
+	}
+
 	private static String describe(WeaponSpec3D ws) {
 		if (!ws.supported) return "not fired (" + ws.unsupportedReason + ")";
 		String pd = ws.pdOnly ? " [PD only]" : ws.pd ? " [PD]" : "";
 		String ammo = ws.maxAmmo > 0 ? String.format(", ammo %d (+%.2f/s)", ws.maxAmmo, ws.ammoPerSecond) : "";
 		ammo += ws.fluxPerSecond > 0f ? String.format(", flux %.0f/s", ws.fluxPerSecond) : String.format(", flux %.0f/shot", ws.fluxPerShot);
 		if (ws.emp > 0f) ammo += String.format(", EMP %.0f%s%s", ws.emp, ws.kind == WeaponSpec3D.Kind.BEAM ? "/s" : "", ws.empArcs ? " (arcs through shields)" : "");
-		if (ws.proxRange > 0f) ammo += String.format(", proximity fuse %.0f (blast %.0f)", ws.proxRange, ws.proxRadius);
+		if (ws.proxRange > 0f) ammo += String.format(", proximity fuse %.0f (blast %.0f%s)", ws.proxRange, ws.proxRadius,
+				ws.proxRangeVariance > 0f ? String.format(", bursts up to %.0f%% short", ws.proxRangeVariance * 100f) : "");
 		if (ws.mirvWarhead != null) {
 			WeaponSpec3D h = ws.mirvWarhead;
-			ammo += String.format(", splits at %.0f into %d x %.0f %s %s", ws.mirvSplitRange, ws.mirvCount, h.damage, h.damageType,
-					h.kind == WeaponSpec3D.Kind.MISSILE ? (h.guided ? "guided missiles" : "unguided missiles") : "shells");
+			ammo += String.format(", splits at %.0f%s into %d x %.0f %s %s over %.0f deg%s", ws.mirvSplitRange, ws.mirvSplitEarly ? " (early if close)" : "",
+					ws.mirvCount, h.damage, h.damageType, h.kind == WeaponSpec3D.Kind.MISSILE ? guidanceName(h) + " missiles" : "shells",
+					ws.mirvArcDeg, ws.mirvArcOffsetDeg != 0f ? String.format(" turned %.0f", ws.mirvArcOffsetDeg) : "");
 			if (h.effectNote != null) ammo += " (" + h.effectNote + ")";
 			if (h.dem != null) ammo += " (" + describeDem(h.dem) + ")";
 		}
@@ -1023,7 +1221,7 @@ final class ShipBridge {
 			case MISSILE:
 				return String.format("MISSILE %s %.0f dmg, range %.0f, launch %.0f, speed %.0f, accel %.0f, turn %.0f deg/s, %s, flight %.1fs, hp %.0f, cooldown %.2fs%s%s",
 						ws.damageType, ws.damage, ws.range, ws.launchSpeed, ws.missileMaxSpeed, ws.missileAccel, ws.missileTurnRate,
-						ws.guided ? "guided" : "unguided", ws.flightTime, ws.missileHp, ws.cooldown, pd, ammo);
+						guidanceName(ws), ws.flightTime, ws.missileHp, ws.cooldown, pd, ammo);
 			default:
 				return String.format("%s %.0f dmg, range %.0f, speed %.0f, cooldown %.2fs, burst %dx%.2fs, charge %.2fs, spread %.0f-%.0f, turn %.0f deg/s%s%s",
 						ws.damageType, ws.damage, ws.range, ws.projectileSpeed, ws.cooldown, ws.burstSize, ws.burstDelay,

@@ -21,6 +21,7 @@ public final class ShipFx {
 			ShieldFlux f = s.flux;
 			if (f != null && f.venting) vent(sim, s, f, dt);
 			if (f != null && f.overloaded()) overload(sim, s, dt);
+			else s.overloadTint = null;
 		}
 	}
 
@@ -46,7 +47,7 @@ public final class ShipFx {
 
 	/** Overload: arcs crackling between nearby points of the hull in the hull style's overload colour. */
 	private void overload(Sim sim, Ship3D s, float dt) {
-		float[] col = s.overloadColor;
+		float[] col = s.overloadTint != null ? s.overloadTint : s.overloadColor;
 		for (int i = count(Math.min(30f, 14f + s.radius * 0.04f), dt); i > 0; i--) {
 			Vec3 d1 = randomDir(tA, 0.8f);
 			Vec3 a = tB.set(s.pos).addScaled(d1, s.reachToward(d1) * 0.95f);

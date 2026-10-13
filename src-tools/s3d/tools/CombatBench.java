@@ -94,11 +94,14 @@ public final class CombatBench {
 		aiShieldUnderGuns(game, hulls, t);
 		empRules(game, hulls, t);
 		missileRules(game, hulls, t);
+		missileGuidance(game, hulls, t);
 		weaponScripts(game, hulls, t);
 		weaponScripts2(game, hulls, t);
 		fighterRules(game, hulls, t);
 		systemRules(game, hulls, t);
 		systemsBatch2(game, hulls, t);
+		systemsBatch3(game, hulls, t);
+		systemsBatch4(game, hulls, t);
 		collisionRules(game, hulls, t);
 		soundEvents(game, hulls, t);
 		weightRules(game, hulls, t);
@@ -967,6 +970,326 @@ public final class CombatBench {
 		float expect = 5 * 200f * 2f * tgt.flux.fluxPerDamage;
 		check("missile splits into warheads", maxProj == 5 && tgt.flux.flux > expect * 0.6f,
 				String.format("%d warheads in flight at once; shield took %.0f flux (all five hitting = %.0f)", maxProj, tgt.flux.flux, expect));
+	}
+
+	/** Hurricane with vanilla's numbers: a MIRV that splits 1000 out into seven two-stage warheads. */
+	static WeaponSpec3D hurricane() {
+		WeaponSpec3D hu = launcher(true);
+		hu.name = "hurricane-ish";
+		hu.launchSpeed = 50f;
+		hu.missileMaxSpeed = 250f;
+		hu.missileAccel = 250f;
+		hu.missileTurnRate = 150f;
+		hu.flightTime = 12f;
+		hu.missileHp = 350f;
+		hu.missileRadius = 16f;
+		hu.maxAmmo = 1;
+		hu.mirvCount = 7;
+		hu.mirvSplitRange = 1000f;
+		hu.mirvMinTime = 2f;
+		hu.mirvSplitEarly = true;
+		hu.mirvArcDeg = 180f;
+		hu.mirvArcOffsetDeg = 180f;
+		hu.mirvEvenSpread = true;
+		hu.mirvSpreadSpeed = 200f;
+		hu.mirvSpreadSpeedRandom = 50f;
+		WeaponSpec3D wh = launcher(true);
+		wh.name = "hurricane warhead";
+		wh.damage = 500f;
+		wh.missileMaxSpeed = 400f;
+		wh.missileAccel = 2400f;
+		wh.missileTurnRate = 1100f;
+		wh.flightTime = 5f;
+		wh.missileHp = 250f;
+		wh.missileRadius = 12f;
+		wh.guidance = WeaponSpec3D.Guidance.TWO_STAGE;
+		hu.mirvWarhead = wh;
+		return hu;
+	}
+
+	/**
+	 * Vanilla's missile AIs by type, and fuses: Hurricane's warheads line up and burn in, two-stage
+	 * missiles lock their heading, Salamanders go for the tail, fused shots burst at the end of their
+	 * range or flight and by hulls, proximity charges go to their aim point.
+	 */
+	static void missileGuidance(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		// Hurricane: splits ~1000 out, seven warheads spawn facing the target and drift out along a
+		// backward fan (no thrust), each locks on within 3 s and burns in: all seven hit.
+		{
+			Combat c = new Combat();
+			c.tuning = t;
+			Ship3D sh = ship(game, hulls.get("dominator"), t, "dom", 0, 400, 1e9f);
+			Ship3D tg = ship(game, hulls.get("eagle"), t, "eagle", 1, 0, 1e9f);
+			tg.pos.set(0f, 0f, -2600f);
+			tg.rot.setAxisAngle(0, 1, 0, (float) Math.PI);
+			tg.flux.shieldOn = false;
+			WeaponSpec3D hu = hurricane(), wh = hu.mirvWarhead;
+			sh.weapons.add(new WeaponMount("H", hu, new Vec3(0, 10, -30), new Vec3(0, 0, -1), 10f, true));
+			c.world = java.util.List.of(sh, tg);
+			java.util.List<s3d.core.Missile3D> heads = new java.util.ArrayList<>();
+			float splitAt = -1f, splitDist = 0f, minFacing = 1f, coastMax = 0f, lockLatest = 0f, spreadAtLock = 0f;
+			int coastingEarly = 0;
+			for (float tt = 0; tt < 20f; tt += DT) {
+				c.stepMount(sh, sh.weapons.get(0), tg.pos, tt < DT, tg, DT, t);
+				s3d.core.Missile3D mirv = c.missiles.stream().filter(m -> m.spec == hu).findFirst().orElse(null);
+				if (mirv != null) splitDist = mirv.pos.distance(tg.pos) - tg.radius;
+				c.stepProjectiles(c.world, DT);
+				c.stepMissiles(c.world, DT);
+				c.stepEffects(DT);
+				for (s3d.core.Missile3D m : c.missiles) {
+					if (m.spec != wh || heads.contains(m)) continue;
+					heads.add(m);
+					if (splitAt < 0f) splitAt = tt;
+					minFacing = Math.min(minFacing, new Vec3(tg.pos).sub(m.pos).normalize().dot(m.dir));
+				}
+				if (splitAt >= 0f) {
+					float since = tt - splitAt;
+					int locked = 0;
+					for (s3d.core.Missile3D m : heads) if (m.seek < 0f) locked++;
+					if (since < 0.4f) coastingEarly = Math.max(coastingEarly, heads.size() - locked);
+					if (locked == heads.size() && lockLatest == 0f && !heads.isEmpty()) {
+						lockLatest = since;
+						for (s3d.core.Missile3D a : heads) for (s3d.core.Missile3D b : heads) spreadAtLock = Math.max(spreadAtLock, a.pos.distance(b.pos));
+					}
+				}
+			}
+			int hits = 0;
+			for (s3d.core.Missile3D m : heads) if (!m.alive && m.hp > 0f && !m.flamedOut()) hits++;
+			check("hurricane warheads line up, burn in", heads.size() == 7 && hits == 7 && splitDist < 1000f + 60f && minFacing > 0.98f
+					&& coastingEarly == 7 && lockLatest > 0.5f && lockLatest <= 3.05f && spreadAtLock > 150f,
+					String.format("split %.0f from the hull, %d warheads (facing the target: worst cos %.2f), all coasting for 0.4 s: %s, all locked %.1f s after"
+							+ " the split, fanned %.0f wide by then, %d of 7 hit", splitDist, heads.size(), minFacing, coastingEarly == 7, lockLatest, spreadAtLock, hits));
+		}
+
+		// Two-stage (Squall): lines up while coasting (flight clock held), then its heading never changes
+		// again: it hits a target that holds still, and misses one that moves off once it has locked.
+		{
+			int[] hitsOn = new int[2];
+			float[] maxTurnAfterLock = new float[2], seekTime = new float[2], clockGap = new float[2];
+			for (int k = 0; k < 2; k++) {
+				Combat c = new Combat();
+				c.tuning = t;
+				Ship3D sh = ship(game, hulls.get("hammerhead"), t, "hh", 0, 400, 1e9f);
+				Ship3D tg = ship(game, hulls.get("eagle"), t, "eagle", 1, 0, 1e9f);
+				tg.pos.set(-900f, 0f, -1400f); // off to the side: the rocket has to turn onto it
+				tg.flux.shieldOn = false;
+				WeaponSpec3D sq = launcher(true);
+				sq.launchSpeed = 150f;
+				sq.missileMaxSpeed = 700f;
+				sq.missileAccel = 1000f;
+				sq.missileTurnRate = 180f;
+				sq.flightTime = 4f;
+				sq.maxAmmo = 1;
+				sq.guidance = WeaponSpec3D.Guidance.TWO_STAGE;
+				sh.weapons.add(new WeaponMount("Q", sq, new Vec3(0, 10, -30), new Vec3(0, 0, -1), 10f, true));
+				c.world = java.util.List.of(sh, tg);
+				s3d.core.Missile3D rocket = null;
+				Vec3 lockedDir = null;
+				for (float tt = 0; tt < 8f; tt += DT) {
+					c.stepMount(sh, sh.weapons.get(0), tg.pos, tt < DT, tg, DT, t);
+					if (rocket == null && !c.missiles.isEmpty()) rocket = c.missiles.get(0);
+					int before = c.effects.size();
+					c.stepProjectiles(c.world, DT);
+					c.stepMissiles(c.world, DT);
+					for (int i = before; i < c.effects.size(); i++) if (c.effects.get(i).kind == s3d.core.Effect.Kind.DAMAGE_TEXT) hitsOn[k]++;
+					c.stepEffects(DT);
+					if (rocket != null && rocket.seek < 0f) {
+						if (lockedDir == null) {
+							lockedDir = new Vec3(rocket.dir);
+							seekTime[k] = rocket.age;
+							clockGap[k] = rocket.age - rocket.flight;
+							if (k == 1) tg.vel.set(0f, 0f, -250f); // moves off once the rocket is committed
+						}
+						maxTurnAfterLock[k] = Math.max(maxTurnAfterLock[k], (float) Math.toDegrees(Math.acos(Math.min(1f, lockedDir.dot(rocket.dir)))));
+					}
+					tg.pos.addScaled(tg.vel, DT);
+				}
+			}
+			check("two-stage locks, then flies straight", hitsOn[0] >= 1 && hitsOn[1] == 0 && maxTurnAfterLock[0] < 0.01f && maxTurnAfterLock[1] < 0.01f
+					&& seekTime[0] > 0.5f && seekTime[0] <= 3.05f && clockGap[0] > 0.45f,
+					String.format("lined up for %.2f s (flight clock held %.2f s), turned %.3f deg after locking; hits: %d on a still target, %d on one moving off after the lock",
+							seekTime[0], clockGap[0], Math.max(maxTurnAfterLock[0], maxTurnAfterLock[1]), hitsOn[0], hitsOn[1]));
+		}
+
+		// Heatseeker (Salamander): launched at a ship's nose, it circles round and strikes from behind;
+		// a homing missile with the same engine strikes the front.
+		{
+			float[] along = new float[2];
+			boolean[] hit = new boolean[2];
+			for (int k = 0; k < 2; k++) {
+				Combat c = new Combat();
+				c.tuning = t;
+				Ship3D sh = ship(game, hulls.get("hammerhead"), t, "hh", 0, 400, 1e9f);
+				Ship3D tg = ship(game, hulls.get("eagle"), t, "eagle", 1, 0, 1e9f);
+				tg.pos.set(0f, 0f, -1500f);
+				tg.rot.setAxisAngle(0, 1, 0, (float) Math.PI); // nose toward the launcher
+				tg.flux.shieldOn = false;
+				WeaponSpec3D sal = launcher(true);
+				sal.launchSpeed = 50f;
+				sal.missileMaxSpeed = 400f;
+				sal.missileAccel = 5500f;
+				sal.missileTurnRate = 300f;
+				sal.flightTime = 15f;
+				sal.maxAmmo = 1;
+				if (k == 0) sal.guidance = WeaponSpec3D.Guidance.HEATSEEKER;
+				sh.weapons.add(new WeaponMount("S", sal, new Vec3(0, 10, -30), new Vec3(0, 0, -1), 10f, true));
+				c.world = java.util.List.of(sh, tg);
+				s3d.core.Missile3D ms = null;
+				for (float tt = 0; tt < 20f && (ms == null || c.missiles.contains(ms)); tt += DT) {
+					c.stepMount(sh, sh.weapons.get(0), tg.pos, tt < DT, tg, DT, t);
+					if (ms == null && !c.missiles.isEmpty()) ms = c.missiles.get(0);
+					c.stepProjectiles(c.world, DT);
+					c.stepMissiles(c.world, DT);
+					c.stepEffects(DT);
+				}
+				hit[k] = ms != null && !ms.alive && !ms.flamedOut();
+				// Where it struck along the target's length: + toward its nose, - toward its tail.
+				if (ms != null) along[k] = new Vec3(ms.pos).sub(tg.pos).dot(tg.rot.forward(new Vec3()));
+			}
+			check("salamander goes for the tail", hit[0] && hit[1] && along[0] < 0f && along[1] > 0f,
+					String.format("struck %.0f along the target from its centre as a heatseeker (hit %s), %.0f as a plain homing missile (hit %s); + = nose",
+							along[0], hit[0], along[1], hit[1]));
+		}
+
+		// Fused shells: flak bursts where its range runs out; Devastator's shells burst up to 75% short.
+		{
+			Combat c = new Combat();
+			c.tuning = t;
+			Ship3D pd = ship(game, hulls.get("wolf"), t, "wolf", 0, 150, 1e9f);
+			c.world = java.util.List.of(pd);
+			WeaponSpec3D flak = gun("FRAGMENTATION", 0.25f, 200f, 600f, 700f);
+			flak.proxRange = 35f;
+			flak.proxRadius = 50f;
+			flak.proxCore = 35f;
+			WeaponMount fm = new WeaponMount("F", flak, new Vec3(0, 5, -20), new Vec3(0, 0, -1), 5f, true);
+			int booms = 0;
+			float burstAt = 0f;
+			for (float tt = 0; tt < 2f; tt += DT) {
+				c.stepMount(pd, fm, new Vec3(0f, 0f, -5000f), tt < DT, null, DT, t);
+				int before = c.effects.size();
+				c.stepProjectiles(c.world, DT);
+				for (int i = before; i < c.effects.size(); i++) {
+					if (c.effects.get(i).kind != s3d.core.Effect.Kind.EXPLOSION) continue;
+					booms++;
+					burstAt = -c.effects.get(i).pos.z;
+				}
+				c.stepEffects(DT);
+			}
+			WeaponSpec3D dev = gun("HIGH_EXPLOSIVE", 2f, 250f, 1000f, 800f);
+			dev.proxRange = 25f;
+			dev.proxRadius = 55f;
+			dev.proxRangeVariance = 0.75f;
+			dev.cooldown = 0.01f;
+			WeaponMount dm = new WeaponMount("D", dev, new Vec3(0, 5, -20), new Vec3(0, 0, -1), 5f, true);
+			Combat c2 = new Combat();
+			c2.tuning = t;
+			c2.seed(7);
+			c2.world = java.util.List.of(pd);
+			float lo = Float.MAX_VALUE, hi = 0f;
+			for (float tt = 0; tt < 2f; tt += DT) {
+				c2.stepMount(pd, dm, new Vec3(0f, 0f, -5000f), true, null, DT, t);
+				for (s3d.core.Projectile p : c2.projectiles) {
+					lo = Math.min(lo, p.maxRange);
+					hi = Math.max(hi, p.maxRange);
+				}
+				c2.projectiles.clear();
+			}
+			float full = 1000f * t.weaponRangeMult;
+			check("fused shells burst at range", booms == 1 && Math.abs(burstAt - 600f * t.weaponRangeMult) < 40f && lo < full * 0.35f && hi > full * 0.9f,
+					String.format("flak into empty space: %d burst at %.0f (range %.0f); Devastator bursts between %.0f and %.0f of %.0f",
+							booms, burstAt, 600f * t.weaponRangeMult, lo, hi, full));
+		}
+
+		// A flak shell that would just miss an enemy hull bursts beside it and hurts it.
+		{
+			Combat c = new Combat();
+			c.tuning = t;
+			Ship3D pd = ship(game, hulls.get("wolf"), t, "wolf", 0, 150, 1e9f);
+			Ship3D tg = ship(game, hulls.get("eagle"), t, "eagle", 1, 0, 1e5f);
+			tg.pos.set(0f, 0f, -800f);
+			tg.flux.shieldOn = false;
+			c.world = java.util.List.of(pd, tg);
+			float side = tg.reachToward(new Vec3(1f, 0f, 0f)) + 20f; // passes 20 beyond its side
+			WeaponSpec3D flak = gun("FRAGMENTATION", 0.25f, 200f, 2000f, 700f);
+			flak.proxRange = 35f;
+			flak.proxRadius = 50f;
+			flak.proxCore = 35f;
+			s3d.core.Projectile shell = new s3d.core.Projectile();
+			shell.spec = flak;
+			shell.source = pd;
+			shell.maxRange = 3000f;
+			shell.origin.set(side, 0f, 0f);
+			shell.pos.set(side, 0f, 0f);
+			shell.vel.set(0f, 0f, -700f);
+			c.projectiles.add(shell);
+			for (float tt = 0; tt < 2.5f; tt += DT) {
+				c.stepProjectiles(c.world, DT);
+				c.stepEffects(DT);
+			}
+			float lost = tg.hullMax - tg.hull;
+			check("flak fuses by a hull", c.projectiles.isEmpty() && lost > 0f, String.format("shell passing 20 beyond the hull: hull lost %.0f", lost));
+		}
+
+		// A fused missile (canister, proximity charge) bursts where its flight ends instead of fizzling.
+		{
+			Combat c = new Combat();
+			c.tuning = t;
+			Ship3D sh = ship(game, hulls.get("hammerhead"), t, "hh", 0, 400, 1e9f);
+			c.world = java.util.List.of(sh);
+			WeaponSpec3D can = launcher(false);
+			can.flightTime = 1f;
+			can.proxRange = 40f;
+			can.proxRadius = 75f;
+			can.proxCore = 50f;
+			WeaponMount cm = new WeaponMount("C", can, new Vec3(0, 10, -30), new Vec3(0, 0, -1), 10f, true);
+			int booms = 0;
+			for (float tt = 0; tt < 3f; tt += DT) {
+				c.stepMount(sh, cm, new Vec3(0f, 0f, -5000f), tt < DT, null, DT, t);
+				int before = c.effects.size();
+				c.stepMissiles(c.world, DT);
+				for (int i = before; i < c.effects.size(); i++) if (c.effects.get(i).kind == s3d.core.Effect.Kind.EXPLOSION) booms++;
+				c.stepEffects(DT);
+			}
+			check("fused missile bursts at flight end", booms == 1 && c.missiles.isEmpty(), String.format("%d burst when its %.1f s flight ran out", booms, can.flightTime * t.weaponRangeMult));
+		}
+
+		// Proximity charge: flies to the point it was aimed at (not after the ship, which moves off) and stops there.
+		{
+			Combat c = new Combat();
+			c.tuning = t;
+			Ship3D sh = ship(game, hulls.get("hammerhead"), t, "hh", 0, 400, 1e9f);
+			Ship3D tg = ship(game, hulls.get("wolf"), t, "wolf", 1, 0, 1e9f);
+			tg.pos.set(0f, 0f, -700f);
+			tg.vel.set(300f, 0f, 0f);
+			c.world = java.util.List.of(sh, tg);
+			WeaponSpec3D pc = launcher(false);
+			pc.launchSpeed = 150f;
+			pc.missileMaxSpeed = 200f;
+			pc.missileAccel = 200f;
+			pc.missileTurnRate = 150f;
+			pc.flightTime = 8f;
+			pc.proxRange = 40f;
+			pc.proxRadius = 150f;
+			pc.proxCore = 75f;
+			pc.guidance = WeaponSpec3D.Guidance.AIM_POINT;
+			WeaponMount pm = new WeaponMount("P", pc, new Vec3(0, 10, -30), new Vec3(0, 0, -1), 10f, true);
+			Vec3 point = new Vec3(0f, 0f, -600f);
+			s3d.core.Missile3D ch = null;
+			float closest = Float.MAX_VALUE, slowest = Float.MAX_VALUE;
+			for (float tt = 0; tt < 6f; tt += DT) {
+				c.stepMount(sh, pm, point, tt < DT, tg, DT, t);
+				if (ch == null && !c.missiles.isEmpty()) ch = c.missiles.get(0);
+				c.stepMissiles(c.world, DT);
+				c.stepEffects(DT);
+				tg.pos.addScaled(tg.vel, DT);
+				if (ch != null && c.missiles.contains(ch)) {
+					closest = Math.min(closest, ch.pos.distance(point));
+					if (ch.pos.distance(point) < 40f) slowest = Math.min(slowest, ch.vel.length());
+				}
+			}
+			check("proximity charge waits at its aim", ch != null && ch.target == null && closest < 25f && slowest < 20f,
+					String.format("got within %.0f of the aim point and slowed to %.0f there (the ship it was aimed near moved off at 300)", closest, slowest));
+		}
 	}
 
 	/** Lowest armor reading anywhere on the hull (where a hit stripped it). */
@@ -2151,6 +2474,10 @@ public final class CombatBench {
 		raider.pos.set(400f * fk(t), 150f * fk(t), -300f * fk(t)); // off the line to the enemy ship
 		raider.hullMax = raider.hull = 300f;
 		raider.weapons.clear();
+		// It stays on the gunboat (a harmless gun, no carrier to go back to): this is about the gunboat's
+		// PD, and a fighter heading home leaves PD reach sooner the longer ranges are.
+		raider.weapons.add(new WeaponMount("R", gun("ENERGY", 1f, 0f, 300f, 900f), new Vec3(0, 2, -5), new Vec3(0, 0, -1), 20f, false));
+		raider.carrier = null;
 		sim.addShip(raider);
 		int mainAtFighter = 0, frames = 0, pdShots = 0;
 
@@ -2374,6 +2701,506 @@ public final class CombatBench {
 	}
 
 	/** Ship systems batch 2: autoforge, entropy, teleporter, mines, canister flak, targeting feed, lidar, termination sequence. */
+	/** Combat Burn, Orion Device / Nova Burst trains, Quantum Disruptor, launcher drones' orbits. */
+	static void systemsBatch3(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		s3d.core.PilotInput in = screen();
+		float vk = t.speedMult;
+
+		// Combat Burn: +100 top speed while on, and the ship still turns.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D on = ship(game, hulls.get("eagle"), t, "onslaught", 0, 400, 1e9f);
+			on.system = system("combat_burn", 1f, 0f, 1f, 0f, 0, 0f);
+			on.system.toggle = true;
+			sim.addShip(on);
+			sim.setPlayer(on);
+			on.throttle = 1f;
+			for (float tt = 0; tt < 6f; tt += DT) sim.update(in, DT, DT);
+			float plain = on.speed();
+			in.useSystem = true;
+			sim.update(in, DT, DT);
+			in.clearPressed();
+			for (float tt = 0; tt < 6f; tt += DT) sim.update(in, DT, DT);
+			float burnt = on.speed();
+			in.mouseX = 1280f;
+			float yaw0 = (float) Math.atan2(-on.rot.forward(new Vec3()).x, -on.rot.forward(new Vec3()).z);
+			for (float tt = 0; tt < 2f; tt += DT) sim.update(in, DT, DT);
+			float yaw1 = (float) Math.atan2(-on.rot.forward(new Vec3()).x, -on.rot.forward(new Vec3()).z);
+			in.mouseX = 640f;
+			float gain = burnt - plain, turned = Math.abs((float) Math.toDegrees(yaw1 - yaw0));
+			check("combat burn: +100 top speed, still turns", gain > 70f * vk && gain < 130f * vk && turned > 5f,
+					String.format("speed %.0f -> %.0f (+%.0f, vanilla +100 = %.0f in 3D), turned %.0f deg in 2 s", plain, burnt, gain, 100f * vk, turned));
+		}
+
+		// Orion Device: one press fires all four charges a second apart; the jolts stack into a sprint, then it brakes.
+		for (String id : new String[] {"orion_device", "nova_burst"}) {
+			boolean nova = id.equals("nova_burst");
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D ret = ship(game, hulls.get("retribution") != null ? hulls.get("retribution") : hulls.get("eagle"), t, "ret", 0, 400, 1e9f);
+			ret.system = nova ? system(id, 0.5f, 0.001f, 0f, 1f, 2, 0.1f) : system(id, 0f, 0.001f, 0f, 1f, 4, 0.2f);
+			sim.addShip(ret);
+			sim.setPlayer(ret);
+			ret.throttle = 1f;
+			for (float tt = 0; tt < 6f; tt += DT) sim.update(in, DT, DT);
+			float normal = ret.speed();
+			in.useSystem = true;
+			sim.update(in, DT, DT);
+			in.clearPressed();
+			int blasts = 0;
+			float last = -1f, minGap = 99f, maxGap = 0f, peak = 0f, prevSince = 99f, tt = 0f, trainEnd = 0f;
+			for (; tt < 12f; tt += DT) {
+				sim.update(in, DT, DT);
+				float since = ret.system.orion.sinceDetonation;
+				if (since < prevSince) {
+					blasts++;
+					if (last >= 0f) {
+						minGap = Math.min(minGap, tt - last);
+						maxGap = Math.max(maxGap, tt - last);
+					}
+					last = tt;
+				}
+				prevSince = since;
+				peak = Math.max(peak, ret.speed());
+				if (!ret.system.orion.busy() && trainEnd == 0f && blasts > 0) trainEnd = tt;
+			}
+			float after = ret.speed();
+			int want = nova ? 2 : 4;
+			boolean ok = blasts == want && (want < 2 || minGap > 0.9f && maxGap < 1.8f) && peak > normal + 300f * vk && after < normal * 1.15f;
+			check((nova ? "nova burst" : "orion device") + ": one press, every charge, jolts stack, then brakes", ok,
+					String.format("%d detonations (want %d), %.2f-%.2f s apart; speed %.0f -> peak %.0f -> %.0f at 12 s", blasts, want,
+							minGap == 99f ? 0f : minGap, maxGap, normal, peak, after));
+		}
+
+		// The AI fires the whole Orion train to close a long gap when it's lined up.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D tgt = ship(game, hulls.get("hammerhead"), t, "tgt", 1, 400, 1e9f);
+			tgt.pos.set(0f, 0f, -9000f);
+			sim.addShip(tgt);
+			Ship3D ret = ship(game, hulls.get("retribution") != null ? hulls.get("retribution") : hulls.get("eagle"), t, "ret", 0, 400, 1e9f);
+			ret.system = system("orion_device", 0f, 0.001f, 0f, 1f, 4, 0.2f);
+			sim.addShip(ret);
+			ret.ai = new s3d.core.ShipAI3D(3);
+			ret.ai.profile(ret, t);
+			for (float tt = 0; tt < 4f; tt += DT) sim.update(in, DT, DT);
+			check("AI fires the Orion train at a far target", ret.system.ammo < 3.5f,
+					String.format("charges left %.1f of 4 after 4 s lined up 9000 away", ret.system.ammo));
+		}
+
+		// Quantum Disruptor: the target (shield up) is knocked into a short pink overload; it drops its shield.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D tgt = ship(game, hulls.get("hammerhead"), t, "tgt", 1, 400, 1e9f);
+			tgt.flux = flux(hulls.get("hammerhead"), t);
+			tgt.flux.shieldOn = true;
+			tgt.flux.unfold = 1f;
+			tgt.pos.set(0f, 0f, -450f);
+			sim.addShip(tgt);
+			Ship3D har = ship(game, hulls.get("wolf"), t, "harbinger", 0, 150, 1e9f);
+			har.system = system("acausaldisruptor", 0.5f, 0f, 1f, 20f, 0, 0f);
+			har.system.range = 500f;
+			har.system.disruptSeconds = 1f;
+			sim.addShip(har);
+			sim.setPlayer(har);
+			sim.target = tgt;
+			sim.update(in, DT, DT);
+			in.useSystem = true;
+			sim.update(in, DT, DT);
+			in.clearPressed();
+			for (float tt = 0; tt < 0.7f; tt += DT) sim.update(in, DT, DT);
+			boolean over = tgt.flux.overloaded(), shieldDown = !tgt.flux.shieldUp(), pink = tgt.overloadTint != null;
+			for (float tt = 0; tt < 1.5f; tt += DT) sim.update(in, DT, DT);
+			check("quantum disruptor overloads its target briefly", over && shieldDown && pink && !tgt.flux.overloaded(),
+					String.format("overloaded %s, shield down %s, pink arcs %s; still overloaded 1.5 s later: %s", over, shieldDown, pink, tgt.flux.overloaded()));
+		}
+
+		// Launcher drones ride their orbit round the mothership, beyond its hull, facing out.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D host = ship(game, hulls.get("eagle"), t, "station", 1, 400, 1e9f);
+			host.anchored = true;
+			sim.addShip(host);
+			Ship3D d = ship(game, hulls.get("wolf"), t, "drone", 1, 150, 1e9f);
+			d.fighter = true;
+			d.drone = true;
+			d.carrier = host;
+			d.droneOrbitRadius = 300f;
+			d.droneOrbitSpeed = 100f;
+			d.droneOrbitDir = 1;
+			sim.addShip(d);
+			d.pos.set(host.pos);
+			d.ai = new s3d.core.ShipAI3D(5);
+			d.ai.profile(d, t);
+			for (float tt = 0; tt < 8f; tt += DT) sim.update(in, DT, DT); // launch out (300/s) and settle
+			float a0 = d.droneOrbitAngle;
+			for (float tt = 0; tt < 4f; tt += DT) sim.update(in, DT, DT);
+			float r = d.pos.distance(host.pos), want = host.radius + 300f;
+			float swept = d.droneOrbitAngle - a0, wantSwept = 100f * vk * 4f / want;
+			Vec3 out = new Vec3(d.pos).sub(host.pos).normalize();
+			float facing = d.rot.forward(new Vec3()).dot(out);
+			check("launcher drones orbit their mothership", Math.abs(r - want) < want * 0.05f && Math.abs(swept - wantSwept) < wantSwept * 0.2f && facing > 0.9f,
+					String.format("radius %.0f (want %.0f), swept %.2f rad in 4 s (want %.2f), facing out %.2f", r, want, swept, wantSwept, facing));
+		}
+	}
+
+	/** Threat and Shrouded systems, Mote Attractor, Swarm Launcher / Churning Locus spawns. */
+	static void systemsBatch4(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		s3d.core.PilotInput in = screen();
+		float vk = t.speedMult;
+
+		// Energy Lash on a friendly unit: its idle Incursion Mode goes off (+100 speed); the Overseer's cooldown follows the unit's DP.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D ov = ship(game, hulls.get("overseer_unit"), t, "overseer", 0, 400, 1e9f);
+			ov.system = system("energy_lash", 1f, 0f, 0.1f, 0f, 0, 0f);
+			ov.system.range = 1500f;
+			sim.addShip(ov);
+			Ship3D unit = ship(game, hulls.get("assault_unit"), t, "unit", 0, 400, 1e9f);
+			unit.system = system("incursion_mode", 1f, 15f, 1f, 0f, 1, 0f);
+			unit.system.ammo = 0f;
+			unit.dp = 12f;
+			unit.pos.set(300f, 0f, 0f);
+			sim.addShip(unit);
+			sim.setPlayer(unit);
+			unit.throttle = 1f;
+			for (float tt = 0; tt < 6f; tt += DT) sim.update(in, DT, DT);
+			float plain = unit.speed();
+			boolean selfFire = unit.system.ready(unit); // no charge of its own
+			ov.system.ex.lashPick = unit;
+			boolean lashed = ov.system.activate(ov);
+			for (float tt = 0; tt < 1.2f; tt += DT) sim.update(in, DT, DT);
+			boolean fired = unit.system.on();
+			float cd = ov.system.cooldown;
+			for (float tt = 0; tt < 6f; tt += DT) sim.update(in, DT, DT);
+			float gain = unit.speed() - plain;
+			check("energy lash fires a friendly's system", !selfFire && lashed && fired && Math.abs(cd - (2f + 12f * 0.33f)) < 0.01f && gain > 70f * vk && gain < 130f * vk,
+					String.format("ready on its own %s, lash %s, unit system on %s, overseer cooldown %.2f (want %.2f), incursion +%.0f speed (want %.0f)",
+							selfFire, lashed, fired, cd, 2f + 12f * 0.33f, gain, 100f * vk));
+		}
+
+		// Energy Lash on an enemy: an EMP arc (weapons knocked out); a phased enemy is knocked out of phase into a short overload.
+		for (int phase = 0; phase < 2; phase++) {
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D ov = ship(game, hulls.get("overseer_unit"), t, "overseer", 0, 400, 1e9f);
+			ov.system = system("energy_lash", 1f, 0f, 0.1f, 0f, 0, 0f);
+			ov.system.range = 1500f;
+			sim.addShip(ov);
+			Ship3D en = ship(game, hulls.get("wolf"), t, "enemy", 1, 150, 1e9f);
+			studWithGuns(en, 4);
+			en.pos.set(0f, 0f, -600f);
+			if (phase == 1) {
+				en.system = system("phasecloak", 0.1f, 0f, 0.1f, 0.1f, 0, 0f);
+				en.system.toggle = true;
+			}
+			sim.addShip(en);
+			sim.update(in, DT, DT);
+			if (phase == 1) {
+				en.system.activate(en);
+				for (float tt = 0; tt < 0.3f; tt += DT) sim.update(in, DT, DT);
+			}
+			boolean wasPhased = en.phased;
+			ov.system.ex.lashPick = en;
+			ov.system.activate(ov);
+			for (float tt = 0; tt < 1.2f; tt += DT) sim.update(in, DT, DT);
+			float cd = ov.system.cooldown;
+			if (phase == 0) {
+				int out = disabled(en);
+				check("energy lash: EMP into an enemy", out >= 1 && cd >= 2f && cd <= 5f,
+						String.format("%d of 4 weapons knocked out, cooldown %.1f (vanilla 2-5)", out, cd));
+			} else {
+				boolean over = en.flux.overloaded();
+				check("energy lash: phased enemy overloads", wasPhased && over && !en.phased && cd >= 4f && cd <= 10f,
+						String.format("phased %s, then overloaded %s and out of phase %s, cooldown %.1f (vanilla 2-5 x2)", wasPhased, over, !en.phased, cd));
+			}
+		}
+
+		// Fragment Volley (lashed): fragment weapons get twice the reach, cooldowns cut to a second, reloaded; fragments regrow x10.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D u = ship(game, hulls.get("standoff_unit"), t, "standoff", 0, 400, 1e9f);
+			u.fragments = new s3d.core.FragmentSwarm(150, 1f);
+			WeaponSpec3D fw = gun("FRAGMENTATION", 1f, 50f, 600f, 600f);
+			fw.fragmentsNeeded = 10;
+			fw.maxAmmo = 5;
+			fw.cooldown = 8f;
+			WeaponMount m = new WeaponMount("F1", fw, new Vec3(0, 5, -20), new Vec3(0, 0, -1), 30f, false);
+			m.ammo = 0f;
+			m.cooldownLeft = 8f;
+			u.weapons.add(m);
+			u.system = system("fragment_volley", 1f, 3f, 1f, 60f, 1, 0f);
+			u.system.ammo = 0f;
+			sim.addShip(u);
+			sim.update(in, DT, DT);
+			u.system.lashed(u);
+			for (float tt = 0; tt < 1.3f; tt += DT) sim.update(in, DT, DT);
+			float range = u.sysFragmentRangeMult, regen = u.sysFragmentRegenMult;
+			check("fragment volley: x2 reach, reloaded, fast regrowth", range == 2f && regen > 9.9f && m.ammo == 5f && m.cooldownLeft <= 1f,
+					String.format("range x%.1f, regrowth x%.1f, ammo %.0f/5, cooldown %.1f", range, regen, m.ammo, m.cooldownLeft));
+		}
+
+		// Extraction Protocol (lashed): faster while on; as it powers down it vents and reloads every weapon.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D u = ship(game, hulls.get("skirmish_unit"), t, "skirmish", 0, 400, 1e9f);
+			WeaponMount m = new WeaponMount("M1", launcher(false), new Vec3(0, 5, -20), new Vec3(0, 0, -1), 30f, false);
+			m.spec.maxAmmo = 10;
+			m.ammo = 0f;
+			u.weapons.add(m);
+			u.flux.flux = u.flux.maxFlux * 0.8f;
+			u.system = system("extraction_protocol", 1f, 5f, 1f, 0f, 1, 0f);
+			u.system.ammo = 0f;
+			sim.addShip(u);
+			sim.update(in, DT, DT);
+			u.system.lashed(u);
+			boolean venting = false;
+			for (float tt = 0; tt < 6.3f; tt += DT) {
+				sim.update(in, DT, DT);
+				venting |= u.flux.venting;
+			}
+			check("extraction protocol: vents and reloads as it ends", venting && m.ammo == 10f,
+					String.format("vented %s, rack %.0f/10 (state %s)", venting, m.ammo, u.system.state));
+		}
+
+		// Convulsive Lunge: no aim, straight back 1000; the pull carries it most of the way, shield down at the peak.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D d = ship(game, hulls.get("shrouded_tendril"), t, "tendril", 1, 0, 1e9f);
+			d.system = system("convulsive_lunge", 2f, 3f, 0.5f, 0f, 0, 0f);
+			sim.addShip(d);
+			sim.setPlayer(d);
+			sim.update(in, DT, DT);
+			Vec3 start = new Vec3(d.pos);
+			d.system.activate(d);
+			Vec3 dest = new Vec3(d.system.ex.lungeDest);
+			boolean noShield = false;
+			float miss = Float.MAX_VALUE, peak = 0f;
+			for (float tt = 0; tt < 5.5f; tt += DT) {
+				sim.update(in, DT, DT);
+				noShield |= d.sysNoShield;
+				miss = Math.min(miss, d.pos.distance(dest));
+				peak = Math.max(peak, d.speed());
+			}
+			for (float tt = 0; tt < 3f; tt += DT) sim.update(in, DT, DT);
+			float after = d.speed();
+			check("convulsive lunge pulls toward its point", dest.distance(start) > 990f && miss < 150f && noShield && after < peak * 0.5f,
+					String.format("point %.0f away, passed %.0f from it, shield off at peak %s, speed peak %.0f -> %.0f 3 s after", dest.distance(start), miss, noShield, peak, after));
+		}
+
+		// Darkened Gaze: the all-round shield faces back; on, it opens 90 at the front and the gaze beams fire; hull damage taken x2.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D eye = ship(game, hulls.get("shrouded_eye"), t, "eye", 1, 0, 1e9f);
+			eye.system = system("darkened_gaze", 2f, 0f, 1f, 0f, 0, 0f);
+			eye.system.toggle = true;
+			WeaponMount b = new WeaponMount("G1", beam(100f, false), new Vec3(0, 5, -20), new Vec3(0, 0, -1), 5f, true);
+			b.spec.range = 1000f;
+			eye.gazeBeams.add(b);
+			sim.addShip(eye);
+			for (float tt = 0; tt < 2f; tt += DT) sim.update(in, DT, DT);
+			float idleArc = eye.flux.arcOverrideDeg;
+			boolean idleUp = eye.flux.shieldUp(), idleBeam = b.beamLevel > 0f;
+			eye.system.activate(eye);
+			for (float tt = 0; tt < 2.6f; tt += DT) sim.update(in, DT, DT);
+			float onArc = eye.flux.arcOverrideDeg, taken = eye.sysHullTakenMult;
+			boolean onBeam = b.beamLevel > 0f;
+			check("darkened gaze: shield opens, beams fire", idleArc == 360f && idleUp && !idleBeam && Math.abs(onArc - 270f) < 1f && onBeam && Math.abs(taken - 2f) < 0.01f,
+					String.format("idle: arc %.0f up %s beam %s; on: arc %.0f (want 270), beam %s, hull taken x%.1f", idleArc, idleUp, idleBeam, onArc, onBeam, taken));
+		}
+
+		// Tenebrous Expulsion: ejecta every 0.15 s for its second, within 45 deg of the aim; then it's pushed back.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D ml = ship(game, hulls.get("shrouded_maelstrom"), t, "maelstrom", 1, 0, 1e9f);
+			ml.system = system("tenebrous_expulsion", 0.1f, 1f, 1f, 20f, 0, 0f);
+			sim.addShip(ml);
+			sim.update(in, DT, DT);
+			Vec3 fwd = ml.rot.forward(new Vec3());
+			ml.system.activate(ml);
+			for (float tt = 0; tt < 1.15f; tt += DT) sim.update(in, DT, DT);
+			int n = 0;
+			float worst = 1f;
+			for (s3d.core.SpawnRequest r : sim.combat.spawnRequests) {
+				if (r.behaviour != Ship3D.Behaviour.EJECTA) continue;
+				n++;
+				worst = Math.min(worst, r.dir.dot(fwd));
+			}
+			for (float tt = 0; tt < 0.8f; tt += DT) sim.update(in, DT, DT);
+			float back = -ml.vel.dot(fwd);
+			check("tenebrous expulsion spits ejecta, backs off", n >= 6 && n <= 8 && worst > (float) Math.cos(Math.toRadians(46)) && back > 50f * vk,
+					String.format("%d ejecta (want 6-7), widest %.0f deg off the aim, backing off at %.0f", n, Math.toDegrees(Math.acos(worst)), back));
+		}
+
+		// Shrouded vortex: chases the nearest enemy ship, rams it (decaying faster), and bursts on its target when it's gone.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D en = ship(game, hulls.get("eagle"), t, "eagle", 0, 0, 1e6f);
+			en.pos.set(0f, 0f, -1500f);
+			sim.addShip(en);
+			Ship3D v = ship(game, hulls.get("shrouded_vortex"), t, "vortex", 1, 0, 5000f);
+			v.fighter = false;
+			v.behaviour = Ship3D.Behaviour.VORTEX;
+			v.decayPerSecond = s3d.core.SpawnBehaviours.VORTEX_DECAY;
+			v.deathBlast = blastSpec(2000f, v.radius * 2f + 150f, v.radius, false);
+			v.system = system("shrouded_vortex", 2f, 3f, 0.5f, 0f, 0, 0f);
+			v.ai = new s3d.core.ShipAI3D(9);
+			v.ai.profile(v, t);
+			sim.addShip(v);
+			float died = -1f;
+			for (float tt = 0; tt < 22f && died < 0f; tt += DT) {
+				sim.update(in, DT, DT);
+				if (v.destroyed) died = tt;
+			}
+			float lost = 1e6f - en.hull;
+			check("shrouded vortex: chases, rams, bursts", died > 0f && died < 20f && v.rams >= 1 && lost > 500f,
+					String.format("gone at %.1f s (no rams: 20 s), %d ram(s), eagle lost %.0f hull", died, v.rams, lost));
+		}
+
+		// Ejecta: slows to a tenth of its speed, decays away in 15 s, and bursts on what's near.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D e = ship(game, hulls.get("shrouded_ejecta"), t, "ejecta", 1, 0, 8000f);
+			e.behaviour = Ship3D.Behaviour.EJECTA;
+			e.decayPerSecond = s3d.core.SpawnBehaviours.EJECTA_DECAY;
+			e.deathBlast = blastSpec(2000f, e.radius * 2f + 150f, e.radius, false);
+			e.ai = new s3d.core.ShipAI3D(10);
+			e.ai.profile(e, t);
+			float top = e.params.fwdSpeed;
+			e.vel.set(0f, 0f, -top);
+			sim.addShip(e);
+			float settle = top * 0.9f / e.params.fwdDecel + 0.5f;
+			for (float tt = 0; tt < settle; tt += DT) sim.update(in, DT, DT);
+			float slow = e.speed() / top;
+			Ship3D en = ship(game, hulls.get("wolf"), t, "wolf", 0, 0, 1e6f);
+			e.vel.set(0f, 0f, 0f);
+			en.pos.set(e.pos).add(new Vec3(e.radius + en.radius + 20f, 0f, 0f));
+			sim.addShip(en);
+			float died = -1f;
+			for (float tt = settle; tt < 17f && died < 0f; tt += DT) {
+				sim.update(in, DT, DT);
+				if (e.destroyed) died = tt;
+			}
+			float lost = 1e6f - en.hull;
+			check("ejecta: slows, decays, bursts", slow < 0.12f && died > 14f && died < 16f && lost > 500f,
+					String.format("speed %.2f of top after %.1f s (want 0.10), gone at %.1f s (want 15), wolf lost %.0f", slow, settle, died, lost));
+		}
+
+		// Construction Swarm: queues a build swarm; one build at a time; the swarm drifts out at a third speed, settles, builds.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D fab = ship(game, hulls.get("fabricator_unit"), t, "fab", 1, 400, 1e9f);
+			fab.fragments = new s3d.core.FragmentSwarm(150, 0f);
+			fab.system = system("construction_swarm", 0.1f, 0f, 0.4f, 0f, 0, 0f);
+			sim.addShip(fab);
+			sim.update(in, DT, DT);
+			boolean ready0 = fab.system.ready(fab);
+			fab.system.activate(fab);
+			for (float tt = 0; tt < 0.3f; tt += DT) sim.update(in, DT, DT);
+			int queued = 0;
+			for (s3d.core.SpawnRequest r : sim.combat.spawnRequests) if (r.behaviour == Ship3D.Behaviour.CONSTRUCTION && r.pickBuild) queued++;
+			Ship3D sw = ship(game, hulls.get("attack_swarm"), t, "swarm", 1, 0, 2000f);
+			sw.fighter = true;
+			sw.noHull = true;
+			sw.behaviour = Ship3D.Behaviour.CONSTRUCTION;
+			sw.carrier = fab;
+			sw.travelLeft = 3f;
+			sw.buildLeft = sw.buildTotal = 2f;
+			sw.buildVariant = "skirmish_unit_Type100";
+			sw.pos.set(fab.pos).add(new Vec3(0f, 0f, -fab.radius - 50f));
+			sw.vel.set(0f, 0f, -sw.params.fwdSpeed);
+			sw.ai = new s3d.core.ShipAI3D(11);
+			sw.ai.profile(sw, t);
+			sim.addShip(sw);
+			for (float tt = 0; tt < 0.6f; tt += DT) sim.update(in, DT, DT);
+			boolean blocked = !fab.system.ready(fab);
+			Vec3 p0 = new Vec3(sw.pos);
+			for (float tt = 0; tt < 2.4f; tt += DT) sim.update(in, DT, DT);
+			float drift = sw.pos.distance(p0) / 2.4f, want = sw.params.fwdSpeed * s3d.core.SpawnBehaviours.CONSTRUCTION_SPEED_MULT;
+			boolean early = sw.buildDone;
+			for (float tt = 0; tt < 2.5f; tt += DT) sim.update(in, DT, DT);
+			check("construction swarm: queues, one at a time, builds", ready0 && queued == 1 && blocked && Math.abs(drift - want) < want * 0.15f && !early && sw.buildDone,
+					String.format("ready %s, queued %d, blocked while building %s, drift %.0f/s (want %.0f), built %s (not early %s)", ready0, queued, blocked, drift, want, sw.buildDone, !early));
+		}
+
+		// Mote Attractor: motes stream out to the cap and flock; they run down an incoming missile; the attractor draws them in.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D z = ship(game, hulls.get("ziggurat"), t, "ziggurat", 0, 400, 1e9f);
+			z.system = system("mote_control", 0.1f, 0f, 0.4f, 0f, 0, 0f);
+			WeaponSpec3D mote = launcher(true);
+			mote.name = "mote";
+			mote.missileMaxSpeed = 400f;
+			mote.missileAccel = 650f;
+			mote.missileTurnRate = 400f;
+			mote.launchSpeed = 200f;
+			mote.flightTime = 1e6f;
+			mote.missileHp = 50f;
+			mote.missileRadius = 4f;
+			mote.ignoresFlares = true;
+			z.system.motes.mote = mote;
+			sim.addShip(z);
+			Ship3D en = ship(game, hulls.get("wolf"), t, "wolf", 1, 150, 1e9f);
+			en.pos.set(0f, 0f, -20000f);
+			sim.addShip(en);
+			for (float tt = 0; tt < 8f; tt += DT) sim.update(in, DT, DT);
+			int motes = z.system.motes.list.size();
+			float meanR = 0f;
+			for (s3d.core.Missile3D m : z.system.motes.list) meanR += m.pos.distance(z.pos);
+			meanR /= Math.max(1, motes);
+			WeaponSpec3D torpedo = launcher(false); // torpedo-slow: motes are no wall against fast missiles (nor in vanilla)
+			torpedo.missileMaxSpeed = 250f;
+			torpedo.flightTime = 30f;
+			s3d.core.Missile3D inbound = sim.combat.spawnMissile(en, torpedo, new Vec3(z.pos).add(new Vec3(0f, 0f, -1900f)), new Vec3(0f, 0f, 1f), 100f, null);
+			float killedAt = -1f;
+			for (float tt = 0; tt < 10f && killedAt < 0f; tt += DT) {
+				sim.update(in, DT, DT);
+				if (!inbound.alive || inbound.hp <= 0f) killedAt = inbound.pos.distance(z.pos);
+			}
+			z.system.activate(z);
+			Vec3 at = new Vec3(z.system.motes.attractor);
+			for (float tt = 0; tt < 4f; tt += DT) sim.update(in, DT, DT);
+			float meanA = 0f;
+			for (s3d.core.Missile3D m : z.system.motes.list) meanA += m.pos.distance(at);
+			meanA /= Math.max(1, z.system.motes.list.size());
+			float k = t.weaponRangeMult;
+			check("mote attractor: flock, PD, attractor", motes >= 28 && motes <= 30 && meanR > z.radius + 150f * k && meanR < z.radius + 900f * k
+					&& killedAt > z.radius && meanA < 250f * k,
+					String.format("%d motes (cap 30) flocking %.0f out from the hull (vanilla settles ~600), missile run down %.0f from the centre, mean %.0f from the attractor after 4 s",
+							motes, meanR - z.radius, killedAt, meanA));
+		}
+
+		// Swarm Launcher: holds once 4 swarms are out until only one is left.
+		{
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D s = ship(game, hulls.get("hive_unit"), t, "hive", 0, 400, 1e9f);
+			sim.addShip(s);
+			WeaponSpec3D w = gun("FRAGMENTATION", 1f, 0f, 1500f, 500f);
+			w.launchWing = "attack_swarm_wing";
+			w.launchBehaviour = Ship3D.Behaviour.SWARM;
+			w.launchMaxOut = 4;
+			w.cooldown = 0.5f;
+			WeaponMount m = new WeaponMount("SL", w, new Vec3(0, 5, -20), new Vec3(0, 0, -1), 360f, false);
+			Vec3 aim = new Vec3(s.pos).add(new Vec3(0f, 0f, -1000f));
+			java.util.List<s3d.core.SpawnRequest> q = sim.combat.spawnRequests;
+			java.util.function.DoubleConsumer fire = secs -> {
+				for (float tt = 0; tt < secs; tt += DT) {
+					sim.update(in, DT, DT);
+					sim.combat.stepMount(s, m, aim, true, DT, t);
+				}
+			};
+			fire.accept(5.0);
+			int full = q.size();
+			q.remove(0);
+			q.remove(0);
+			fire.accept(2.0);
+			int twoLeft = q.size();
+			q.remove(0);
+			fire.accept(0.7);
+			int resumed = q.size();
+			check("swarm launcher: 4 out, holds until 1 left", full == 4 && twoLeft == 2 && resumed >= 2,
+					String.format("%d out after 5 s of fire (cap 4), %d with two left (holds), %d once only one was left (fires again)", full, twoLeft, resumed));
+		}
+	}
+
 	static void systemsBatch2(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
 		s3d.core.PilotInput in = screen();
 
@@ -3177,9 +4004,10 @@ public final class CombatBench {
 
 	/**
 	 * Station assault: four attackers against an orbital station. The core never takes damage and is
-	 * never targeted; modules fire back, take the damage and die; modules stay rigidly in place as
-	 * the station turns; nobody touches the structure (real hull shapes, not bounding spheres: at
-	 * station scale those are far bigger than the hulls); the station doesn't get pushed.
+	 * never targeted, nor are the unarmed sections (structural spurs); the armed modules fire back,
+	 * take the damage and die; modules stay rigidly in place as the station turns; nobody touches the
+	 * structure (real hull shapes, not bounding spheres: at station scale those are far bigger than
+	 * the hulls); the station doesn't get pushed.
 	 */
 	static void stationAssault(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
 		if (!hulls.containsKey("station1")) {
@@ -3211,8 +4039,10 @@ public final class CombatBench {
 		Vec3 fwd0 = core.rot.forward(new Vec3());
 		s3d.core.PilotInput in = screen();
 		float maxDrift = 0f, minGap = Float.MAX_VALUE;
-		int coreTargeted = 0, frames = 0, stationShots = 0, overloads = 0, contactFrames = 0;
+		int coreTargeted = 0, unarmedTargeted = 0, frames = 0, stationShots = 0, overloads = 0, contactFrames = 0;
 		float modulesDeadAt = -1f, peakFlux = 0f;
+		int armedModules = 0;
+		for (int i = 1; i < st.size(); i++) if (!st.get(i).unarmedPart()) armedModules++;
 		java.util.Map<Ship3D, Boolean> wasOver = new java.util.HashMap<>();
 		for (float time = 0; time < 300f && modulesDeadAt < 0f; time += DT) {
 			sim.update(in, DT, DT);
@@ -3227,30 +4057,33 @@ public final class CombatBench {
 			for (Ship3D a : attackers) {
 				if (a.destroyed) continue;
 				if (a.ai.target == core) coreTargeted++;
+				if (a.ai.target != null && a.ai.target.unarmedPart()) unarmedTargeted++;
 				for (Ship3D p : st) {
 					minGap = Math.min(minGap, p.surfaceDistance(a.pos) - a.radius);
 					if (a.pos.distance(p.pos) < a.radius + p.radius && touching(a, p)) contactFrames++;
 				}
 			}
 			boolean allDead = true;
-			for (int i = 1; i < st.size(); i++) if (!st.get(i).destroyed) allDead = false;
+			for (int i = 1; i < st.size(); i++) if (!st.get(i).destroyed && !st.get(i).unarmedPart()) allDead = false;
 			if (allDead) modulesDeadAt = time;
 		}
 		float turned = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, fwd0.dot(core.rot.forward(new Vec3()))))));
 		int lost = 0, modulesDead = 0;
 		for (Ship3D a : attackers) if (a.destroyed) lost++;
-		for (int i = 1; i < st.size(); i++) if (st.get(i).destroyed) modulesDead++;
+		for (int i = 1; i < st.size(); i++) if (st.get(i).destroyed && !st.get(i).unarmedPart()) modulesDead++;
 		float attackerDamage = 0f;
 		for (Ship3D a : attackers) attackerDamage += damageTaken(a);
-		boolean ok = core.hull == core.hullMax && !core.destroyed && coreTargeted == 0 && maxDrift < 0.5f
+		// The station only has to hit back: at 4 deg/s (user, 2026-10-13) its sections sweep past the attackers
+		// and land far less than at 1 deg/s, and most of the old ">500" came from attackers hurting each other.
+		boolean ok = core.hull == core.hullMax && !core.destroyed && coreTargeted == 0 && unarmedTargeted == 0 && maxDrift < 0.5f
 				// At vanilla ranges (rangeMult 1) attackers fight close beside the sections, and a slow hull sliding
 				// sideways can graze the irregular section next to its target: a few frames, not a ram.
-				&& core.pos.distance(corePos0) < 0.01f && modulesDead == st.size() - 1 && attackerDamage > 500f
+				&& core.pos.distance(corePos0) < 0.01f && armedModules > 0 && modulesDead == armedModules && stationShots > 0 && attackerDamage > 0f
 				&& contactFrames <= (t.weaponRangeMult < 1.5f ? 15 : 0);
-		check("station assault", ok, String.format("%d modules, all destroyed at %.0fs (%d/%d), core hull %.0f/%.0f, core targeted %d frames, "
+		check("station assault", ok, String.format("%d armed modules of %d, all destroyed at %.0fs (%d/%d), core hull %.0f/%.0f, core targeted %d frames, unarmed targeted %d frames, "
 				+ "module drift %.2f, core moved %.2f, turned %.0f deg, attackers lost %d, damage to attackers %.0f (station shots %d, attacker peak flux %.0f%%, %d overloads), "
 				+ "hull contact %d frames, closest %.0f from a hull",
-				st.size() - 1, modulesDeadAt, modulesDead, st.size() - 1, core.hull, core.hullMax, coreTargeted, maxDrift,
+				armedModules, st.size() - 1, modulesDeadAt, modulesDead, armedModules, core.hull, core.hullMax, coreTargeted, unarmedTargeted, maxDrift,
 				core.pos.distance(corePos0), turned, lost, attackerDamage, stationShots, peakFlux * 100f, overloads, contactFrames, minGap));
 	}
 

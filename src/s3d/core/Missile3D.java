@@ -11,9 +11,20 @@ public final class Missile3D {
 
 	public final Vec3 pos = new Vec3(), prev = new Vec3(), vel = new Vec3(), dir = new Vec3();
 	public Ship3D source, target;
+	/** Head this way (unit vector) instead of homing on target, without turning to it: the velocity swings round at the missile's acceleration (vanilla's motes). */
+	public Vec3 headDir;
 	public WeaponSpec3D spec;
 	public int owner;
 	public float age, hp;
+	/** Seconds counted against its flight time (vanilla holds a two-stage missile's clock while it lines up). */
+	public float flight;
+	/** Two-stage missile: seconds spent lining up on the lead; < 0 once it has locked its heading and burns. */
+	public float seek;
+	/** Heatseeker: started its run in from the target's tail; its course offset (deg) and when that is next rerolled. */
+	boolean finalApproach;
+	float courseOffset, courseTimer, orbitExtra = -1f;
+	/** Aim-point missile (Proximity Charge): where it flies to and stops; null = it drifts. */
+	public Vec3 aimPoint;
 	/** Distance to its target at which a splitting missile splits (rolled at launch). */
 	public float splitAt;
 	/** A decoy flare (harmless, lures enemy guided missiles); a missile lured onto a flare chases it. */

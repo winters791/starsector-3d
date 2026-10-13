@@ -19,6 +19,11 @@ public final class ShieldFlux {
 	// ---- spec (from the live ship) ----
 	public Type type = Type.NONE;
 	public float maxFlux, dissipation;
+	/** Set by the ship's systems each frame: dissipation multiplier (Incursion Mode x3). */
+	public float dissipationMult = 1f;
+	/** Set by the ship's systems each frame: the shield's whole arc in degrees (-1 = its own) and a forced facing, ship-local (null = its own). Darkened Gaze. */
+	public float arcOverrideDeg = -1f;
+	public Vec3 facingOverride;
 	/** Vanilla arc in degrees, and the 3D cone half-angle it maps to (radians). */
 	public float arcDeg, halfAngleMax;
 	/** Shield radius and centre in the ship's unscaled local frame. */
@@ -85,7 +90,8 @@ public final class ShieldFlux {
 	}
 
 	public float halfAngle() {
-		return halfAngleMax * unfold;
+		float max = arcOverrideDeg >= 0f ? (float) Math.toRadians(arcOverrideDeg * 0.5f) : halfAngleMax;
+		return max * unfold;
 	}
 
 	public boolean zeroFluxBoostActive() {
@@ -175,7 +181,9 @@ public final class ShieldFlux {
 		unfold = wantUp ? Math.min(1f, unfold + unfoldRate * dt) : Math.max(0f, unfold - unfoldRate * 2f * dt);
 		if (wantUp && maxFlux > 0f) flux = Math.min(maxFlux, flux + upkeep * dt);
 
-		if (type == Type.FRONT) {
+		if (facingOverride != null) {
+			facing.set(facingOverride).normalize();
+		} else if (type == Type.FRONT) {
 			facing.set(0f, 0f, -1f);
 		} else if (type == Type.OMNI && desiredLocal != null && desiredLocal.lengthSq() > 1e-6f) {
 			Combat.rotateToward(facing, new Vec3(desiredLocal).normalize(), turnRate * dt);
@@ -193,7 +201,7 @@ public final class ShieldFlux {
 			return;
 		}
 		// Soft flux first; hard flux only with the shield down (or the hullmod/skill fraction while up).
-		float d = dissipation * dt;
+		float d = dissipation * dissipationMult * dt;
 		float soft = flux - hardFlux;
 		float fromSoft = Math.min(soft, d);
 		flux -= fromSoft;
@@ -202,6 +210,14 @@ public final class ShieldFlux {
 		hardFlux -= fromHard;
 		flux -= fromHard;
 		flux = Math.max(flux, hardFlux);
+	}
+
+	/** Knocked into overload for this long (Quantum Disruptor), unless already overloaded or venting. */
+	public void disrupt(float seconds) {
+		if (disabled()) return;
+		overloadLeft = Math.max(overloadLeft, seconds * overloadTimeMult);
+		shieldOn = false;
+		venting = false;
 	}
 
 	public void reset() {

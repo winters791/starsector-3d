@@ -21,6 +21,7 @@ import com.fs.starfarer.api.impl.combat.dweller.AbyssalGlareEffect;
 import com.fs.starfarer.api.impl.combat.dweller.AssayingRiftEffect;
 import com.fs.starfarer.api.impl.combat.dweller.DwellerHullmod;
 import com.fs.starfarer.api.impl.combat.dweller.DwellerShroud;
+import com.fs.starfarer.api.impl.combat.dweller.VortexLauncherEffect;
 import com.fs.starfarer.api.impl.combat.dweller.InimicalEmanationOnFireEffect;
 import com.fs.starfarer.api.impl.combat.dweller.RiftLightningEffect;
 import com.fs.starfarer.api.impl.combat.threat.BaseFragmentMissileEffect;
@@ -29,6 +30,7 @@ import com.fs.starfarer.api.impl.combat.threat.FragmentSwarmHullmod;
 import com.fs.starfarer.api.impl.combat.threat.FragmentWeapon;
 import com.fs.starfarer.api.impl.combat.threat.KineticFragmentMissileEffect;
 import com.fs.starfarer.api.impl.combat.threat.NeutronTorpedoOnFireEffect;
+import com.fs.starfarer.api.impl.combat.threat.RoilingSwarmEffect;
 import com.fs.starfarer.api.impl.combat.threat.SwarmLauncherEffect;
 import com.fs.starfarer.api.impl.combat.threat.VoltaicCannonEffect;
 import com.fs.starfarer.api.impl.combat.threat.VoltaicDischargeOnFireEffect;
@@ -40,6 +42,7 @@ import com.fs.starfarer.api.loading.WeaponSpecAPI;
 import s3d.core.ExoticWeapons;
 import s3d.core.FragmentSwarm;
 import s3d.core.Ship3D;
+import s3d.core.SwarmLook;
 import s3d.core.Tuning;
 import s3d.core.WeaponSpec3D;
 
@@ -143,10 +146,25 @@ final class ExoticBridge {
 				ws.dotRefundChance = t.fx2DevouringRefundChance;
 				note(ws, String.format("hull hits eat in over %d ticks (%.0f%% chance each of a fragment back)", ws.dotTicks, ws.dotRefundChance * 100f));
 				return true;
-			case "SwarmLauncherEffect":
+			case "SwarmLauncherEffect": {
+				// Each shot is an attack swarm (a fighter made of 50 of the ship's fragments); up to its wing size out,
+				// then it waits until one is left (vanilla). Ammo never runs out on Threat ships.
+				String wing = SwarmLauncherEffect.WING_IDS.getOrDefault(ws.id, SwarmLauncherEffect.ATTACK_SWARM_WING);
+				ws.launchWing = wing;
+				ws.launchBehaviour = s3d.core.Ship3D.Behaviour.SWARM;
+				Integer frags = SwarmLauncherEffect.FRAGMENT_NUM.get(wing), size = SwarmLauncherEffect.WING_SIZE.get(wing);
+				ws.fragmentsNeeded = ws.fragmentsSpent = frags != null ? frags : 50;
+				ws.launchMaxOut = Math.round(ship.getMutableStats().getDynamic().getValue(Stats.SWARM_LAUNCHER_WING_SIZE_MOD, size != null ? size : 4));
+				if (ship.getVariant() != null && ship.getVariant().hasHullMod(HullMods.THREAT_HULLMOD)) ws.maxAmmo = 0;
+				note(ws, String.format("launches attack swarms (%d fragments each, %d out at once)", ws.fragmentsNeeded, ws.launchMaxOut));
+				return true;
+			}
 			case "VortexLauncherEffect":
-				ws.supported = false;
-				ws.unsupportedReason = "launches fighter wings (not in 3D yet)";
+				// Each shot is a shrouded vortex: it spins after an enemy ship, decays, and blows up.
+				ws.launchWing = VortexLauncherEffect.VORTEX_WING;
+				ws.launchBehaviour = s3d.core.Ship3D.Behaviour.VORTEX;
+				ws.launchArcDeg = VortexLauncherEffect.LAUNCH_ARC;
+				note(ws, "launches shrouded vortices");
 				return true;
 			// ---- Dweller ----
 			case "AbyssalGlareEffect":
@@ -271,6 +289,7 @@ final class ExoticBridge {
 				sb.append(String.format("%n  fragment swarm %d (+%.1f/s)", size, regen));
 			}
 			if (shrouded(ship)) {
+				s.shrouded = true;
 				s.riftHealMult = Math.max(0f, AssayingRiftEffect.getHealMult(ship));
 				sb.append(String.format("%n  shrouded: Hungering Rift heals x%.2f", s.riftHealMult));
 			}
@@ -278,6 +297,73 @@ final class ExoticBridge {
 			log.warn("S3D: couldn't read " + s.name + "'s fragment swarm / shroud (" + e + ")");
 		}
 		return sb.toString();
+	}
+
+	/**
+	 * The ship's swarm / shroud look from vanilla's live effect (its RoilingSwarm / DwellerShroud
+	 * parameters, which differ by hull). False while the effect doesn't exist yet (vanilla makes it on
+	 * the ship's first combat frame): try again later; the renderer uses vanilla's defaults meanwhile.
+	 */
+	static boolean swarmLook(Ship3D s, ShipAPI ship) {
+		try {
+			if (s.shrouded) {
+				DwellerShroud shroud = DwellerShroud.getShroudFor(ship);
+				if (shroud == null) return false;
+				SwarmLook l = SwarmLook.shroud();
+				look(l, shroud.getParams());
+				DwellerShroud.DwellerShroudParams p = shroud.getShroudParams();
+				l.darkBatch = p.negativeParticleNumBase;
+				l.darkArea = p.negativeParticleAreaMult;
+				l.darkSize = p.negativeParticleSizeMult;
+				l.darkClearCentre = p.negativeParticleClearCenterAreaRadius;
+				l.darkHighContrast = p.negativeParticleHighContrastMode;
+				s.swarmLook = l;
+				log.info(String.format("S3D: %s shroud look: %d blobs within %.0f, dark x%d", s.name, l.members, l.maxOffset, l.darkBatch));
+				return true;
+			}
+			if (s.fragments != null) {
+				RoilingSwarmEffect swarm = RoilingSwarmEffect.getSwarmFor(ship);
+				if (swarm == null) return false;
+				RoilingSwarmEffect.RoilingSwarmParams p = swarm.getParams();
+				SwarmLook l = p.generateOffsetAroundAttachedEntityOval ? SwarmLook.fragments(ship.getCollisionRadius())
+						: SwarmLook.swarm(p.baseMembersToMaintain, p.maxOffset);
+				look(l, p);
+				l.members = Math.max(l.members, p.baseMembersToMaintain);
+				s.swarmLook = l;
+				log.info(String.format("S3D: %s swarm look: up to %d pieces within %.0f%s", s.name, l.members, l.maxOffset, l.aroundHull ? " of the hull" : ""));
+				return true;
+			}
+		} catch (Throwable e) {
+			log.warn("S3D: couldn't read " + s.name + "'s swarm look, using vanilla's defaults (" + e + ")");
+		}
+		return true;
+	}
+
+	/** A construction swarm's look, as vanilla's script sets it: its reach x the build's size, EMP-coloured flashes. */
+	static void constructionLook(Ship3D s, float radiusMult) {
+		Integer r = SwarmLauncherEffect.SWARM_RADIUS.get(SwarmLauncherEffect.CONSTRUCTION_SWARM_WING);
+		SwarmLook l = SwarmLook.swarm(s.fragments != null ? s.fragments.size : 50, (r != null ? r : 50) * radiusMult);
+		l.flashFringe = rgba(VoltaicDischargeOnFireEffect.EMP_FRINGE_COLOR);
+		s.swarmLook = l;
+	}
+
+	private static void look(SwarmLook l, RoilingSwarmEffect.RoilingSwarmParams p) {
+		l.maxOffset = p.maxOffset;
+		l.spriteSize = p.baseSpriteSize;
+		if (l.shroud) {
+			l.members = p.baseMembersToMaintain;
+			l.lifeMin = p.baseDur;
+			l.lifeRange = p.durRange;
+			l.color = rgba(p.color);
+			l.flashPerSecond = p.flashFrequency * p.numToFlash * p.flashProbability;
+		}
+		l.flashRadius = p.flashRadius;
+		l.flashFringe = rgba(p.flashFringeColor);
+		l.flashCore = rgba(p.flashCoreColor);
+	}
+
+	private static float[] rgba(Color c) {
+		return new float[] {c.getRed() / 255f, c.getGreen() / 255f, c.getBlue() / 255f, c.getAlpha() / 255f};
 	}
 
 	private static boolean hasFragmentSwarm(ShipAPI ship) {

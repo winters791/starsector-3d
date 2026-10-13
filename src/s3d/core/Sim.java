@@ -370,6 +370,7 @@ public final class Sim {
 			}
 			if (s.flux != null) {
 				s.flux.noDissipation = s.sysNoDissipation;
+				s.flux.dissipationMult = s.sysDissipationMult;
 				s.flux.forceUp = s.sysForceShield;
 				s.flux.blocked = s.sysNoShield || s.phased;
 			}
@@ -800,6 +801,7 @@ public final class Sim {
 				if (s == self || s == exclude || s.destroyed || s.owner == self.owner) continue;
 				if (m.spec.pdOnly && !s.fighter) continue;
 				if (s.phased || s.invulnerable) continue; // shots would pass straight through / do nothing
+				if (s.unarmedPart() && s != preferred) continue; // a station's spurs and armour, unless locked
 				if (pass == 0 && !self.fighter && s.fighter != anti) continue;
 				if (!Combat.interceptCurved(mw, self.vel, s.pos, s.vel, s.accel, speed, lead)) continue;
 				if (!Combat.canReach(self, m, mw, lead, nearSide(s, mw), arcPad(s), tuning, aimTmp)) continue;
@@ -900,7 +902,7 @@ public final class Sim {
 		float bestScore = Float.MAX_VALUE, currentScore = Float.MAX_VALUE;
 		Vec3 to = new Vec3();
 		for (Ship3D s : ships) {
-			if (s == player || s.destroyed || s.owner == player.owner || s.invulnerable) continue;
+			if (s == player || s.destroyed || s.owner == player.owner || s.invulnerable || s.unarmedPart()) continue; // R still locks a spur
 			to.set(s.pos).sub(camera.pos);
 			float dist = to.length();
 			if (dist < 1f) continue;

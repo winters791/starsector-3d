@@ -209,7 +209,19 @@ public final class ShipAI3D {
 	}
 
 	private float cautionOf(Tuning t) {
+		if (reckless) return 0f; // Incursion Mode: caution thrown away
 		return Float.isNaN(caution) ? t.aiCaution : caution;
+	}
+
+	/** Set each frame from the ship: Incursion Mode makes the pilot reckless. */
+	private boolean reckless;
+
+	/** Counts down the retarget timer; true (and restarts it at 1 s) when it's time to look again. */
+	boolean retargetDue(float dt) {
+		retarget -= dt;
+		if (retarget > 0f) return false;
+		retarget = 1f;
+		return true;
 	}
 
 	private float opportunismOf(Tuning t) {
@@ -321,6 +333,12 @@ public final class ShipAI3D {
 		Tuning t = sim.tuning;
 		if (!profiled) profile(s, t);
 		if (dt <= 0f) return;
+		reckless = s.sysReckless;
+		if (s.behaviour != null && SpawnBehaviours.step(this, sim, s, dt)) return; // construction swarms, ejecta, vortices
+		if (s.drone) {
+			droneStep(sim, s, dt);
+			return;
+		}
 		if (s.fighter) {
 			fighterStep(sim, s, dt);
 			return;
@@ -357,6 +375,10 @@ public final class ShipAI3D {
 		boolean helpless = s.flux != null && s.flux.disabled();
 		if (s.retreatOrdered) {
 			want.set(homeDir);
+			throttle = 1f;
+		} else if (s.sysBackOff && target != null) {
+			// Extraction Protocol: pull straight back from the target, guns still going.
+			want.set(s.pos).sub(target.pos).normalize();
 			throttle = 1f;
 		} else if (target == null && order != null) {
 			throttle = followOrder(sim, s, order, want);
@@ -1128,6 +1150,61 @@ public final class ShipAI3D {
 					if (f.pos.distance(f.ai.target.pos) < 2500f) return true; // its wings are on someone
 				}
 				return false;
+			case COMBAT_BURN:
+				// A gentler, steerable burn: on to close a gap or to run, off once it's in the fight.
+				return s.retreatOrdered || target != null && dist > engageRange * (sys.on() ? 1.2f : 1.6f)
+						&& new Vec3(target.pos).sub(s.pos).normalize().dot(fwd) > 0.9f;
+			case ORION_DEVICE:
+			case NOVA_BURST:
+				// One press fires the whole train of jolts: lined up on a far target, or running for the edge.
+				return sys.orion != null && !sys.orion.busy() && (s.retreatOrdered || target != null && facing && dist > engageRange * 1.8f);
+			case RESERVE_DEPLOYMENT:
+				for (Ship3D f : sim.ships) {
+					if (f.fighter && f.carrier == s && !f.destroyed && f.ai != null && f.ai.target != null && f.pos.distance(f.ai.target.pos) < 2500f) return true;
+				}
+				return target != null && dist < weaponRange * 1.5f;
+			case ACAUSAL_DISRUPTOR: {
+				// Knock the target's shield down (and its guns off) just as ours can follow up.
+				if (target == null || target.fighter || target.flux == null || target.flux.disabled() || !inRange) return false;
+				float reach = sys.range * sim.tuning.weaponRangeMult + s.radius + target.radius;
+				return target.pos.distance(s.pos) <= reach && (target.flux.shieldUp() || threatNow > 0f);
+			}
+			case ENERGY_LASH: {
+				// Lash the friendly unit whose system would help most right now; else lash the target.
+				ExoticSystems ex = sys.ex;
+				float reach = sys.range * sim.tuning.weaponRangeMult;
+				Ship3D pick = null;
+				float best = 0.5f;
+				for (Ship3D o : sim.ships) {
+					if (o == s || o.owner != s.owner || !ExoticSystems.validLash(s, o) || o.pos.distance(s.pos) > reach + s.radius + o.radius) continue;
+					float u = ExoticSystems.lashUsefulness(s, o, sim);
+					if (u > best) {
+						best = u;
+						pick = o;
+					}
+				}
+				if (pick == null && target != null && !target.fighter && target.pos.distance(s.pos) <= reach + s.radius + target.radius) pick = target;
+				ex.lashPick = pick;
+				return pick != null;
+			}
+			case CONSTRUCTION_SWARM:
+				return true; // usable only with the fragments for a build and none under way (ExoticSystems)
+			case CONVULSIVE_LUNGE:
+				return target != null && dist > weaponRange * 0.6f && dist < weaponRange + sys.ex.lungeDistance && !target.phased;
+			case DARKENED_GAZE: {
+				float reach = 0f;
+				for (WeaponMount m : s.gazeBeams) reach = Math.max(reach, m.spec.range * sim.tuning.weaponRangeMult);
+				return target != null && !target.phased && new Vec3(target.pos).sub(s.pos).normalize().dot(fwd) > 0.9f && dist < reach;
+			}
+			case TENEBROUS_EXPULSION:
+				return target != null && !target.phased && dist < 2000f;
+			case MOTE_CONTROL:
+				return target != null && !target.fighter && sys.motes != null && !sys.motes.attracting() && sys.motes.list.size() >= 10
+						&& target.pos.distance(s.pos) < sys.motes.range * sim.tuning.weaponRangeMult + target.radius;
+			case FRAGMENT_VOLLEY:
+			case INCURSION_MODE:
+			case EXTRACTION_PROTOCOL:
+				return false; // only an Overseer's lash fires these
 			case LIDAR_ARRAY:
 				// Long wind-up with the guns silent: only when lined up on a target its hardpoints will reach.
 				return target != null && facing && dist < weaponRange * (1f + sys.lidarRange) && level < 0.6f && !target.phased;
@@ -1169,6 +1246,7 @@ public final class ShipAI3D {
 		Vec3 axisNow = gunAxisWorld(s, tH);
 		for (Ship3D o : sim.ships) {
 			if (o.destroyed || o.owner == s.owner || o.fighter || o.invulnerable) continue; // ships fight ships; PD handles fighters
+			if (o.unarmedPart()) continue; // spurs and armour: only a station's guns and bays are worth shooting
 			if (order != null && !allowedTarget(order, o)) continue;
 			// Distance from us, plus half the distance from our fleet, so a fleet tends to engage together.
 			Vec3 home = sim.mobileCentre(s.owner);
@@ -1296,6 +1374,7 @@ public final class ShipAI3D {
 		float bestScore = Float.MAX_VALUE;
 		for (Ship3D o : sim.ships) {
 			if (o.destroyed || o.owner == s.owner || o.invulnerable || o.pos.distance(anchor) > s.wingRange) continue;
+			if (o.unarmedPart() && o != ordered) continue;
 			float score = o.pos.distance(s.pos);
 			if (o.fighter) score *= striker ? 3f : 0.4f;
 			if (o == ordered) score *= 0.5f;
@@ -1340,6 +1419,43 @@ public final class ShipAI3D {
 			return 1f - (1f - th) * Math.min(1f, opp);
 		}
 		return 1f;
+	}
+
+	/** Drone: its orbit radius now (it launches out from the hull to its orbit). */
+	private float droneR = -1f;
+
+	/**
+	 * A launcher's drone: rides its orbit round the mothership (radius beyond the hull, speed and
+	 * direction from the launcher's data), launching out to it first; points away from the mothership,
+	 * or at an enemy in reach if it's a point-defence drone; its guns pick their own targets.
+	 */
+	private void droneStep(Sim sim, Ship3D s, float dt) {
+		Ship3D host = s.carrier;
+		retarget -= dt;
+		if (retarget <= 0f || target == null || target.destroyed || !sim.ships.contains(target)) {
+			retarget = 1f;
+			target = pickTarget(sim, s);
+		}
+		if (host == null || host.destroyed || !sim.ships.contains(host)) {
+			s.pos.addScaled(s.vel, dt); // mothership gone: drift on, still shooting
+		} else {
+			float want = host.radius + s.droneOrbitRadius;
+			if (droneR < 0f) droneR = Math.min(want, Math.max(host.radius * 0.8f, host.pos.distance(s.pos))); // out of the hull's edge
+			droneR = FlightModel.approach(droneR, want, 300f * sim.tuning.speedMult * dt); // vanilla's launch speed
+			s.droneOrbitAngle += s.droneOrbitDir * s.droneOrbitSpeed * sim.tuning.speedMult / Math.max(1f, droneR) * dt;
+			Vec3 f = host.rot.forward(tA), r = host.rot.right(tB);
+			float ca = (float) Math.cos(s.droneOrbitAngle), sa = (float) Math.sin(s.droneOrbitAngle);
+			Vec3 off = tC.set(f).scale(ca * droneR).addScaled(r, sa * droneR);
+			Vec3 next = tD.set(host.pos).add(off);
+			s.vel.set(next).sub(s.pos).scale(1f / dt);
+			s.pos.set(next);
+		}
+		Vec3 look = null;
+		if (s.droneFaceEnemy && target != null && target.pos.distance(s.pos) < Math.max(600f, weaponRange * 1.2f)) look = tE.set(target.pos).sub(s.pos);
+		else if (host != null && !host.destroyed) look = tE.set(s.pos).sub(host.pos);
+		if (look != null && look.lengthSq() > 1e-4f) s.rot.setLookRotation(look.normalize(), new Vec3(0f, 1f, 0f));
+		manageFlux(sim, s, dt);
+		fireWeapons(sim, s, dt);
 	}
 
 	/** Circle the carrier a little outside its hull. */
