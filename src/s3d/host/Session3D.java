@@ -19,6 +19,7 @@ import s3d.core.Ship3D;
 import s3d.core.Sim;
 import s3d.core.Tuning;
 import s3d.core.WeaponMount;
+import s3d.render.FxSprites;
 import s3d.render.GLStateGuard;
 import s3d.render.HudRenderer;
 import s3d.render.Renderer3D;
@@ -33,6 +34,10 @@ import s3d.render.ShipModel;
 abstract class Session3D {
 	private static final Logger log = Global.getLogger(Session3D.class);
 	protected static final Renderer3D RENDERER = new Renderer3D();
+	static {
+		// Vanilla's sprite sheets for the swarm effects (fragments, shroud blobs, glows), from the game's own files.
+		FxSprites.loader = (category, key) -> ShipBridge.loadSprite(Global.getSettings().getSpriteName(category, key));
+	}
 
 	protected final CombatEngineAPI engine;
 	protected final Sim sim;

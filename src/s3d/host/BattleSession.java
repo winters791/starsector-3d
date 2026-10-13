@@ -25,11 +25,19 @@ import com.fs.starfarer.api.combat.CombatTaskManagerAPI;
 import com.fs.starfarer.api.combat.CombatUIAPI;
 import com.fs.starfarer.api.combat.DamageType;
 import com.fs.starfarer.api.combat.DeployedFleetMemberAPI;
+import com.fs.starfarer.api.combat.DroneLauncherShipSystemAPI;
 import com.fs.starfarer.api.combat.FighterLaunchBayAPI;
 import com.fs.starfarer.api.combat.FighterWingAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.combat.WeaponAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import com.fs.starfarer.api.impl.combat.ReserveWingStats;
+import com.fs.starfarer.api.impl.combat.dweller.ShroudedEjectaShipCreator;
+import com.fs.starfarer.api.impl.combat.dweller.ShroudedVortexShipCreator;
+import com.fs.starfarer.api.plugins.ShipSystemStatsScript;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import s3d.core.ArmorShell;
 import s3d.core.Objective3D;
@@ -81,6 +89,11 @@ final class BattleSession extends Session3D {
 	private final Map<ShipAPI, CollisionClass> frozen = new IdentityHashMap<>();
 	/** Frozen but not in 3D (fighters, escape pods): parked here. */
 	private final Map<ShipAPI, Vector2f> parked = new IdentityHashMap<>();
+	/** Puppets the 3D side asked for (spawned wings and ships), with how their twins come in. */
+	private final Map<ShipAPI, s3d.core.SpawnRequest> spawned = new IdentityHashMap<>();
+	/** Twins whose swarm / shroud look has been read from vanilla's live effect. */
+	private final Map<String, Integer> spawnLogged = new java.util.HashMap<>();
+	private final java.util.Set<Ship3D> swarmLooked = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 	/** Puppets already killed or retreated: no longer moved or written to. */
 	private final Set<ShipAPI> finished = new HashSet<>();
 	/** Retreated puppets waiting for vanilla to count them; time sent. */
@@ -139,6 +152,7 @@ final class BattleSession extends Session3D {
 		edgeZ = mapH * 0.5f * scale;
 		sim.arenaHalfX = mapW * 0.5f * scale;
 		sim.arenaHalfZ = edgeZ;
+		BuildPicker.clear();
 		managePuppets(0f);
 		syncObjectives();
 
@@ -163,17 +177,23 @@ final class BattleSession extends Session3D {
 		present.addAll(engine.getShips());
 		// Ships first, then modules (their parent's twin must exist), then fighters (so a wing
 		// launched this frame finds its carrier's twin, which may be a station's hangar module).
+		spawnRequested();
 		for (int pass = 0; pass < 3; pass++) {
 			for (ShipAPI ship : engine.getShips()) {
-				int kind = ship.isFighter() ? 2 : isModule(ship) ? 1 : 0;
+				int kind = ship.isFighter() || ship.isDrone() ? 2 : isModule(ship) ? 1 : 0;
 				if (kind != pass) continue;
 				if (frozen.containsKey(ship) || finished.contains(ship)) continue;
 				if (ship.isHulk() || !ship.isAlive()) continue; // wrecks that predate us: leave them be
 				if (pass == 1 && !twins.containsKey(ship.getParentStation()) && !frozen.containsKey(ship.getParentStation())) continue; // parent first
-				if (pass == 2 && carrierPending(ship)) continue; // its carrier isn't in 3D yet: try next frame
+				if (pass == 2 && (ship.isDrone() ? dronePending(ship) : carrierPending(ship))) continue; // its carrier isn't in 3D yet: try next frame
 				freeze(ship);
-				if (pass == 1) {
+				s3d.core.SpawnRequest req = spawned.remove(ship);
+				if (req != null) {
+					if (!mirrorSpawned(ship, req)) parked.put(ship, parkingSpot(ship));
+				} else if (pass == 1) {
 					if (!mirrorModule(ship)) parked.put(ship, null); // left where vanilla has it
+				} else if (ship.isDrone()) {
+					if (!mirrorDrone(ship)) parked.put(ship, parkingSpot(ship));
 				} else if (mirrorable(ship)) mirror(ship);
 				else if (!ship.isFighter() || !mirrorFighter(ship)) parked.put(ship, parkingSpot(ship));
 			}
@@ -184,7 +204,8 @@ final class BattleSession extends Session3D {
 			if (finished.contains(ship)) continue;
 			if (!present.contains(ship)) {
 				// Vanilla took it out on its own (it shouldn't); drop the twin so the two sides agree.
-				log.warn("S3D: " + e.getValue().name + " left the vanilla battle by itself; removing its 3D twin");
+				if (e.getValue().fighter) log.info("S3D: " + e.getValue().name + " (fighter/drone) left the vanilla battle; removing its 3D twin");
+				else log.warn("S3D: " + e.getValue().name + " left the vanilla battle by itself; removing its 3D twin");
 				finished.add(ship);
 				if (!e.getValue().destroyed && !e.getValue().fighter) sim.combat.jumpOut(e.getValue()); // usually a retreat vanilla finished early
 				removeTwin(e.getValue());
@@ -211,7 +232,8 @@ final class BattleSession extends Session3D {
 		ship.setCollisionClass(CollisionClass.NONE);
 		ship.setShipAI(new InertShipAI());
 		ship.setHoldFire(true);
-		ship.setShipSystemDisabled(true); // a puppet's Burn Drive etc. would leak into its stats
+		// A puppet's Burn Drive etc. would leak into its stats. Drone launchers stay on: vanilla launches the drones, 3D flies them.
+		ship.setShipSystemDisabled(!(ship.getSystem() instanceof DroneLauncherShipSystemAPI));
 	}
 
 	/** New vanilla ship on the field: make its 3D twin at its own side's entry line. */
@@ -404,6 +426,230 @@ final class BattleSession extends Session3D {
 		}
 	}
 
+	/**
+	 * What the 3D side wants put into the battle (attack and construction swarms, ejecta, vortices, a
+	 * finished construction): spawned through vanilla's fleet manager at the matching 2D spot, each new
+	 * puppet remembered so its twin comes in where and how it was launched.
+	 */
+	private void spawnRequested() {
+		List<s3d.core.SpawnRequest> reqs = sim.combat.spawnRequests;
+		if (reqs.isEmpty()) return;
+		for (s3d.core.SpawnRequest r : new ArrayList<>(reqs)) {
+			ShipAPI src = r.source != null && r.source.hostRef instanceof ShipAPI ? (ShipAPI) r.source.hostRef : null;
+			int owner = src != null ? src.getOriginalOwner() : r.source != null ? r.source.owner : 1;
+			try {
+				if (r.pickBuild && !pickBuild(src, r)) continue;
+				CombatFleetManagerAPI fm = engine.getFleetManager(owner);
+				Vector2f at = to2D(r.pos, new Vector2f());
+				float facing = (float) Math.toDegrees(Math.atan2(-r.dir.z, r.dir.x));
+				fm.setSuppressDeploymentMessages(true);
+				ShipAPI leader = fm.spawnShipOrWing(r.id, at, facing, 0f, null);
+				fm.setSuppressDeploymentMessages(false);
+				if (leader == null) continue;
+				if (leader.getWing() != null && src != null) leader.getWing().setSourceShip(src);
+				List<ShipAPI> members = leader.getWing() != null ? leader.getWing().getWingMembers() : List.of(leader);
+				for (ShipAPI m : members) spawned.put(m, r);
+				if (r.behaviour == null) log.info("S3D: " + (r.source != null ? r.source.name : "?") + " brought " + r.id + " into the battle");
+				else if (spawnLogged.merge(r.id, 1, Integer::sum) <= 3) { // the first few of each kind, to confirm they come out
+					log.info(String.format("S3D: %s spawned %s (%s, %d member(s)) at (%.0f, %.0f)", r.source != null ? r.source.name : "?", r.id,
+							r.behaviour, members.size(), at.x, at.y));
+				}
+			} catch (Throwable t) {
+				log.warn("S3D: could not spawn " + r.id + " (" + t + ")");
+			}
+		}
+		reqs.clear();
+	}
+
+	/** Vanilla's Fabricator picks what its construction swarm builds (by what its side has out); its cost leaves the Fabricator. */
+	private boolean pickBuild(ShipAPI fabricator, s3d.core.SpawnRequest r) {
+		if (fabricator == null) return false;
+		BuildPicker.Pick pick = BuildPicker.pick(fabricator);
+		if (pick == null) {
+			log.info("S3D: " + fabricator.getName() + "'s construction swarm found nothing to build");
+			return false;
+		}
+		Ship3D fab = r.source;
+		if (fab.fragments != null && fab.fragments.active() < pick.fragments) return false;
+		if (fab.fragments != null) fab.fragments.count -= pick.fragments;
+		fabricator.setCurrentCR(Math.max(0f, fabricator.getCurrentCR() - pick.cr));
+		r.buildVariant = pick.variantId;
+		r.buildSeconds = pick.buildSeconds;
+		r.travelSeconds = pick.travelSeconds;
+		r.buildSizeMult = pick.radiusMult;
+		log.info(String.format("S3D: %s sends a construction swarm to build %s (%d fragments, %.0f s)", fabricator.getName(), pick.variantId, pick.fragments, pick.buildSeconds));
+		return true;
+	}
+
+	/**
+	 * A puppet the 3D side asked for: its twin comes in at the requested spot (wing members a little
+	 * apart), leaving along the requested direction at its share of its own top speed, with its
+	 * behaviour (swarms and construction swarms are drawn as their swarm only; ejecta and vortices
+	 * decay and blow up when they die).
+	 */
+	private boolean mirrorSpawned(ShipAPI ship, s3d.core.SpawnRequest r) {
+		try {
+			int n = deployed++;
+			Ship3D s = ShipBridge.toShip3D(ship, "s" + n, cfg.tuning);
+			s.fighter = ship.isFighter();
+			s.hull = Math.min(s.hullMax, ship.getHitpoints());
+			s.behaviour = r.behaviour;
+			s.launchedBy = r.launcher;
+			if (r.behaviour == s3d.core.Ship3D.Behaviour.CONSTRUCTION) s.carrier = r.source; // one build under way per Fabricator
+			sim.addShip(s);
+			int idx = 0;
+			for (s3d.core.SpawnRequest o : spawned.values()) if (o == r) idx++;
+			s.pos.set(r.pos).add(new Vec3((idx % 3 - 1) * 15f, (idx % 2) * 10f, 0f));
+			s.rot.setLookRotation(r.dir, new Vec3(0f, 1f, 0f));
+			float top = s.params != null ? s.params.fwdSpeed : 100f;
+			s.vel.set(r.dir).scale(top * r.speedFraction);
+			if (r.behaviour != null) {
+				switch (r.behaviour) {
+					case SWARM:
+						s.noHull = true;
+						break;
+					case CONSTRUCTION:
+						s.noHull = true;
+						s.travelLeft = r.travelSeconds;
+						s.buildLeft = s.buildTotal = r.buildSeconds;
+						s.buildVariant = r.buildVariant;
+						s.hullMax *= r.buildSizeMult;
+						s.hull = s.hullMax;
+						ExoticBridge.constructionLook(s, r.buildSizeMult);
+						swarmLooked.add(s);
+						break;
+					case EJECTA:
+						s.decayPerSecond = s3d.core.SpawnBehaviours.EJECTA_DECAY;
+						s.deathBlast = deathBlast(ship, ShroudedEjectaShipCreator.EXPLOSION_DAMAGE);
+						break;
+					case VORTEX:
+						s.decayPerSecond = s3d.core.SpawnBehaviours.VORTEX_DECAY;
+						s.deathBlast = deathBlast(ship, ShroudedVortexShipCreator.EXPLOSION_DAMAGE);
+						break;
+					default:
+				}
+			}
+			s.ai = new ShipAI3D(n);
+			s.ai.homeDir.set(0f, 0f, s.owner == 0 ? 1f : -1f);
+			s.ai.profile(s, cfg.tuning);
+			twins.put(ship, s);
+			if (r.behaviour == null) newShips.add(s);
+			return true;
+		} catch (Throwable t) {
+			log.error("S3D: could not mirror spawned " + ship.getHullSpec().getHullId() + "; it stays a parked puppet", t);
+			return false;
+		}
+	}
+
+	/** Vanilla's blast for a shrouded unit's death: energy, enemies only, full inside its hull, out to its explosion radius. */
+	private static s3d.core.WeaponSpec3D deathBlast(ShipAPI ship, float damage) {
+		s3d.core.WeaponSpec3D w = new s3d.core.WeaponSpec3D();
+		w.id = "shroud_burst";
+		w.name = "Shroud burst";
+		w.damage = damage;
+		w.damageType = "ENERGY";
+		w.type = "ENERGY";
+		w.proxRadius = com.fs.starfarer.api.loading.DamagingExplosionSpec.getShipExplosionRadius(ship);
+		w.proxCore = ship.getCollisionRadius();
+		w.fringeColor = new float[] {0.59f, 0f, 0.12f};
+		w.blastSound = "explosion_ship";
+		return w;
+	}
+
+	/** A construction swarm finished: the ship it built comes in where it stood, and the swarm is gone. */
+	private void finishBuild(ShipAPI swarm, Ship3D s) {
+		if (s.buildVariant != null) {
+			s3d.core.SpawnRequest r = new s3d.core.SpawnRequest(s.buildVariant, false, s.carrier != null ? s.carrier : s, s.pos, s.rot.forward(new Vec3()), 0f, null);
+			sim.combat.spawnRequests.add(r);
+			sim.combat.effects.add(new s3d.core.Effect(s3d.core.Effect.Kind.FLASH, s.pos, s.radius * 3f, 0.6f).color(0.51f, 0.61f, 0.57f));
+		}
+		finished.add(swarm);
+		removeTwin(s);
+		if (engine.isEntityInPlay(swarm)) engine.removeEntity(swarm);
+	}
+
+	/** A drone whose mothership is alive but hasn't got its 3D twin yet. */
+	private boolean dronePending(ShipAPI drone) {
+		ShipAPI c = drone.getDroneSource();
+		return c != null && c.isAlive() && !c.isHulk() && !twins.containsKey(c) && !frozen.containsKey(c);
+	}
+
+	/**
+	 * A drone vanilla's launcher just put out (station drones, point-defence drones): its 3D twin
+	 * launches out of the mothership to its orbit, set by the launcher's own behaviour table (radius
+	 * beyond the hull, speed, direction, facing), spread round by its slot index.
+	 */
+	private boolean mirrorDrone(ShipAPI ship) {
+		ShipAPI src = ship.getDroneSource();
+		Ship3D host = src != null ? twins.get(src) : null;
+		if (host == null || host.destroyed || !sim.ships.contains(host)) return false;
+		try {
+			int n = deployed++;
+			Ship3D d = ShipBridge.toShip3D(ship, "d" + n, cfg.tuning);
+			d.fighter = true;
+			d.drone = true;
+			d.carrier = host;
+			d.hull = Math.min(d.hullMax, ship.getHitpoints());
+			int index = 0, maxDrones = 1;
+			JSONObject beh = null;
+			if (src.getSystem() instanceof DroneLauncherShipSystemAPI) {
+				DroneLauncherShipSystemAPI dl = (DroneLauncherShipSystemAPI) src.getSystem();
+				index = Math.max(0, dl.getIndex(ship));
+				JSONObject spec = dl.getSpecJson();
+				if (spec != null) {
+					maxDrones = Math.max(1, spec.optInt("maxDrones", 1));
+					beh = droneBehaviour(spec.optJSONArray("droneBehavior"), index);
+				}
+			}
+			d.droneOrbitRadius = beh != null ? (float) beh.optDouble("orbitRadius", 100) : 100f;
+			d.droneOrbitSpeed = beh != null ? (float) beh.optDouble("orbitSpeed", 100) : 100f;
+			d.droneOrbitDir = beh != null && beh.optInt("orbitDir", 1) < 0 ? -1 : 1;
+			d.droneFaceEnemy = beh != null && beh.optBoolean("faceEnemy", false);
+			float initial = beh != null ? (float) beh.optDouble("initialOrbitAngle", 0) : 0f;
+			d.droneOrbitAngle = (float) Math.toRadians(initial + index * 360f / maxDrones);
+			sim.addShip(d);
+			d.pos.set(host.pos);
+			d.rot.set(host.rot);
+			d.vel.set(host.vel);
+			d.ai = new ShipAI3D(n);
+			d.ai.homeDir.set(0f, 0f, d.owner == 0 ? 1f : -1f);
+			d.ai.profile(d, cfg.tuning);
+			twins.put(ship, d);
+			log.info(String.format("S3D: drone %s #%d from %s: orbit %.0f beyond the hull at %.0f/s, %s", ship.getHullSpec().getHullId(), index,
+					host.name, d.droneOrbitRadius, d.droneOrbitSpeed, d.droneFaceEnemy ? "faces enemies" : "faces outward"));
+			return true;
+		} catch (Throwable t) {
+			log.error("S3D: could not mirror drone " + ship.getHullSpec().getHullId() + "; it stays a parked puppet", t);
+			return false;
+		}
+	}
+
+	/** The launcher's behaviour entry whose droneIndex list has this index (else the first). */
+	private static JSONObject droneBehaviour(JSONArray list, int index) {
+		if (list == null || list.length() == 0) return null;
+		for (int i = 0; i < list.length(); i++) {
+			JSONObject b = list.optJSONObject(i);
+			JSONArray idx = b != null ? b.optJSONArray("droneIndex") : null;
+			if (idx == null) continue;
+			for (int k = 0; k < idx.length(); k++) if (idx.optInt(k, -1) == index) return b;
+		}
+		return list.optJSONObject(0);
+	}
+
+	/**
+	 * Reserve Deployment went off in 3D: vanilla's own script works the carrier puppet's launch bays
+	 * (faster replacements, extra craft for a while), and the extra fighters it launches get their 3D
+	 * twins like any others.
+	 */
+	private void reserveDeployment(ShipAPI ship, Ship3D s) {
+		try {
+			new ReserveWingStats().apply(ship.getMutableStats(), "s3d_reservewing", ShipSystemStatsScript.State.ACTIVE, 1f);
+			log.info("S3D: " + s.name + " used Reserve Deployment; vanilla's bays launch the extra fighters");
+		} catch (Throwable t) {
+			log.warn("S3D: Reserve Deployment on " + s.name + " failed (" + t + ")");
+		}
+	}
+
 	/** The 3D fighter is back at its carrier: hand it to its bay so vanilla refits and relaunches it. */
 	private void landFighter(ShipAPI ship, Ship3D f) {
 		removeTwin(f);
@@ -492,6 +738,15 @@ final class BattleSession extends Session3D {
 			if (!ship.isAlive() || ship.isHulk()) {
 				vanillaKilled(ship, s); // e.g. a station core vanilla counts as beaten once its sections are gone
 				continue;
+			}
+			if (s.behaviour == s3d.core.Ship3D.Behaviour.CONSTRUCTION && s.buildDone) {
+				finishBuild(ship, s);
+				continue;
+			}
+			if ((s.fragments != null || s.shrouded) && !swarmLooked.contains(s) && ExoticBridge.swarmLook(s, ship)) swarmLooked.add(s);
+			if (s.system != null && s.system.hostRequest) {
+				s.system.hostRequest = false;
+				if (s.system.kind == s3d.core.ShipSystem3D.Kind.RESERVE_DEPLOYMENT) reserveDeployment(ship, s);
 			}
 			if (s.fixedPart()) {
 				if (Math.abs(ship.getHitpoints() - s.hull) > 0.5f) ship.setHitpoints(Math.max(1f, s.hull));

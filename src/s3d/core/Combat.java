@@ -24,8 +24,9 @@ public final class Combat {
 	public List<Ship3D> world = new ArrayList<>();
 	public final List<Projectile> projectiles = new ArrayList<>();
 	public final List<Missile3D> missiles = new ArrayList<>();
-	/** Missile target for the shot being fired (set per stepMount call). */
+	/** Missile target and aim point (world; may be null) for the shot being fired (set per stepMount call). */
 	private Ship3D pendingTarget;
+	private Vec3 pendingAim;
 	public final List<Effect> effects = new ArrayList<>();
 	/** Camera shake earned this frame by numbersFor (you): hits, nearby blasts, your own heavy guns. */
 	public float shake;
@@ -69,6 +70,8 @@ public final class Combat {
 
 	/** Omega / Threat / Dweller weapon scripts, flare launchers and missile blasts (weapon scripts batch 2). */
 	public final ExoticWeapons exotic = new ExoticWeapons(this);
+	/** Wings and ships that systems and weapons put into the battle; the host spawns them (see SpawnRequest). */
+	public final List<SpawnRequest> spawnRequests = new ArrayList<>();
 
 	float rand() {
 		return rnd.nextFloat();
@@ -112,16 +115,17 @@ public final class Combat {
 			WeaponSpec3D w = m.spec;
 			if (m.flash > 0f) m.flash -= dt;
 			if (!w.supported) return;
-			if (w.maxAmmo > 0) m.ammo = Math.min(w.maxAmmo, m.ammo + w.ammoPerSecond * dt);
+			if (w.maxAmmo > 0) m.ammo = Math.min(w.maxAmmo, m.ammo + w.ammoPerSecond * dt * (w.kind != WeaponSpec3D.Kind.MISSILE ? s.sysAmmoRegenMult : 1f)); // Incursion Mode: x5 for guns
 			m.spread = Math.max(w.minSpread, m.spread - w.spreadDecay * dt);
 			boolean ballistic = "BALLISTIC".equals(w.type);
 			boolean lidarGun = lidarGun(s, m);
 			float rof = (ballistic ? s.sysBallisticRofMult : 1f) * (lidarGun ? s.sysLidarRofMult : 1f);
 			if (m.cooldownLeft > 0f) m.cooldownLeft -= dt * rof;
 			if (s.sysNoFire || s.phased) trigger = false; // a system forbids firing, or phased
+			if (s.sysFragmentVolley && !fragmentWeapon(w) && !w.pdOnly) trigger = false; // Fragment Volley: only fragment weapons fire
 			if (s.sysLidar > 0 && !lidarGun && w.kind != WeaponSpec3D.Kind.MISSILE) trigger = false; // Lidar Array: its guns only (missiles exempt)
 			if (s.flux != null && s.flux.disabled()) trigger = false; // overloaded or venting
-			if (trigger && !exotic.mayFire(s, w)) trigger = false; // too few fragments, too many Hungering Rifts out
+			if (trigger && !exotic.mayFire(s, m)) trigger = false; // too few fragments, too many Hungering Rifts out
 
 			aim(s, m, aimPoint, dt);
 			if (w.kind == WeaponSpec3D.Kind.BEAM) {
@@ -129,6 +133,7 @@ public final class Combat {
 				return;
 			}
 			pendingTarget = missileTarget;
+			pendingAim = aimPoint;
 
 			if (m.burstShotsLeft == 0 && m.chargeLeft < 0f && trigger && m.ready()) {
 				if (w.chargeTime > 0f) {
@@ -149,7 +154,7 @@ public final class Combat {
 			if (m.burstShotsLeft > 0) {
 				m.burstLeftTime -= dt * rof;
 				while (m.burstShotsLeft > 0 && m.burstLeftTime <= 0f) {
-					if (w.maxAmmo > 0 && m.ammo < 1f || !exotic.mayFire(s, w)
+					if (w.maxAmmo > 0 && m.ammo < 1f || !exotic.mayFire(s, m)
 							|| s.flux != null && !s.flux.spend(w.fluxPerShot * (ballistic ? s.sysBallisticFluxMult : 1f))) {
 						m.burstShotsLeft = 0; // out of ammo or fragments, or the shot would overflow flux
 						break;
@@ -186,7 +191,7 @@ public final class Combat {
 	public static boolean canReach(Ship3D s, WeaponMount m, Vec3 mountWorld, Vec3 point, float nearer, float padRadius, Tuning t, Vec3 tmp) {
 		Vec3 d = tmp.set(point).sub(mountWorld);
 		float dist = d.length();
-		if (dist - nearer > m.spec.range * t.weaponRangeMult * (lidarGun(s, m) ? s.sysLidarRangeMult : 1f)) return false;
+		if (dist - nearer > m.spec.range * t.weaponRangeMult * rangeMult(s, m)) return false;
 		if (dist < 1e-3f) return true;
 		if (m.spec.kind == WeaponSpec3D.Kind.MISSILE && m.spec.guided) return true; // launched along the barrel, then steer
 		s.rot.inverseRotate(d, d).scale(1f / dist);
@@ -200,6 +205,16 @@ public final class Combat {
 	}
 
 	/** A gun the Lidar Array boosts (and the only kind besides missiles it lets fire): hardpoint, ballistic or energy, not a beam. */
+	/** A system's range bonus for this mount: Lidar Array on its hardpoint guns, Fragment Volley x2 on fragment weapons. */
+	static float rangeMult(Ship3D s, WeaponMount m) {
+		return (lidarGun(s, m) ? s.sysLidarRangeMult : 1f) * (fragmentWeapon(m.spec) ? s.sysFragmentRangeMult : 1f);
+	}
+
+	/** A Threat fragment weapon fired by hand (not point defence): what Fragment Volley drives. */
+	public static boolean fragmentWeapon(WeaponSpec3D w) {
+		return w.fragmentsNeeded > 0 && !w.pdOnly && w.launchWing == null;
+	}
+
 	static boolean lidarGun(Ship3D s, WeaponMount m) {
 		WeaponSpec3D w = m.spec;
 		return s.sysLidar == 2 && m.hardpoint && w.kind == WeaponSpec3D.Kind.PROJECTILE && ("BALLISTIC".equals(w.type) || "ENERGY".equals(w.type));
@@ -289,6 +304,10 @@ public final class Combat {
 		Vec3 dir = s.rot.rotate(m.aimDir, new Vec3());
 		jitter(dir, (float) Math.toRadians(m.spread * 0.5f));
 		exotic.fired(s, w);
+		if (w.launchWing != null) { // Swarm Launcher, Churning Locus: a wing comes out instead of a shot
+			exotic.launchWing(s, m, dir);
+			return;
+		}
 		if (w.kind == WeaponSpec3D.Kind.MISSILE && !w.orb) {
 			launchMissile(s, m, dir);
 			return;
@@ -311,7 +330,9 @@ public final class Combat {
 			p.vel.set(dir).scale(w.projectileSpeed * (lidar ? s.sysLidarSpeedMult : 1f)).add(s.vel);
 			p.source = s;
 			p.spec = w;
-			p.maxRange = w.range * t.weaponRangeMult * (lidar ? s.sysLidarRangeMult : 1f);
+			p.maxRange = w.range * t.weaponRangeMult * rangeMult(s, m);
+			// Fused shells burst where their range runs out; some (Devastator) fall short by a random amount.
+			if (w.proxRangeVariance > 0f && rnd.nextFloat() < w.proxVarianceChance) p.maxRange *= 1f - w.proxRangeVariance * rnd.nextFloat();
 			p.damageMult = dmgMult;
 			projectiles.add(p);
 		}
@@ -334,7 +355,7 @@ public final class Combat {
 	 * takes it. With nothing there it crackles out ahead and fizzles.
 	 */
 	private void arcShot(Ship3D s, WeaponSpec3D w, Vec3 from, Vec3 dir, float dmgMult, Tuning t) {
-		float range = w.range * t.weaponRangeMult;
+		float range = w.range * t.weaponRangeMult * (fragmentWeapon(w) ? s.sysFragmentRangeMult : 1f);
 		float cos = (float) Math.cos(Math.toRadians(w.arcGunConeDeg * 0.5f));
 		Object best = null;
 		float bestD = Float.MAX_VALUE;
@@ -401,9 +422,11 @@ public final class Combat {
 		ms.source = s;
 		ms.owner = s.owner;
 		ms.target = w.guided && !w.flareLauncher ? pendingTarget : null;
+		if (w.guidance == WeaponSpec3D.Guidance.AIM_POINT && pendingAim != null) ms.aimPoint = new Vec3(pendingAim);
 		ms.hp = Math.max(1f, w.missileHp);
 		ms.spawnPos.set(ms.pos);
 		ms.damageMult = s.sysDamageMult;
+		if (fragmentWeapon(w)) ms.lifeMult *= s.sysFragmentRangeMult; // Fragment Volley: twice the reach
 		if (w.flareLauncher) { // a decoy: drifts, burns its flight time, lures enemy guided missiles
 			ms.flare = true;
 			flareLife.put(ms, Math.max(1f, w.flightTime));
@@ -682,6 +705,7 @@ public final class Combat {
 			WeaponSpec3D w = ms.spec;
 			ms.prev.set(ms.pos);
 			ms.age += dt;
+			if (!(w.guidance == WeaponSpec3D.Guidance.TWO_STAGE && ms.seek >= 0f)) ms.flight += dt; // a two-stage missile's clock starts when it burns
 			if (ms.hp <= 0f || !ms.alive) {
 				if (ms.alive) effects.add(new Effect(Effect.Kind.FLASH, ms.pos, w.missileRadius * 4f + 10f, 0.35f).color(1f, 0.7f, 0.4f));
 				ms.alive = false;
@@ -707,25 +731,24 @@ public final class Combat {
 						it.remove();
 						continue;
 					}
-				} else if (ms.age > w.flightTime * tuning.weaponRangeMult * ms.lifeMult // ranges are scaled in 3D; flight time with them, so missiles reach their range
+				} else if (ms.flight > w.flightTime * tuning.weaponRangeMult * ms.lifeMult // ranges are scaled in 3D; flight time with them, so missiles reach their range
 						|| w.fizzleAtRange && ms.spawnPos.distance(ms.pos) > w.range * tuning.weaponRangeMult) {
+					if (w.proxRange > 0f) { // a fused missile bursts where its flight ends (vanilla: canisters, proximity charges, unstable fragments)
+						detonate(w, ms.pos, ms.source, ms.owner, ms);
+						ms.alive = false;
+						it.remove();
+						continue;
+					}
 					ms.fade = 0f;
 				} else {
 					updateLure(ms, dt);
-					if (ms.lure != null) {
-						desired.set(ms.lure.pos).sub(ms.pos);
-						if (desired.lengthSq() > 1e-4f) rotateToward(ms.dir, desired.normalize(), (float) Math.toRadians(w.missileTurnRate) * dt);
-					} else if (ms.target != null && !ms.target.destroyed && !ms.target.phased) {
-						float speed = Math.max(w.missileMaxSpeed, ms.vel.length());
-						if (!interceptCurved(ms.pos, zero, ms.target.pos, ms.target.vel, ms.target.accel, speed, aim)) aim.set(ms.target.pos);
-						desired.set(aim).sub(ms.pos);
-						if (desired.lengthSq() > 1e-4f) rotateToward(ms.dir, desired.normalize(), (float) Math.toRadians(w.missileTurnRate) * dt);
+					if (steer(ms, dt)) {
+						// Push velocity toward nose * max speed, limited by the missile's acceleration.
+						desired.set(ms.dir).scale(w.missileMaxSpeed).sub(ms.vel);
+						float need = desired.length(), can = Math.max(1f, w.missileAccel) * dt;
+						if (need > can) desired.scale(can / need);
+						ms.vel.add(desired);
 					}
-					// Push velocity toward nose * max speed, limited by the missile's acceleration.
-					desired.set(ms.dir).scale(w.missileMaxSpeed).sub(ms.vel);
-					float need = desired.length(), can = Math.max(1f, w.missileAccel) * dt;
-					if (need > can) desired.scale(can / need);
-					ms.vel.add(desired);
 				}
 			} else {
 				ms.fade += dt;
@@ -748,8 +771,7 @@ public final class Combat {
 				it.remove();
 				continue;
 			}
-			if (w.mirvCount > 0 && w.mirvWarhead != null && ms.target != null && !ms.target.destroyed
-					&& ms.age >= w.mirvMinTime && ms.pos.distance(ms.target.pos) - ms.target.radius <= ms.splitAt) {
+			if (w.mirvCount > 0 && w.mirvWarhead != null && readyToSplit(ms)) {
 				split(ms);
 				ms.alive = false;
 				it.remove();
@@ -788,7 +810,7 @@ public final class Combat {
 				segmentHit(best, ms.prev, ms.pos, hit, local);
 				// Defabrication Swarm deals nothing up front on a hull: it eats in afterwards (missileImpact).
 				float[] dealt = w.dotTicks > 0 ? new float[2]
-						: dealDamage(ms.source, best, w.damage * ms.damageMult, w.damage * ms.damageMult * w.armorMult, w, local);
+						: dealDamage(ms.source, best, (w.damage + (best.fighter ? w.antiFighterDamage : 0f)) * ms.damageMult, w.damage * ms.damageMult * w.armorMult, w, local);
 				onHitEffects(ms.source, best, w, hit, local, false);
 				exotic.missileImpact(ms, best, hit, local, null, false);
 				push(best, hit, ms.vel, shotImpulse(w, w.damage));
@@ -837,6 +859,170 @@ public final class Combat {
 		initDem(ms);
 		missiles.add(ms);
 		return ms;
+	}
+
+	// ---- missile guidance (vanilla's missile AI by missile type) ----------------------------------
+
+	/** Two-stage missiles: lock on once the nose is this close to the lead (deg) after MIN seconds, or anyway after MAX. */
+	static final float TWO_STAGE_LOCK_DEG = 1f, TWO_STAGE_MIN_SEEK = 0.5f, TWO_STAGE_MAX_SEEK = 3f;
+	/** Heatseeker: goes in once within this angle of the target's tail (deg); circles this far beyond its hull (+ up to the random extra) until then. */
+	static final float HEATSEEKER_TAIL_DEG = 45f, HEATSEEKER_ORBIT = 225f, HEATSEEKER_ORBIT_RANDOM = 100f;
+	/** Aim-point missile: stops within this of its point. */
+	static final float AIM_POINT_STOP = 20f;
+
+	private final Vec3 gA = new Vec3(), gB = new Vec3(), gC = new Vec3(), gZero = new Vec3();
+
+	/**
+	 * Turns a missile's nose for this frame as its guidance says and returns whether its engine burns
+	 * (pushes it toward nose x max speed); false = it coasts, or brakes itself.
+	 */
+	private boolean steer(Missile3D ms, float dt) {
+		WeaponSpec3D w = ms.spec;
+		float turn = (float) Math.toRadians(w.missileTurnRate) * dt;
+		if (ms.headDir != null) {
+			ms.dir.set(ms.headDir);
+			return true;
+		}
+		if (ms.lure != null) {
+			turnToward(ms, ms.lure.pos, turn);
+			return true;
+		}
+		Ship3D tg = ms.target != null && !ms.target.destroyed && !ms.target.phased ? ms.target : null;
+		switch (w.guidance) {
+			case TWO_STAGE:
+				return twoStage(ms, tg, dt, turn);
+			case AIM_POINT:
+				return toAimPoint(ms, dt, turn);
+			case HEATSEEKER:
+				if (tg != null) heatseek(ms, tg, dt, turn);
+				return true;
+			default:
+				if (tg != null) {
+					float speed = Math.max(w.missileMaxSpeed, ms.vel.length());
+					// Closing on its split range, a MIRV leads for its warheads' speed (vanilla), so they come out on the lead.
+					if (w.mirvWarhead != null && warheadSpeed(w) > 1f && ms.pos.distance(tg.pos) - tg.radius < ms.splitAt + 100f) speed = warheadSpeed(w);
+					turnToward(ms, lead(ms, tg, speed, gA), turn);
+				}
+				return true;
+		}
+	}
+
+	private void turnToward(Missile3D ms, Vec3 point, float turn) {
+		Vec3 d = gB.set(point).sub(ms.pos);
+		if (d.lengthSq() > 1e-4f) rotateToward(ms.dir, d.normalize(), turn);
+	}
+
+	/** Where a missile flying at `speed` meets target tg (its position if it can't). */
+	private Vec3 lead(Missile3D ms, Ship3D tg, float speed, Vec3 out) {
+		if (!interceptCurved(ms.pos, gZero, tg.pos, tg.vel, tg.accel, speed, out)) out.set(tg.pos);
+		return out;
+	}
+
+	private static float warheadSpeed(WeaponSpec3D w) {
+		WeaponSpec3D h = w.mirvWarhead;
+		return Math.max(w.mirvSpreadSpeed, h.kind == WeaponSpec3D.Kind.MISSILE ? h.missileMaxSpeed : 0f);
+	}
+
+	/**
+	 * Vanilla's two-stage missile (Squall, Hurricane's warheads): no thrust and the flight clock held
+	 * while it turns its nose onto the lead; once on it (after half a second), or after 3 s, or if the
+	 * target is gone or phases, it locks that heading and burns straight, unguided, for its flight time.
+	 */
+	private boolean twoStage(Missile3D ms, Ship3D tg, float dt, float turn) {
+		if (ms.seek < 0f) return true; // locked: the nose stays where it was
+		if (tg == null) {
+			ms.seek = -1f;
+			return true;
+		}
+		ms.seek += dt;
+		Vec3 to = lead(ms, tg, ms.spec.missileMaxSpeed, gA).sub(ms.pos);
+		if (to.lengthSq() < 1e-4f) to.set(tg.pos).sub(ms.pos);
+		to.normalize();
+		float off = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, ms.dir.dot(to)))));
+		if (off < TWO_STAGE_LOCK_DEG && ms.seek > TWO_STAGE_MIN_SEEK || ms.seek > TWO_STAGE_MAX_SEEK) {
+			ms.seek = -1f;
+			return true;
+		}
+		rotateToward(ms.dir, to, turn);
+		return false;
+	}
+
+	/**
+	 * Vanilla's heatseeker (Salamander): unless it's already within 45 deg of the target's tail it
+	 * circles round the target (225-325 beyond its hull, swinging wide when inside that and in when
+	 * outside, a random 15-30 deg weave rerolled every 1-3 s) toward the tail, then goes straight in.
+	 * Fighters and station sections it goes straight for.
+	 */
+	private void heatseek(Missile3D ms, Ship3D tg, float dt, float turn) {
+		Vec3 r = gA.set(ms.pos).sub(tg.pos);
+		float dist = r.length();
+		if (!ms.finalApproach && dist > 1e-3f && !tg.fighter && tg.parent == null) {
+			r.scale(1f / dist);
+			Vec3 tail = tg.rot.forward(gB).scale(-1f);
+			float fromNose = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, -r.dot(tail)))));
+			if (fromNose <= 180f - HEATSEEKER_TAIL_DEG) {
+				ms.courseTimer -= dt;
+				if (ms.courseTimer <= 0f) {
+					ms.courseTimer = 1f + 2f * rnd.nextFloat();
+					ms.courseOffset = (15f + 15f * rnd.nextFloat()) * (rnd.nextBoolean() ? 1f : -1f);
+					if (ms.orbitExtra < 0f) ms.orbitExtra = HEATSEEKER_ORBIT_RANDOM * rnd.nextFloat();
+				}
+				float inside = tg.radius + HEATSEEKER_ORBIT + Math.max(0f, ms.orbitExtra) - dist;
+				float off = Math.min(90f, (180f + 35f - fromNose) * 0.5f) + Math.min(90f, Math.abs(inside) * 0.25f) * Math.signum(inside) + ms.courseOffset;
+				off = (float) Math.toRadians(Math.max(0f, Math.min(170f, off)));
+				// Round the hull toward the tail: the part of the tail direction square to the line to the target.
+				Vec3 round = gC.set(tail).addScaled(r, -r.dot(tail));
+				if (round.lengthSq() < 1e-4f) round.set(Math.abs(r.y) < 0.9f ? 0f : 1f, Math.abs(r.y) < 0.9f ? 1f : 0f, 0f).cross(r);
+				round.normalize();
+				Vec3 heading = gB.set(r).scale(-(float) Math.cos(off)).addScaled(round, (float) Math.sin(off)).normalize();
+				rotateToward(ms.dir, heading, turn);
+				return;
+			}
+		}
+		ms.finalApproach = true; // once in from the tail it stays on its run
+		turnToward(ms, lead(ms, tg, Math.max(ms.spec.missileMaxSpeed, ms.vel.length()), gA), turn);
+	}
+
+	/**
+	 * Vanilla's proximity charge: flies to the point it was aimed at and stops there (braking at its
+	 * acceleration), waiting for its fuse or the end of its flight. Without an aim point it drifts.
+	 */
+	private boolean toAimPoint(Missile3D ms, float dt, float turn) {
+		if (ms.aimPoint == null) return false;
+		Vec3 to = gA.set(ms.aimPoint).sub(ms.pos);
+		if (to.length() > AIM_POINT_STOP) {
+			rotateToward(ms.dir, to.normalize(), turn);
+			return true;
+		}
+		float speed = ms.vel.length(), brake = Math.max(1f, ms.spec.missileAccel) * dt;
+		ms.vel.scale(speed > brake ? (speed - brake) / speed : 0f);
+		return false;
+	}
+
+	/**
+	 * Vanilla's split rule: within split range of the target's hull after its minimum time (or sooner,
+	 * if it may split early and would get there before then), with its nose on the target: within the
+	 * fan's arc less 1.5 deg, or anywhere on the hull (Pilum, arc 0).
+	 */
+	private boolean readyToSplit(Missile3D ms) {
+		WeaponSpec3D w = ms.spec;
+		Ship3D tg = ms.target;
+		if (tg == null || tg.destroyed) return false;
+		Vec3 to = gA.set(tg.pos).sub(ms.pos);
+		float dist = to.length();
+		if (dist < 1e-3f) return true;
+		to.scale(1f / dist);
+		if (ms.age < w.mirvMinTime) {
+			if (!w.mirvSplitEarly || ms.age <= 1f) return false;
+			float closing = gB.set(ms.vel).sub(tg.vel).dot(to);
+			if (closing <= 10f) return false;
+			float eta = Math.max(0f, dist - tg.radius - 0.75f * w.mirvSplitRange) / closing;
+			if (eta >= w.mirvMinTime - ms.age) return false;
+		}
+		if (dist - tg.radius > ms.splitAt) return false;
+		float off = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, ms.dir.dot(to)))));
+		float hull = (float) Math.toDegrees(Math.atan2(tg.radius, dist));
+		return off <= Math.max(0f, w.mirvArcDeg - 1.5f) + hull;
 	}
 
 	/**
@@ -1144,7 +1330,7 @@ public final class Combat {
 			armor.strip(sector, armorDealt);
 		}
 		float overflow = toArmor > 0f ? Math.max(0f, toArmor - armorDealt) / toArmor : 1f;
-		float hullDealt = dmg * overflow * w.hullMult * reduction * target.hullTakenMult;
+		float hullDealt = dmg * overflow * w.hullMult * reduction * target.hullTakenMult * target.sysHullTakenMult; // Darkened Gaze: x2
 		target.hull = Math.max(0f, target.hull - hullDealt);
 		// EMP rides along in proportion to the damage (beams: EMP/s over dps; partial blasts scale too).
 		if (w.emp > 0f && w.damage > 0f && !arcInProgress) {
@@ -1282,6 +1468,7 @@ public final class Combat {
 	private void updateLure(Missile3D ms, float dt) {
 		if (ms.lure != null && (ms.lure.hp <= 0f || !missiles.contains(ms.lure))) ms.lure = null;
 		if (ms.flare || ms.lure != null || !ms.spec.guided || ms.spec.ignoresFlares) return;
+		if (ms.spec.guidance == WeaponSpec3D.Guidance.TWO_STAGE && ms.seek < 0f) return; // locked on and burning: unguided now
 		ms.lureCheck -= dt;
 		if (ms.lureCheck > 0f) return;
 		ms.lureCheck = 0.5f;
@@ -1347,6 +1534,35 @@ public final class Combat {
 	}
 
 	private static final WeaponSpec3D EMITTER = emitterSpec();
+
+	/**
+	 * One EMP arc from a point to a ship (Energy Lash): a raised shield in the way takes it (the
+	 * damage as flux), else it strikes the hull where it reaches: damage and EMP. Drawn as an arc
+	 * `width` wide in the given colours, after `delay` seconds.
+	 */
+	public void strikeArc(Ship3D source, Vec3 from, Ship3D t, float damage, float emp, float[] fringe, float width, float delay, String sound) {
+		Vec3 hit = new Vec3(), local = new Vec3(), sHit = new Vec3(), sDir = new Vec3();
+		float[] sT = new float[1];
+		Effect arc = new Effect(Effect.Kind.ARC, from, width, 0.35f).color(fringe[0], fringe[1], fringe[2]).delayed(delay);
+		arc.vel.set(t.vel);
+		Ship3D shielded = shieldOnSegment(List.of(t), from, t.pos, source, 2f, sHit, sDir, sT);
+		if (shielded != null) {
+			if (damage > 0f) shieldDamage(source, t, damage, EMITTER, false, sHit, sDir, true);
+			arc.end.set(sHit);
+		} else if (segmentHit(t, from, t.pos, hit, local) >= 0f) {
+			if (damage > 0f) {
+				float[] dealt = dealDamage(source, t, damage, damage, EMITTER, local);
+				tally(source, t, hit, dealt[0] + dealt[1], dealt[1] > 0.5f, dealt[0] > 0.5f);
+			}
+			if (emp > 0f) empHit(t, local, emp, from);
+			arc.end.set(hit);
+			if (t.hull <= 0f && !t.destroyed) destroy(t);
+		} else {
+			arc.end.set(t.pos);
+		}
+		effects.add(arc);
+		if (sound != null) effects.add(new Effect(Effect.Kind.FLASH, arc.end, width * 2f, 0.2f).color(fringe[0], fringe[1], fringe[2]).delayed(delay).withSound(sound, 1f));
+	}
 
 	private static WeaponSpec3D emitterSpec() {
 		WeaponSpec3D w = new WeaponSpec3D();
@@ -1463,7 +1679,11 @@ public final class Combat {
 
 	// ---- proximity fuses and splitting missiles ---------------------------------------------
 
-	/** An enemy missile (not self) or enemy fighter within range of a fused shot. */
+	/**
+	 * An enemy missile (not self), enemy fighter, or enemy ship's hull within range of a fused shot
+	 * (vanilla's fuse goes off by ships too: flak bursts just short of a hull, a proximity charge as
+	 * one passes).
+	 */
 	private boolean proximityTrigger(Vec3 at, float range, int owner, Missile3D self) {
 		for (Missile3D ms : missiles) {
 			if (ms == self || ms.owner == owner || ms.flamedOut() || ms.hp <= 0f) continue;
@@ -1471,9 +1691,14 @@ public final class Combat {
 			if (dist2(ms.pos, at) <= r * r) return true;
 		}
 		for (Ship3D s : world) {
-			if (!s.fighter || s.destroyed || s.phased || s.owner == owner) continue;
-			float r = range + s.radius * 0.7f;
-			if (dist2(s.pos, at) <= r * r) return true;
+			if (s.destroyed || s.phased || s.owner == owner) continue;
+			if (s.fighter) {
+				float r = range + s.radius * 0.7f;
+				if (dist2(s.pos, at) <= r * r) return true;
+				continue;
+			}
+			float r = range + s.radius * 1.15f + 2f; // bounding sphere first, the hull's shape only when that's close
+			if (dist2(s.pos, at) <= r * r && s.surfaceDistance(at) <= range) return true;
 		}
 		return false;
 	}
@@ -1534,9 +1759,12 @@ public final class Combat {
 	}
 
 	/**
-	 * Splitting missile: warheads fan out (round the arc offset from the lead direction: Hydra's spill
-	 * out backwards and turn in). Shell warheads fly straight; missile warheads (Pilum's second stage,
-	 * Hydra's DEM warheads) fly on under their own guidance at the same target.
+	 * Splitting missile: warheads fan out (round the arc offset from the lead direction: Hydra's and
+	 * Hurricane's spill out backwards), evenly over the arc or at random in it, plus the behaviour's
+	 * scatter. Shell warheads fly straight. Missile warheads come out facing the target, as vanilla
+	 * spawns them, drifting along the fan, and go after the same target under their own guidance:
+	 * Pilum's second stage homes, Hydra's DEM warheads swing round and attack, Hurricane's (two-stage)
+	 * line up from where the fan took them, lock on and burn in.
 	 */
 	private void split(Missile3D ms) {
 		WeaponSpec3D w = ms.spec, h = w.mirvWarhead;
@@ -1550,10 +1778,13 @@ public final class Combat {
 		if (off != 0f) dir.scale((float) Math.cos(off)).addScaled(side, (float) Math.sin(off)).normalize();
 		side.set(Math.abs(dir.y) < 0.9f ? 0f : 1f, Math.abs(dir.y) < 0.9f ? 1f : 0f, 0f).cross(dir).normalize();
 		float arc = (float) Math.toRadians(w.mirvArcDeg);
+		Vec3 facing = new Vec3(ms.target.pos).sub(ms.pos);
+		if (facing.lengthSq() < 1e-4f) facing.set(ms.dir);
+		facing.normalize();
 		for (int i = 0; i < w.mirvCount; i++) {
-			float a = w.mirvCount == 1 ? 0f : -arc * 0.5f + arc * i / (w.mirvCount - 1);
+			float a = !w.mirvEvenSpread ? arc * (rnd.nextFloat() - 0.5f) : w.mirvCount == 1 ? 0f : -arc * 0.5f + arc * i / (w.mirvCount - 1);
 			Vec3 d = new Vec3(dir).scale((float) Math.cos(a)).addScaled(side, (float) Math.sin(a)).normalize();
-			jitter(d, (float) Math.toRadians(2f));
+			if (w.mirvInaccuracyDeg > 0f) jitter(d, (float) Math.toRadians(w.mirvInaccuracyDeg * 0.5f));
 			float speed = (missile ? w.mirvSpreadSpeed : h.projectileSpeed) + rnd.nextFloat() * w.mirvSpreadSpeedRandom;
 			if (missile) {
 				Missile3D wm = new Missile3D();
@@ -1565,7 +1796,7 @@ public final class Combat {
 				wm.pos.set(ms.pos);
 				wm.prev.set(ms.pos);
 				wm.spawnPos.set(ms.pos);
-				wm.dir.set(speed > 1f ? d : dir);
+				wm.dir.set(facing);
 				wm.vel.set(d).scale(speed).add(ms.vel);
 				initDem(wm);
 				spawned.add(wm);
@@ -1771,6 +2002,7 @@ public final class Combat {
 				applyHit(best, p, hit, localOut);
 				it.remove();
 			} else if (p.distanceFromOrigin() > p.maxRange) {
+				if (p.spec.proxRange > 0f) detonate(p.spec, p.pos, p.source, pOwner, null); // a fused shell bursts where its range runs out (vanilla flak)
 				it.remove();
 			}
 		}
@@ -1868,6 +2100,7 @@ public final class Combat {
 		s.angVel.set((rnd.nextFloat() - 0.5f) * 0.6f, (rnd.nextFloat() - 0.5f) * 0.6f, (rnd.nextFloat() - 0.5f) * 0.6f);
 		sounds.play("explosion_ship", s.pos, s.fighter ? 0.4f : 1.2f);
 		blast(s.pos, s.radius * 2.5f, s);
+		if (s.deathBlast != null) areaBlast(s.deathBlast, s.pos, s, s.owner, s); // ejecta, vortices: 2000 energy on enemies only
 		if (numbersFor != null && s.lastHitBy == numbersFor && s.owner != numbersFor.owner) {
 			lastKillAt = clock;
 			lastKillShip = !s.fighter;
@@ -2087,6 +2320,11 @@ public final class Combat {
 	}
 
 	private void jitter(Vec3 dir, float halfAngle) {
+		jitterDir(dir, halfAngle, rnd);
+	}
+
+	/** Turns a unit direction by a random amount within halfAngle (radians), spread evenly over the cone's face. */
+	static void jitterDir(Vec3 dir, float halfAngle, Random rnd) {
 		if (halfAngle <= 0f) return;
 		Vec3 a = Math.abs(dir.y) < 0.9f ? new Vec3(0, 1, 0) : new Vec3(1, 0, 0);
 		Vec3 u = new Vec3(a).cross(dir).normalize();
@@ -2094,5 +2332,10 @@ public final class Combat {
 		double r = Math.sqrt(rnd.nextDouble()) * Math.tan(halfAngle);
 		double th = rnd.nextDouble() * Math.PI * 2;
 		dir.addScaled(u, (float) (r * Math.cos(th))).addScaled(v, (float) (r * Math.sin(th))).normalize();
+	}
+
+	/** The battle's random numbers (seeded by the bench), for helpers outside this class. */
+	Random randomSource() {
+		return rnd;
 	}
 }

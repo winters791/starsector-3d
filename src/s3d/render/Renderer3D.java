@@ -39,6 +39,8 @@ public final class Renderer3D {
 	private static final Logger log = Global.getLogger(Renderer3D.class);
 
 	private Shader shipShader, fxShader, skyShader, starShader, shieldShader, holoShader, auraShader;
+	/** Threat fragment swarms and Shrouded shrouds round their ships. */
+	private final CloudRenderer clouds = new CloudRenderer();
 	/** Jitter copies get fresh random offsets every frame, as vanilla's do. */
 	private final Random jitterRnd = new Random();
 	private Mesh stars;
@@ -199,6 +201,10 @@ public final class Renderer3D {
 		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
 		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex); // keeps the fx sampler bound to something valid
 		drawSystemLooks(sim);
+		clouds.draw(sim, fxShader);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex);
+		fxShader.use().set("u_vp", cam.viewProj).set("u_tex", 0);
+		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
 		drawShields(sim);
 		fxShader.use().set("u_vp", cam.viewProj).set("u_tex", 0);
 		drawEngines(sim);
@@ -308,6 +314,7 @@ public final class Renderer3D {
 		Quat q = new Quat(), bank = new Quat();
 		java.util.List<Ship3D> ghosts = null;
 		for (Ship3D s : sim.ships) {
+			if (s.noHull) continue; // attack / construction swarms: only their swarm is drawn
 			if (s.phaseLevel > 0.01f) {
 				// Phased ships are drawn afterwards, see-through.
 				if (ghosts == null) ghosts = new java.util.ArrayList<>();
@@ -414,6 +421,7 @@ public final class Renderer3D {
 		fxShader.set("u_mode", 1);
 		GL11.glBegin(GL11.GL_QUADS);
 		for (Ship3D s : sim.ships) {
+			if (s.noHull) continue;
 			engineLook(s, look);
 			for (int ei = 0; ei < s.engines.size(); ei++) {
 				if (s.engineDown != null && ei < s.engineDown.length && s.engineDown[ei] > 0f) continue; // knocked out by EMP
@@ -427,6 +435,7 @@ public final class Renderer3D {
 		GL11.glBegin(GL11.GL_QUADS);
 		Vec3 p = new Vec3();
 		for (Ship3D s : sim.ships) {
+			if (s.noHull) continue;
 			engineLook(s, look);
 			float thrust = Math.min(1f, s.thrustVisual);
 			float glowA = (float) Math.pow(look[2], 0.6);
@@ -528,7 +537,8 @@ public final class Renderer3D {
 		for (Ship3D s : sim.ships) {
 			if (s.destroyed) continue;
 			ShipSystem3D sys = s.system;
-			boolean own = sys != null && sys.effect > 0f && sys.supported();
+			boolean afterglow = sys != null && sys.orion != null && sys.look.jitterAfterUse > 0f && sys.orion.sinceDetonation < sys.look.jitterAfterUse;
+			boolean own = sys != null && sys.supported() && (sys.effect > 0f || afterglow);
 			ShipSystem3D carrierSys = s.fighter && s.carrier != null && !s.carrier.destroyed ? s.carrier.system : null;
 			boolean fromCarrier = carrierSys != null && carrierSys.effect > 0f && (carrierSys.look.fighterJitter != null || carrierSys.look.fighterJitterUnder != null || carrierSys.look.fighterWeaponGlow != null);
 			float[] tj = targetJitter != null ? targetJitter.get(s) : null;
@@ -546,6 +556,7 @@ public final class Renderer3D {
 			if (own) {
 				SystemLook l = sys.look;
 				float lev = l.jitterLevel(sys), grow = l.jitterGrow * sys.effect;
+				if (l.jitterShrinkIn > 0f && sys.state == ShipSystem3D.State.IN) grow += (1f - sys.effect * sys.effect) * l.jitterShrinkIn; // Energy Lash gathering in
 				if (l.jitterUnder != null && l.jitterUnderCopies > 0) {
 					jitter(sim, m, s, q, l.jitterUnder, lev, l.jitterUnderCopies, l.jitterUnderMin, l.jitterUnderRange + l.jitterUnderRadiusFraction * px + grow, true, camR, camU, camF);
 				}
@@ -657,6 +668,7 @@ public final class Renderer3D {
 	}
 
 	private static boolean glows(SystemLook l, WeaponMount mt) {
+		if (l.glowFragmentWeapons) return s3d.core.Combat.fragmentWeapon(mt.spec);
 		if (l.glowLidarHardpoints) {
 			return mt.hardpoint && mt.spec.kind != s3d.core.WeaponSpec3D.Kind.BEAM && ("BALLISTIC".equals(mt.spec.type) || "ENERGY".equals(mt.spec.type));
 		}
@@ -923,6 +935,11 @@ public final class Renderer3D {
 				WeaponSpec3D w = m.spec;
 				beamRibbon(cam, m.worldPos(s, o), m.beamEnd, w.beamWidth * (0.35f + 0.65f * m.beamLevel), w.fringeColor, w.coreColor, m.beamLevel);
 			}
+			for (WeaponMount m : s.gazeBeams) { // Darkened Gaze
+				if (m.beamLevel <= 0f) continue;
+				WeaponSpec3D w = m.spec;
+				beamRibbon(cam, m.worldPos(s, o), m.beamEnd, w.beamWidth * (0.35f + 0.65f * m.beamLevel), w.fringeColor, w.coreColor, m.beamLevel);
+			}
 		}
 		for (Combat.PayloadBeam pb : payloads) {
 			WeaponMount m = pb.mount;
@@ -1041,11 +1058,15 @@ public final class Renderer3D {
 				case FLASH: size = e.size * (0.6f + 0.4f * age); alpha = (float) Math.pow(1f - age, 1.5); break;
 				case SPARK: size = e.size * (1f + age); alpha = (1f - age) * (1f - age); break;
 				case EXPLOSION: size = e.size * (0.3f + (float) Math.sqrt(age)); alpha = (float) Math.pow(1f - age, 1.2); break;
+				case NEBULA: // vanilla's nebula particle: fades in, holds, fades out, growing all the while
+					size = e.size * (1f + (e.grow - 1f) * age);
+					alpha = age < 0.1f ? age / 0.1f : age < 0.5f ? 1f : 1f - (age - 0.5f) / 0.5f;
+					break;
 				default: continue;
 			}
 			GL11.glColor4f(e.r, e.g, e.b, alpha);
 			quad(e.pos, camR, camU, size);
-			if (e.kind != Effect.Kind.FLASH) {
+			if (e.kind != Effect.Kind.FLASH && e.kind != Effect.Kind.NEBULA) {
 				GL11.glColor4f(1f, 0.95f, 0.85f, alpha * 0.8f);
 				quad(e.pos, camR, camU, size * 0.35f);
 			}
@@ -1111,7 +1132,7 @@ public final class Renderer3D {
 		GL14.glBlendEquation(GL14.GL_FUNC_ADD);
 	}
 
-	private static void quad(Vec3 c, Vec3 r, Vec3 u, float s) {
+	static void quad(Vec3 c, Vec3 r, Vec3 u, float s) {
 		GL11.glTexCoord2f(0, 0); GL11.glVertex3f(c.x - r.x * s - u.x * s, c.y - r.y * s - u.y * s, c.z - r.z * s - u.z * s);
 		GL11.glTexCoord2f(1, 0); GL11.glVertex3f(c.x + r.x * s - u.x * s, c.y + r.y * s - u.y * s, c.z + r.z * s - u.z * s);
 		GL11.glTexCoord2f(1, 1); GL11.glVertex3f(c.x + r.x * s + u.x * s, c.y + r.y * s + u.y * s, c.z + r.z * s + u.z * s);

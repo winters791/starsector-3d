@@ -111,7 +111,7 @@ final class Shaders {
 			}
 			""";
 
-	/** Modes: 0 vertex colour, 1 engine flame, 2 radial glow, 3 text, 4 texture copy, 5 projectile streak, 6 beam (core = secondary colour), 8 shockwave ring. */
+	/** Modes: 0 vertex colour, 1 engine flame, 2 radial glow, 3 text, 4 texture copy, 5 projectile streak, 6 beam (core = secondary colour), 8 shockwave ring, 9 soft puff (real alpha), 10 tinted sprite (real alpha). */
 	static final String FX_FS = """
 			#version 120
 			uniform int u_mode;
@@ -136,6 +136,16 @@ final class Shaders {
 					float tail = pow(1.0 - along, 1.2);
 					vec3 c = (v_col.rgb * fringe + v_col2.rgb * core * 1.4) * tail;
 					gl_FragColor = vec4(c * v_col.a, 1.0);
+				} else if (u_mode == 10) {
+					// A sprite (sheet cell) tinted by the vertex colour, with its own alpha: swarm pieces, hit glows.
+					vec4 t = texture2D(u_tex, v_uv);
+					gl_FragColor = vec4(t.rgb * v_col.rgb, t.a * v_col.a);
+				} else if (u_mode == 9) {
+					// Soft puff with real alpha (blended normally): the shroud's dark murk.
+					vec2 d = v_uv * 2.0 - 1.0;
+					float r2 = dot(d, d);
+					float a = exp(-r2 * 3.0) * (1.0 - smoothstep(0.75, 1.0, r2));
+					gl_FragColor = vec4(v_col.rgb, a * v_col.a);
 				} else if (u_mode == 8) {
 					vec2 d = v_uv * 2.0 - 1.0;
 					float r = length(d);

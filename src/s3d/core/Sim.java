@@ -370,6 +370,7 @@ public final class Sim {
 			}
 			if (s.flux != null) {
 				s.flux.noDissipation = s.sysNoDissipation;
+				s.flux.dissipationMult = s.sysDissipationMult;
 				s.flux.forceUp = s.sysForceShield;
 				s.flux.blocked = s.sysNoShield || s.phased;
 			}

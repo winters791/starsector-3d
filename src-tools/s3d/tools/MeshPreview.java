@@ -61,6 +61,11 @@ public final class MeshPreview {
 		Map<String, GameData.Hull> hulls = GameData.hulls(game);
 		Renderer3D renderer = new Renderer3D();
 		renderer.init();
+		String settings = new String(java.nio.file.Files.readAllBytes(new File(game, "data/config/settings.json").toPath()), java.nio.charset.StandardCharsets.UTF_8);
+		s3d.render.FxSprites.loader = (category, key) -> { // vanilla's sprite sheets, by their settings.json key
+			java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"").matcher(settings);
+			return m.find() ? new SpriteImage(ImageIO.read(new File(game, m.group(1)))) : null;
+		};
 		int[] out = createCaptureTarget(VW, VH);
 		File dir = new File(build, "preview");
 		dir.mkdirs();
@@ -71,6 +76,11 @@ public final class MeshPreview {
 		}
 		if ("systemFx".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=systemFx ./build.sh preview
 			systemFxScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("exoticFx".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=exoticFx ./build.sh preview
+			exoticFxScene(game, hulls, t, renderer, dir);
 			if (!pbuffer) Display.destroy();
 			return;
 		}
@@ -717,6 +727,190 @@ public final class MeshPreview {
 	 * One tile per look: venting, overload, then each system kind running (and a displacer blink),
 	 * after a second of battle time so particles have built up: system_fx.png.
 	 */
+	/** Threat and Shrouded looks: fragment swarms, lashes, swarms, the shroud and its systems, motes. One tile each. */
+	private static void exoticFxScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 960, h = 600;
+		int[] target = createCaptureTarget(w, h);
+		String[] tiles = {"THREAT FRAGMENT SWARM", "ENERGY LASH -> FRIENDLY", "ENERGY LASH -> ENEMY (EMP)", "FRAGMENT VOLLEY",
+				"INCURSION MODE", "ATTACK SWARM", "CONSTRUCTION SWARM", "SHROUDED TENDRIL", "CONVULSIVE LUNGE (charging)", "DARKENED GAZE",
+				"TENEBROUS EXPULSION", "SHROUDED VORTEX", "MOTES (flocking)", "MOTES (attractor)"};
+		java.util.List<BufferedImage> frames = new java.util.ArrayList<>();
+		for (String label : tiles) {
+			Sim sim = new Sim(t);
+			PilotInput in = new PilotInput();
+			in.screenW = w;
+			in.screenH = h;
+			in.mouseX = w * 0.5f;
+			in.mouseY = h * 0.5f;
+			String hullId;
+			switch (label) {
+				case "THREAT FRAGMENT SWARM": case "INCURSION MODE": hullId = "assault_unit"; break;
+				case "ENERGY LASH -> FRIENDLY": case "ENERGY LASH -> ENEMY (EMP)": hullId = "overseer_unit"; break;
+				case "FRAGMENT VOLLEY": hullId = "standoff_unit"; break;
+				case "ATTACK SWARM": hullId = "hive_unit"; break;
+				case "CONSTRUCTION SWARM": hullId = "fabricator_unit"; break;
+				case "SHROUDED TENDRIL": case "CONVULSIVE LUNGE (charging)": hullId = "shrouded_tendril"; break;
+				case "DARKENED GAZE": hullId = "shrouded_eye"; break;
+				case "TENEBROUS EXPULSION": hullId = "shrouded_maelstrom"; break;
+				case "SHROUDED VORTEX": hullId = "wolf"; break;
+				default: hullId = "ziggurat";
+			}
+			Ship3D p = exoticShip(game, hulls, t, sim, hullId, 0);
+			sim.setPlayer(p);
+			p.throttle = 0.3f;
+			boolean threat = hullId.endsWith("_unit");
+			if (threat) { // vanilla's base swarm by hull size
+				String sc = String.valueOf(p.sizeClass).toUpperCase();
+				p.fragments = new s3d.core.FragmentSwarm(sc.contains("CAPITAL") ? 100 : sc.contains("CRUISER") ? 60 : sc.contains("DESTROYER") ? 40 : 20, 0f);
+			}
+			if (hullId.startsWith("shrouded_")) p.shrouded = true;
+			float run = 1.2f;
+			switch (label) {
+				case "ENERGY LASH -> FRIENDLY": case "ENERGY LASH -> ENEMY (EMP)": {
+					boolean friendly = label.contains("FRIENDLY");
+					Ship3D o = exoticShip(game, hulls, t, sim, friendly ? "assault_unit" : "enforcer", friendly ? 0 : 1);
+					o.pos.set(220f, 40f, -650f);
+					if (friendly) {
+						o.fragments = new s3d.core.FragmentSwarm(40, 0f);
+						o.system = CombatBench.system("incursion_mode", 1f, 15f, 1f, 0f, 1, 0f);
+						o.system.ammo = 0f;
+					}
+					p.system = CombatBench.system("energy_lash", 1f, 0f, 0.1f, 0f, 0, 0f);
+					p.system.range = 1500f;
+					sim.update(in, 1f / 60f, 1f / 60f);
+					p.system.ex.lashPick = o;
+					p.system.activate(p);
+					run = 1.1f;
+					break;
+				}
+				case "FRAGMENT VOLLEY": case "INCURSION MODE": {
+					p.system = CombatBench.system(label.equals("FRAGMENT VOLLEY") ? "fragment_volley" : "incursion_mode", 1f, 15f, 1f, 0f, 1, 0f);
+					sim.update(in, 1f / 60f, 1f / 60f);
+					p.system.lashed(p);
+					run = 1.4f;
+					break;
+				}
+				case "ATTACK SWARM": case "CONSTRUCTION SWARM": {
+					boolean build = label.startsWith("CONSTRUCTION");
+					Ship3D sw = exoticShip(game, hulls, t, sim, "attack_swarm", 0);
+					sw.noHull = true;
+					sw.fighter = true;
+					sw.fragments = new s3d.core.FragmentSwarm(build ? 80 : 50, 0f);
+					sw.behaviour = build ? Ship3D.Behaviour.CONSTRUCTION : null;
+					sw.pos.set(0f, 40f, -420f);
+					if (build) {
+						sw.swarmLook = s3d.core.SwarmLook.swarm(80, 50f * 2f);
+						sw.swarmLook.flashFringe = new float[] {0.51f, 0.61f, 0.57f, 1f};
+						sw.buildLeft = sw.buildTotal = 30f;
+						sw.buildVariant = "skirmish_unit_Type100";
+						sw.ai = new s3d.core.ShipAI3D(3);
+						sw.ai.profile(sw, t);
+					}
+					break;
+				}
+				case "CONVULSIVE LUNGE (charging)":
+					p.system = CombatBench.system("convulsive_lunge", 2f, 3f, 0.5f, 0f, 0, 0f);
+					sim.update(in, 1f / 60f, 1f / 60f);
+					p.system.activate(p);
+					run = 1.6f;
+					break;
+				case "DARKENED GAZE": {
+					p.system = CombatBench.system("darkened_gaze", 2f, 0f, 1f, 0f, 0, 0f);
+					p.system.toggle = true;
+					s3d.core.WeaponSpec3D gb = CombatBench.beam(100f, false);
+					gb.range = 1000f;
+					gb.beamWidth = 20f;
+					gb.coreColor = new float[] {1f, 0.8f, 0.8f};
+					gb.fringeColor = new float[] {0.6f, 0f, 0.12f};
+					p.gazeBeams.add(new s3d.core.WeaponMount("G", gb, new Vec3(0f, 10f, -p.radius * 0.4f), new Vec3(0, 0, -1), 5f, true));
+					sim.update(in, 1f / 60f, 1f / 60f);
+					p.system.activate(p);
+					run = 2.6f;
+					break;
+				}
+				case "TENEBROUS EXPULSION":
+					for (int i = 0; i < 6; i++) {
+						Ship3D e = exoticShip(game, hulls, t, sim, "shrouded_ejecta", 0);
+						e.shrouded = true;
+						e.behaviour = Ship3D.Behaviour.EJECTA;
+						e.ai = new s3d.core.ShipAI3D(10 + i);
+						e.ai.profile(e, t);
+						double a = (i - 2.5) * 0.25;
+						e.pos.set((float) Math.sin(a) * (350f + 60f * i), 20f * (i % 3), -(float) Math.cos(a) * (350f + 60f * i) - p.radius * 0.5f);
+						e.vel.set((float) Math.sin(a) * 60f, 0f, -(float) Math.cos(a) * 60f);
+					}
+					run = 0.8f;
+					break;
+				case "SHROUDED VORTEX": {
+					Ship3D v = exoticShip(game, hulls, t, sim, "shrouded_vortex", 1);
+					v.shrouded = true;
+					v.behaviour = Ship3D.Behaviour.VORTEX;
+					v.ai = new s3d.core.ShipAI3D(20);
+					v.ai.profile(v, t);
+					v.pos.set(0f, 30f, -700f);
+					run = 0.8f;
+					break;
+				}
+				case "MOTES (flocking)": case "MOTES (attractor)": {
+					p.system = CombatBench.system("mote_control", 0.1f, 0f, 0.4f, 0f, 0, 0f);
+					s3d.core.WeaponSpec3D mote = CombatBench.launcher(true);
+					mote.missileMaxSpeed = 400f;
+					mote.missileAccel = 650f;
+					mote.launchSpeed = 200f;
+					mote.flightTime = 1e6f;
+					mote.missileRadius = 11f;
+					mote.missileGlow = new float[] {0.39f, 0.65f, 1f};
+					p.system.motes.mote = mote;
+					run = 7f;
+					break;
+				}
+				default:
+			}
+			for (float tt = 0f; tt < run; tt += 1f / 60f) sim.update(in, 1f / 60f, 1f / 60f);
+			if (label.equals("MOTES (attractor)")) {
+				p.system.activate(p);
+				for (float tt = 0f; tt < 1.6f; tt += 1f / 60f) sim.update(in, 1f / 60f, 1f / 60f);
+			}
+			renderer.renderScene(sim, w, h, target[0]);
+			frames.add(read(w, h));
+		}
+		BufferedImage grid = gridOf(frames, 4, new float[tiles.length]);
+		java.awt.Graphics2D g = grid.createGraphics();
+		int fw = w / 2, fh = h / 2;
+		for (int i = 0; i < tiles.length; i++) {
+			g.setColor(java.awt.Color.BLACK);
+			g.fillRect((i % 4) * fw, (i / 4) * fh, fw, 22);
+			g.setColor(java.awt.Color.WHITE);
+			g.drawString(tiles[i], (i % 4) * fw + 8, (i / 4) * fh + 16);
+		}
+		g.dispose();
+		ImageIO.write(grid, "png", new File(dir, "exotic_fx.png"));
+		System.out.println("wrote exotic_fx.png");
+	}
+
+	private static Ship3D exoticShip(File game, Map<String, GameData.Hull> hulls, Tuning t, Sim sim, String hullId, int owner) throws Exception {
+		Ship3D s = makeShip(game, hulls.get(hullId), t, hullId);
+		s.owner = owner;
+		sim.addShip(s);
+		s.volume = ShipModel.geometry((ShipModel.Source) s.modelSource, t).volume;
+		s.flux = CombatBench.flux(hulls.get(hullId), t);
+		if (hullId.startsWith("shrouded_")) {
+			// The hull's shroud as vanilla's ship creators size it (in game they're read from the live shroud).
+			s.shrouded = true;
+			s3d.core.SwarmLook l = s3d.core.SwarmLook.shroud();
+			switch (hullId) {
+				case "shrouded_tendril": l.members = 70; l.maxOffset = 80f; l.darkArea = 1.25f; break;
+				case "shrouded_eye": l.maxOffset = 130f; l.darkClearCentre = 50f; break;
+				case "shrouded_maelstrom": l.members = 200; l.maxOffset = 250f; l.flashPerSecond *= 2f; break;
+				case "shrouded_ejecta": l.members = 30; l.maxOffset = 120f; l.darkBatch = 3; l.darkHighContrast = true; l.darkSize = 1.5f; break;
+				case "shrouded_vortex": l.members = 30; l.maxOffset = 50f; l.darkArea = 1.25f; break;
+				default:
+			}
+			s.swarmLook = l;
+		}
+		return s;
+	}
+
 	private static void systemFxScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
 		int w = 960, h = 600;
 		int[] target = createCaptureTarget(w, h);
@@ -726,6 +920,8 @@ public final class MeshPreview {
 				{"DAMPER FIELD", "eagle", Kind.DAMPER}, {"TEMPORAL SHELL", "eagle", Kind.TEMPORAL_SHELL}, {"FORTRESS SHIELD", "eagle", Kind.FORTRESS_SHIELD},
 				{"PHASE CLOAK", "eagle", Kind.PHASE_CLOAK}, {"HIGH ENERGY FOCUS", "eagle", Kind.HIGH_ENERGY_FOCUS}, {"AMMO FEED", "eagle", Kind.AMMO_FEED},
 				{"ENTROPY AMPLIFIER (target red)", "eagle", Kind.ENTROPY_AMPLIFIER}, {"MINE STRIKE", "eagle", Kind.MINE_STRIKE}, {"EMP EMITTER", "eagle", Kind.EMP_EMITTER},
+				{"COMBAT BURN", "onslaught", Kind.COMBAT_BURN}, {"ORION DEVICE (first jolt)", "retribution", Kind.ORION_DEVICE},
+				{"NOVA BURST", "retribution", Kind.NOVA_BURST}, {"QUANTUM DISRUPTOR (target pink)", "eagle", Kind.ACAUSAL_DISRUPTOR},
 		};
 		java.util.List<BufferedImage> frames = new java.util.ArrayList<>();
 		String[] labels = new String[tiles.length];
@@ -743,12 +939,17 @@ public final class MeshPreview {
 			sim.setPlayer(p);
 			p.throttle = 0.4f;
 			Ship3D enemy = null;
-			if (kind == Kind.ENTROPY_AMPLIFIER || kind == Kind.EMP_EMITTER) {
+			if (kind == Kind.ENTROPY_AMPLIFIER || kind == Kind.EMP_EMITTER || kind == Kind.ACAUSAL_DISRUPTOR) {
 				enemy = makeShip(game, hulls.get("enforcer"), t, "enforcer");
 				enemy.owner = 1;
 				sim.addShip(enemy);
 				enemy.volume = ShipModel.geometry((ShipModel.Source) enemy.modelSource, t).volume;
-				enemy.pos.set(250f, 60f, kind == Kind.EMP_EMITTER ? -500f : -900f);
+				enemy.pos.set(250f, 60f, kind == Kind.ENTROPY_AMPLIFIER ? -900f : -500f);
+				if (kind == Kind.ACAUSAL_DISRUPTOR) {
+					enemy.flux = CombatBench.flux(hulls.get("enforcer"), t);
+					enemy.flux.disrupt(30f);
+					enemy.overloadTint = new float[] {1f, 0.61f, 1f};
+				}
 			}
 			if ("VENTING".equals(label)) {
 				p.flux.flux = p.flux.maxFlux * 0.8f;
@@ -757,7 +958,7 @@ public final class MeshPreview {
 				p.flux.overloadLeft = 20f;
 			} else if (kind != null) {
 				s3d.core.ShipSystem3D sys = new s3d.core.ShipSystem3D(kind.name().toLowerCase(), label, kind);
-				boolean charging = kind == Kind.DISPLACER || kind == Kind.PHASE_TELEPORTER;
+				boolean charging = kind == Kind.DISPLACER || kind == Kind.PHASE_TELEPORTER || kind == Kind.ACAUSAL_DISRUPTOR;
 				sys.active = 60f;
 				sys.chargeUp = charging ? 10f : 0.2f;
 				sys.state = charging ? s3d.core.ShipSystem3D.State.IN : s3d.core.ShipSystem3D.State.ACTIVE;
@@ -768,6 +969,16 @@ public final class MeshPreview {
 				sys.damage = 50f;
 				sys.empDamage = 100f;
 				if (kind == Kind.FORTRESS_SHIELD) p.flux.shieldOn = true;
+				if (kind == Kind.ORION_DEVICE || kind == Kind.NOVA_BURST) { // fired for real: the drop, then the blast
+					sys.state = s3d.core.ShipSystem3D.State.IDLE;
+					sys.effect = 0f;
+					sys.chargeUp = kind == Kind.NOVA_BURST ? 0.5f : 0f;
+					sys.active = 0.001f;
+					sys.cooldown = 1f;
+					sys.maxAmmo = 1;
+					sys.ammo = 1f;
+				}
+				if (kind == Kind.COMBAT_BURN) sys.toggle = true;
 				if (kind == Kind.PHASE_CLOAK) p.cloak = sys;
 				else p.system = sys;
 			}
@@ -776,7 +987,12 @@ public final class MeshPreview {
 			in.screenH = h;
 			in.mouseX = w * 0.5f;
 			in.mouseY = h * 0.5f;
-			for (float tt = 0f; tt < 1.2f; tt += 1f / 60f) {
+			if (p.system != null && (kind == Kind.ORION_DEVICE || kind == Kind.NOVA_BURST)) {
+				sim.update(in, 1f / 60f, 1f / 60f);
+				p.system.activate(p);
+			}
+			float run = kind == Kind.ORION_DEVICE ? 0.7f : kind == Kind.NOVA_BURST ? 0.9f : 1.2f;
+			for (float tt = 0f; tt < run; tt += 1f / 60f) {
 				if ("VENTING".equals(label)) p.flux.flux = Math.max(p.flux.flux, p.flux.maxFlux * 0.6f);
 				sim.update(in, 1f / 60f, 1f / 60f);
 			}
@@ -794,7 +1010,48 @@ public final class MeshPreview {
 		}
 		g.dispose();
 		ImageIO.write(grid, "png", new File(dir, "system_fx.png"));
-		System.out.println("wrote system_fx.png");
+
+		// Orion Device and Nova Burst seen from the side (an observer's chase view): the drop, the blast, the jolt.
+		java.util.List<BufferedImage> side = new java.util.ArrayList<>();
+		float[] at = {0.3f, 0.6f, 1.2f};
+		for (Kind kind : new Kind[] {Kind.ORION_DEVICE, Kind.NOVA_BURST}) {
+			Sim sim = new Sim(t);
+			Ship3D obs = makeShip(game, hulls.get("wolf"), t, "wolf");
+			sim.addShip(obs);
+			obs.pos.set(1500f, 150f, 300f);
+			obs.rot.setAxisAngle(0, 1, 0, (float) (Math.PI * 0.5)); // nose toward -x: looking across at the Retribution
+			sim.setPlayer(obs);
+			Ship3D ret = makeShip(game, hulls.get("retribution"), t, "retribution");
+			sim.addShip(ret);
+			ret.volume = ShipModel.geometry((ShipModel.Source) ret.modelSource, t).volume;
+			s3d.core.ShipSystem3D sys = new s3d.core.ShipSystem3D(kind.name().toLowerCase(), kind.name(), kind);
+			sys.chargeUp = kind == Kind.NOVA_BURST ? 0.5f : 0f;
+			sys.active = 0.001f;
+			sys.cooldown = 1f;
+			sys.maxAmmo = 1;
+			sys.ammo = 1f;
+			ret.system = sys;
+			ret.throttle = 0.6f;
+			PilotInput in = new PilotInput();
+			in.screenW = w;
+			in.screenH = h;
+			in.mouseX = w * 0.5f;
+			in.mouseY = h * 0.5f;
+			for (int i = 0; i < 30; i++) sim.update(in, 1f / 60f, 1f / 60f);
+			sys.activate(ret);
+			float tt = 0f;
+			for (float stop : at) {
+				float until = stop + (kind == Kind.NOVA_BURST ? 0.5f : 0f);
+				while (tt < until) {
+					sim.update(in, 1f / 60f, 1f / 60f);
+					tt += 1f / 60f;
+				}
+				renderer.renderScene(sim, w, h, target[0]);
+				side.add(read(w, h));
+			}
+		}
+		ImageIO.write(gridOf(side, 3, new float[] {0.3f, 0.6f, 1.2f, 0.3f, 0.6f, 1.2f}), "png", new File(dir, "orion_side.png"));
+		System.out.println("wrote system_fx.png, orion_side.png");
 	}
 
 	/** Frames side by side in rows, half size, each with its time stamp. */

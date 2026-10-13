@@ -29,6 +29,16 @@ public final class SystemLook {
 	public boolean jitterSquared, jitterRoot;
 	/** The ship's own jitter only while charging up, fading over half a second after (Entropy Amplifier). */
 	public boolean jitterWhileCharging;
+	/** Strength squared while powering down only (Quantum Disruptor). */
+	public boolean jitterSquaredOut;
+	/** Jitter after each detonation instead, fading over this many seconds (Orion Device 2, Nova Burst 1). */
+	public float jitterAfterUse;
+	/** Extra jitter range while charging that shrinks to nothing as it comes up (Energy Lash: 150). */
+	public float jitterShrinkIn;
+	/** Vanilla's "standard" Threat jitter: at least half strength while on (0.5 + 0.5 x effect), squared powering down. */
+	public boolean jitterHalfBase;
+	/** Weapon glow on the ship's fragment weapons (Fragment Volley). */
+	public boolean glowFragmentWeapons;
 
 	/** Weapon glow on these weapon types (null colour = none). */
 	public float[] weaponGlow;
@@ -177,6 +187,63 @@ public final class SystemLook {
 				l.fighterJitterRange = 5f;
 				l.fighterJitterGrows = true;
 				break;
+			case COMBAT_BURN:
+				l.engineLength = 1.5f;
+				l.engineWidth = 2f;
+				l.engineGlow = 2f;
+				l.systemEngines = true;
+				break;
+			case ORION_DEVICE:
+				l.jitter = rgba(255, 125, 25, 55);
+				l.jitterCopies = 3;
+				l.jitterAfterUse = 2f;
+				break;
+			case NOVA_BURST:
+				l.jitter = rgba(100, 165, 255, 35);
+				l.jitterCopies = 3;
+				l.jitterAfterUse = 1f;
+				break;
+			case ACAUSAL_DISRUPTOR:
+				l.jitterUnder = rgba(255, 155, 255, 155);
+				l.jitterUnderCopies = 21;
+				l.jitterUnderRange = 3f;
+				l.jitter = rgba(255, 155, 255, 75);
+				l.jitterCopies = 4;
+				l.jitterGrow = 50f;
+				l.jitterSquaredOut = true;
+				break;
+			case ENERGY_LASH:
+				l.jitter = rgba(130, 155, 145, 255);
+				l.jitterCopies = 5;
+				l.jitterRange = 3f;
+				l.jitterShrinkIn = 150f;
+				break;
+			case FRAGMENT_VOLLEY:
+				l.jitter = rgba(130, 155, 145, 255);
+				l.jitterCopies = 1;
+				l.jitterRange = 4f;
+				l.jitterHalfBase = true;
+				l.weaponGlow = rgba(130, 155, 145, 50);
+				l.glowFragmentWeapons = true;
+				break;
+			case INCURSION_MODE:
+				l.jitter = rgba(130, 155, 145, 255);
+				l.jitterCopies = 1;
+				l.jitterRange = 4f;
+				l.jitterHalfBase = true;
+				l.weaponGlow = rgba(130, 155, 145, 50);
+				l.weaponTypes.add("BALLISTIC");
+				l.weaponTypes.add("ENERGY");
+				l.engineLength = 2f;
+				l.engineGlow = 1.5f;
+				break;
+			case EXTRACTION_PROTOCOL:
+				l.jitter = rgba(130, 155, 145, 255);
+				l.jitterCopies = 1;
+				l.jitterRange = 4f;
+				l.jitterHalfBase = true;
+				l.engineGlow = 2f;
+				break;
 			case DRONE_STRIKE:
 				l.fighterJitter = rgba(255, 100, 50, 75);
 				l.fighterJitterCopies = 10;
@@ -190,6 +257,12 @@ public final class SystemLook {
 	/** Strength of the system's own jitter now. */
 	public float jitterLevel(ShipSystem3D sys) {
 		float effect = sys.effect;
+		if (jitterAfterUse > 0f) return sys.orion != null ? Math.max(0f, 1f - sys.orion.sinceDetonation / jitterAfterUse) : 0f;
+		if (jitterSquaredOut && sys.state == ShipSystem3D.State.OUT) return effect * effect;
+		if (jitterHalfBase) {
+			float j = 0.5f + 0.5f * effect;
+			return sys.state == ShipSystem3D.State.OUT ? j * j : j;
+		}
 		if (jitterWhileCharging) {
 			if (sys.state == ShipSystem3D.State.IN) return effect;
 			return sys.state == ShipSystem3D.State.ACTIVE ? Math.max(0f, 1f - sys.stateTime / 0.5f) : 0f;

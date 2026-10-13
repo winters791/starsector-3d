@@ -46,6 +46,7 @@ public final class FlightModel {
 		Vec3 vb = s.rot.inverseRotate(s.vel, new Vec3());
 		float fwdSpeed = (p.fwdSpeed * s.sysSpeedMult + (s.speedBonus + s.sysSpeedFlat) * t.speedMult) * Math.max(thrust, 0.0001f);
 		float desZ = s.sysFullThrottle ? -fwdSpeed : s.throttle >= 0f ? -s.throttle * fwdSpeed : -s.throttle * p.revSpeed;
+		if (s.sysBrake) desZ = 0f; // Convulsive Lunge: no thrust of its own, it decelerates (vanilla) while the lunge pulls
 		boolean speedingUp = desZ * vb.z >= 0f && Math.abs(desZ) > Math.abs(vb.z);
 		if (thrust > 0f) {
 			vb.z = approachAxis(vb.z, desZ, p.fwdAccel * accK, p.fwdDecel * accK, dt);

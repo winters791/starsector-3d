@@ -5,14 +5,59 @@ known issues and next steps. Newest status first.
 
 ## Status
 
-- **2026-10-13 — Ships ignore station spurs; stations turn 4x faster; weapon range +20% (user). Headless-tested;
-  awaiting in-game test.**
+- **2026-10-13 — Ship systems batch 4: Mote Attractor, the Threat's and the Shrouded's systems, Swarm Launcher and
+  Churning Locus, and vanilla's swarm / shroud looks (user: "make the next batch"). Built from each vanilla script's
+  behaviour and look. Full bench 118/118 (with the station / range session's changes); jar rebuilt with both; awaiting
+  in-game test.**
+  - Threat (`core/ExoticSystems`): Fragment Volley, Incursion Mode and Extraction Protocol hold no charge of their own;
+    only an Overseer's Energy Lash fires them (vanilla's lash-activated systems). The Overseer lashes the unit whose
+    system would help most right now (vanilla's usefulness rules) or an enemy ship (1500 EMP from each system slot; a
+    phased target is knocked into a 1 s overload). Lash cooldown 2 + 0.33 x the unit's DP (max 10), 2-5 s on enemies
+    (x2 if phased). Volley: fragment weapons x2 range, cooldowns cut to 1 s, reloaded, fragments regrow x10. Incursion:
+    +100 speed, ammo regen x5, dissipation x3, reckless AI. Extraction: +100 speed backing off, then vents and reloads.
+  - Construction Swarm (Fabricator, needs vanilla's MIN_FRAGMENTS): a swarm (a real vanilla wing) drifts out at a third
+    speed for 3-6 s, settles and builds what vanilla's own `ConstructionSwarmSystemScript.pickVariant` picks (build
+    time from DP, Overseer extra, first two frigates fast, `host/BuildPicker`), then the ship appears and the swarm is
+    gone. One build at a time per Fabricator.
+  - Shrouded: Convulsive Lunge (Tendril, Maw, vortices) pulls 1000 toward the aim (no aim: straight back) with
+    vanilla's spring and friction, decelerating, shield off at the peak. Darkened Gaze (Eye): its all-round shield
+    always faces back; on, it opens 90 deg at the front and the gaze beams fire through; turn x0.15, hull damage taken
+    x2. Tenebrous Expulsion (Maelstrom): ejecta every 0.15 s within 90 deg of the aim for a second, then pushed back.
+  - Spawned units (`core/SpawnRequest`, `core/SpawnBehaviours`, host `spawnRequested`): the host spawns real vanilla
+    wings / ships through the fleet manager and mirrors them where the 3D side asked. Swarm Launcher fires attack swarms
+    (holds once its wing count is out, until one is left). Churning Locus fires shrouded vortices (half speed if fired
+    more than 150 deg off the nose). Vortex: chases the nearest enemy ship it can reach before it decays (5%/s), rams
+    (knocked to 10% speed, decays faster per ram), lunges when close, bursts when gone (vanilla damage, enemies only).
+    Ejecta: slows to 10% speed, decays 6.67%/s, bursts.
+  - Mote Attractor (Ziggurat, `core/MoteControl`): motes stream out (every 0.15-0.25 s, up to 30) and flock by
+    vanilla's rules (kept off ships, apart from and in step with each other, pushed out from close in and drawn back
+    from far out, carried along with the ship; they change heading by swinging their velocity, not turning). They go
+    for enemy missiles (a touch destroys one) and fighters (extra damage) within 2000. Using the system puts an
+    attractor at the aim for 10 s, or locks onto the enemy ship under it for 20 s: an arc shoots out and the motes go.
+  - Looks, `render/CloudRenderer`, with vanilla's own sprite sheets loaded from the game at runtime
+    (`render/FxSprites`): Threat fragments are one shard per fragment round the hull (vanilla's counts: 20/40/60/100
+    by size), flashing while fragment weapons are loaded. Shrouds are crimson blobs that live 1-3 s with red glows,
+    under subtracted dark particles (the murk). A Lunge's windup streams the blobs toward the point; the Gaze clears
+    the front. Each ship's numbers come from its live vanilla effect (`ExoticBridge.swarmLook`, retried each frame
+    until vanilla has made it); construction swarms are sized as vanilla's script sizes them. Shroud sprites fade near
+    the camera so being inside one isn't a black screen (3D only). New fx shader modes 9 (soft puff) and 10 (sprite).
+  - Fixed on the way: the lunge held its forward speed afterwards (it now decelerates, as vanilla's DECELERATE); the
+    lash missed phased targets (their cloak hadn't stepped yet that frame: `Ship3D.phasedNow()`); motes ram missiles
+    with a swept test. "PD kills fighters" fixture re-tuned for range 1.2: its raider stays on the gunboat (no
+    carrier, a harmless gun) instead of flying home out of PD reach.
+  - Bench `S3D_ONLY=systemsBatch4` (13 checks); preview `S3D_PREVIEW_ONLY=exoticFx ./build.sh preview` (exotic_fx.png).
+  - Unverified until in game: fleet-manager spawns of attack swarms / construction swarms / vortices / ejecta
+    appearing where asked and getting twins (log "spawned", first 3 of each kind), the Fabricator's picks (log
+    "construction swarm to build"), the live swarm parameters (log "swarm look" / "shroud look"), the looks in motion.
+
+- **2026-10-13 — Ships ignore station spurs; stations turn 4x faster; weapon range +20% (user). Separate session from
+  batch 4; compiled + benched in a scratchpad; in the jar rebuilt with batch 4; awaiting in-game test.**
   - Unarmed sections are never picked as targets: `Ship3D.unarmedPart()` = a module with no weapons and no launch
     bays (`hasBays`, set in ShipBridge). That covers Station Structural Spurs (5000 hull / 1500 armour, no guns),
     Station Armour, extensions and struts, and the Onslaught Mk.I's vambraces. Skipped by: ship AI `pickTarget`,
     fighters (unless their carrier's target is one), turret autofire (unless it's the ship's locked target), the
-    player's automatic lead target (R still locks one), and Quantum Disruptor's fallback pick (with batch 3). Shots
-    that hit a spur still damage it; it just stops soaking whole fleets' attention.
+    player's automatic lead target (R still locks one), Quantum Disruptor's fallback pick. Shots that hit a spur still
+    damage it; it just stops soaking whole fleets' attention.
   - Safe because vanilla ends a station when its armed sections are gone: the user's Xantu Ravach battle log shows
     the last Heavy Combat Module die and vanilla end the remaining spur and the station in the same frame. The 6 s
     fallback (`checkStationBeaten`) now counts armed sections only and removes leftover spur puppets with the core.
@@ -20,11 +65,41 @@ known issues and next steps. Newest status first.
     die in ~74 s instead of ~125 s and it lands far fewer hits (sections sweep past attackers); watch station danger
     in game.
   - `weapons.rangeMult` 1 -> 1.2. Everything that scales with it grows 20% too, as when it was halved: system ranges
-    (Entropy, Teleporter, Mine Strike...), missile flight time, DEM/rift/orb distances, HUD range rings.
+    (Entropy, Teleporter, Mine Strike, Disruptor...), missile flight time, DEM/rift/orb distances, HUD range rings.
   - Bench: "station assault" now wants every ARMED section destroyed, unarmed sections never targeted, and the
     station to hit back at all (was "> 500 damage to attackers"; most of that came while the station fired nothing).
-    "PD kills fighters": its test fighter now carries a harmless gun and has no carrier, so it stays on the gunboat
-    (unarmed, it flew home and left PD reach at the 1.2 fixture scale with 1 hull left; the PD logic was fine).
+    Full bench 116/118: the 15v15 timing check (load) and "PD kills fighters" — range only (passes at 1.0): its
+    unarmed test fighter flies home, and at the 1.2 fixture scale it leaves PD reach after 52 shots with 1 hull left.
+    Fixture needs re-tuning, not the PD logic. (Done in the batch 4 entry above: 118/118.)
+
+- **2026-10-13 — Ship systems batch 3 (user: "start working on the weapons and ship systems"), and rockets fly straight.
+  Built from each vanilla script's behaviour and look. Bench 106/106; jar rebuilt; awaiting in-game test.**
+  - Rockets and bombs (vanilla missile types ROCKET, BOMB, BOMB_WITH_SLOW: Hammer, Reaper, Annihilator, Squall, Sabot
+    warheads, the Reality Disruptor shot, canisters, cluster bombs) fly straight whatever turn rate their engine has,
+    as in vanilla (user's call). Guided missiles unchanged.
+  - Orion Device (Retribution, Venture Pather) and Nova Burst (Nova), `core/OrionDrive`: a charge drops out of the
+    rear system slot and goes off behind the push plate (Orion 0.25 s later, Nova at once) in a cone of cloud away
+    from the ship (vanilla's particle counts, sizes, speeds and arc; Nova adds vanilla's big blue-white flash); the
+    jolt pushes the ship forward hard for a moment (Orion 5000 for 0.25 s, Nova 10000 for 1 s, tapering) with top
+    speed +500, then it brakes back to normal within 3 s. One press fires the whole train (user's call): every charge
+    left, one per cooldown (Orion 4 a second apart, Nova 2), no braking between jolts so they stack into one sprint.
+    Orange (Nova blue) jitter on the hull after each jolt, detonation sound, camera jolt when it's yours. Bench: Orion
+    108 -> peak 890 -> back to 108; Nova peaks near 3100 for a moment: that is vanilla's formula (twice the push for
+    four times as long), say if it feels too much.
+  - Combat Burn (Onslaught Mk.I): +100 top speed and acceleration while on, steerable, its engine glow settings.
+  - Quantum Disruptor (Harbinger): pink jitter while charging (vanilla's ranges, growing to +50), then the target (or the
+    nearest enemy ship within 500 + system range bonus) is knocked into a 1 s overload with pink arcs; it drops its shield.
+    The AI uses it on a shielded target its guns can reach.
+  - Reserve Deployment (Gemini): the host runs vanilla's own public ReserveWingStats on the carrier puppet's bays, so
+    the extra fighters come out exactly as in 2D and get 3D twins like any others.
+  - Drone launchers (stations' Merlon / Ravelin / Gargoyle drones, Point Defense Drones): the puppet keeps that one system
+    on so vanilla launches real drones; each gets a 3D twin that launches out of the mothership to its orbit from the
+    launcher's own behaviour table (radius beyond the hull, speed, direction, facing, by slot index) and fights from it.
+    Unverified until a station battle: that vanilla launches with the puppet's AI frozen (log: "drone ... from").
+  - Bench `S3D_ONLY=systemsBatch3`; previews: system_fx.png has the new tiles, orion_side.png shows Orion and Nova
+    from the side.
+  - Next batch: Mote Attractor (Ziggurat), the Threat units' and Shrouded ships' systems, Swarm Launcher and Churning
+    Locus (vortex launcher).
 
 - **2026-10-13 — Ship system, vent and overload looks rebuilt to match vanilla's 2D ones (user: "don't resemble their
   original 2D visuals"). Looks only. Bench 100/100; jar rebuilt; awaiting in-game test.**
@@ -1209,7 +1284,7 @@ Bench (`./build.sh bench`, default tuning):
 
 ## Next steps
 
-(Updated 2026-10-12. Done since the last list: stations at 5x with AI that copes, orders and objectives (both built and
+(Updated 2026-10-13: ship systems batches 3 and 4 done. Earlier (2026-10-12) done since the list before: stations at 5x with AI that copes, orders and objectives (both built and
 run on the real install: a station battle played at 58 fps with 28 ships, enemy DEFEND / HEAVY_ESCORT orders followed),
 weapon scripts batch 1, ship systems batch 2, weapon scripts batch 2.)
 
@@ -1226,10 +1301,12 @@ weapon scripts batch 1, ship systems batch 2, weapon scripts batch 2.)
 4. In-game test of weapon scripts batch 2: the simulator with Omega / Threat / Dweller ships if unlocked, or Console
    Commands (installed) to put Rift Cascade / Rift Beam / Reality Disruptor / Voltaic / fragment weapons on your ship
    and spawn a Threat or Dweller fleet. Watch the weapon and "fragment swarm" lines in the log at battle start.
-5. Gaps by impact: Swarm / Vortex Launcher (wing-spawning weapons); rocket/bomb homing (see batch 2 entry); remaining
-   ship systems (Reserve Deployment, Combat Burn, Orion Device, Nova Burst, Quantum Disruptor, Mote
-   Attractor, station drone launchers, the Shrouded / Threat units' systems); mesh LOD for big battles; other mods'
-   ships and scripts (UAF is installed).
+5. In-game test of ship systems batches 3 and 4: Retribution (Orion), Nova, Onslaught Mk.I, Harbinger, Gemini, a
+   station with drones; a Threat fleet (Overseer lashing, Fabricator building, Hive's Swarm Launcher) and a Shrouded
+   one (Tendril / Maw lunges, Eye's gaze, Maelstrom's ejecta, Churning Locus vortices); a Ziggurat. Console Commands
+   can spawn them. Watch the log's "spawned", "construction swarm to build", "swarm look" and "shroud look" lines.
+6. Gaps by impact: mesh LOD for big battles; other mods' ships and scripts (UAF is installed). Decided: no JIT
+   warm-up at load (user: not an issue).
 
 Cut from the roadmap (2026-10-12, user): M5, the hull-by-hull model pass. Ships keep the sprite relief meshes. The OBJ
 loader and the Blender kit stay in the mod, unused (the Wolf is still only staged in `build/art/hulls/`).

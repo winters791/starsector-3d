@@ -9,6 +9,8 @@ import s3d.math.Vec3;
  * covers the whole sphere, which is fine because a ship's own shots pass through its hull).
  */
 public final class WeaponMount {
+	/** Swarm Launcher: its swarms reached the limit; it waits until only one is left (vanilla). */
+	public boolean launchHold;
 	public final String slotId;
 	public final WeaponSpec3D spec;
 	public final Vec3 localPos;

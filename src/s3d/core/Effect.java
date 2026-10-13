@@ -4,8 +4,11 @@ import s3d.math.Vec3;
 
 /** Short-lived visual events produced by the sim (drawn by the renderer / HUD, never simulated). */
 public final class Effect {
-	/** RIFT: a dark tear with a coloured rim (Omega / Dweller rifts). RING: an expanding shockwave shell. */
-	public enum Kind { FLASH, SPARK, DAMAGE_TEXT, EXPLOSION, ARC, RIFT, RING }
+	/**
+	 * RIFT: a dark tear with a coloured rim (Omega / Dweller rifts). RING: an expanding shockwave shell.
+	 * NEBULA: vanilla's nebula particle, a soft cloud that fades in, holds, then fades while it grows to `grow` times its size.
+	 */
+	public enum Kind { FLASH, SPARK, DAMAGE_TEXT, EXPLOSION, ARC, RIFT, RING, NEBULA }
 
 	public final Kind kind;
 	public final Vec3 pos = new Vec3(), vel = new Vec3();
@@ -16,6 +19,8 @@ public final class Effect {
 	public String text;
 	/** Seconds before it appears (it drifts with vel meanwhile); then sound, if set, plays once. */
 	public float delay;
+	/** NEBULA: size it grows to by the end, as a multiple of its starting size. */
+	public float grow = 1f;
 	public String sound;
 	public float soundVolume = 1f;
 
