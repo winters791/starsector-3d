@@ -49,6 +49,13 @@ abstract class Session3D {
 	private int groupLogBudget = 30;
 	private boolean lastVanillaUi, loggedFirstFrame, shipInfoHidden, shipInfoFailed;
 	private float statRefreshTimer;
+	/** Seconds the 3D scene has stayed up since vanilla called the battle over (see OUTRO_SECONDS). */
+	private float outroTime;
+	/** After the battle is decided the 3D scene stays up this long (no HUD, no write-back), until vanilla's own screens come up. */
+	private static final float OUTRO_SECONDS = 6f;
+	/** The 3D view fades in from black over this long when it first comes up. */
+	private static final float FADE_IN_SECONDS = 0.6f;
+	private long firstRenderNanos;
 	private String toast;
 	private float toastTime;
 
@@ -338,14 +345,16 @@ abstract class Session3D {
 			refreshFlightParams();
 		}
 		if (!overlay || vanillaUiActive() || yieldToVanilla()) {
+			boolean outro = inOutro();
+			if (outro) outroTime += realDt;
 			CursorHider.restore();
-			showVanillaShipInfo(true);
+			showVanillaShipInfo(!outro);
 			input.clearPressed();
-			if (overlay && !yieldToVanilla() && runWhileVanillaUi()) {
+			if (outro || overlay && !yieldToVanilla() && runWhileVanillaUi()) {
 				handsOff();
 				float dt = engine.isPaused() ? 0f : amount;
 				sim.update(input, dt, realDt);
-				afterSim(dt, realDt);
+				if (!outro) afterSim(dt, realDt); // the result is in: nothing more is written to vanilla
 				playSounds();
 			}
 			return;
@@ -369,13 +378,23 @@ abstract class Session3D {
 		simMs = (System.nanoTime() - now) / 1e6f;
 	}
 
+	/**
+	 * The battle is decided but vanilla's own screens aren't up yet: the 3D scene plays on for a few
+	 * seconds (ships drifting, wrecks burning) instead of cutting to the empty 2D map.
+	 */
+	private boolean inOutro() {
+		return overlay && !done() && yieldToVanilla() && !vanillaUiActive() && outroTime < OUTRO_SECONDS;
+	}
+
 	void render() {
-		if (done() || !overlay || vanillaUiActive() || yieldToVanilla()) {
+		boolean outro = inOutro();
+		if (done() || !overlay || vanillaUiActive() || yieldToVanilla() && !outro) {
 			lastRenderNanos = 0; // don't count the time spent in vanilla menus as a slow frame
 			CursorHider.restore();
 			return;
 		}
-		if (cfg.tuning.hideGameCursor) CursorHider.hide();
+		if (outro) CursorHider.restore(); // vanilla's end-of-battle prompts take the mouse
+		else if (cfg.tuning.hideGameCursor) CursorHider.hide();
 		else CursorHider.restore();
 		long t0 = System.nanoTime();
 		if (lastRenderNanos != 0) {
@@ -400,10 +419,12 @@ abstract class Session3D {
 		try (GLStateGuard g = GLStateGuard.push()) {
 			RENDERER.init();
 			RENDERER.renderScene(sim, w, h, g.previousFbo());
-			if (showHud) {
+			if (showHud && !outro) {
 				fillHud();
 				RENDERER.renderHud(sim, input, hud, w, h);
 			}
+			if (firstRenderNanos == 0) firstRenderNanos = t0;
+			RENDERER.fade(1f - (t0 - firstRenderNanos) / 1e9f / FADE_IN_SECONDS, w, h);
 		}
 		renderMs = (System.nanoTime() - t0) / 1e6f;
 		logPerfPeriodically(t0);

@@ -23,6 +23,7 @@ import s3d.core.ChaseCamera;
 import s3d.core.FlightParams;
 import s3d.core.PilotInput;
 import s3d.core.Ship3D;
+import s3d.core.ShipSystem3D.Kind;
 import s3d.core.Sim;
 import s3d.core.Tuning;
 import s3d.math.Quat;
@@ -65,6 +66,16 @@ public final class MeshPreview {
 		dir.mkdirs();
 		if ("hullModels".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=hullModels ./build.sh preview [ids]
 			hullModelScene(game, hulls, args.length > 2 ? ids : null, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("systemFx".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=systemFx ./build.sh preview
+			systemFxScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("deathFx".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=deathFx ./build.sh preview
+			deathFxScene(game, hulls, t, renderer, dir);
 			if (!pbuffer) Display.destroy();
 			return;
 		}
@@ -600,6 +611,207 @@ public final class MeshPreview {
 			for (s3d.core.WeaponGroup3D g : p.groups) groups.append(" [").append(g.label()).append(g.autofire ? " auto" : "").append(']');
 			System.out.println("wrote " + name + ".png: " + d[0] + groups);
 		}
+	}
+
+	/**
+	 * A ship you killed, frame by frame (blast, shockwave, debris, secondary pops, burning wreck, the
+	 * kill marker round the reticle), then an ally jumping out on retreat: death_fx.png, jump_out.png.
+	 */
+	private static void deathFxScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 960, h = 600;
+		int[] target = createCaptureTarget(w, h);
+		Sim sim = new Sim(t);
+		sim.combat.numbersFor = null;
+		Ship3D wolf = makeShip(game, hulls.get("wolf"), t, "wolf");
+		sim.addShip(wolf);
+		arm(game, wolf, "wolf", "wolf_Assault");
+		sim.setPlayer(wolf);
+		Ship3D eagle = makeShip(game, hulls.get("eagle"), t, "eagle");
+		eagle.owner = 1;
+		sim.addShip(eagle);
+		arm(game, eagle, "eagle", "eagle_Assault");
+		eagle.pos.set(120f, 30f, -1000f);
+		eagle.rot.setAxisAngle(0, 1, 0, 1.2f);
+		eagle.vel.set(20f, 0f, 10f);
+		PilotInput in = new PilotInput();
+		in.screenW = w;
+		in.screenH = h;
+		in.mouseX = w * 0.5f;
+		in.mouseY = h * 0.5f;
+		for (int i = 0; i < 30; i++) sim.update(in, 1f / 60f, 1f / 60f);
+		sim.combat.numbersFor = wolf;
+		eagle.lastHitBy = wolf;
+		sim.combat.clock = sim.time;
+		sim.combat.kill(eagle);
+		float[] at = {0.05f, 0.35f, 0.9f, 1.7f, 3f, 7f};
+		java.util.List<BufferedImage> frames = new java.util.ArrayList<>();
+		float tt = 0f;
+		for (float stop : at) {
+			while (tt < stop) {
+				sim.update(in, 1f / 60f, 1f / 60f);
+				tt += 1f / 60f;
+			}
+			renderer.renderScene(sim, w, h, target[0]);
+			renderer.renderHud(sim, in, new HudRenderer.Info(), w, h);
+			frames.add(read(w, h));
+		}
+		ImageIO.write(gridOf(frames, 3, at), "png", new File(dir, "death_fx.png"));
+
+		Sim sim2 = new Sim(t);
+		Ship3D me = makeShip(game, hulls.get("wolf"), t, "wolf");
+		sim2.addShip(me);
+		sim2.setPlayer(me);
+		Ship3D ham = makeShip(game, hulls.get("hammerhead"), t, "hammerhead");
+		sim2.addShip(ham);
+		ham.pos.set(-150f, 20f, -700f);
+		ham.rot.setAxisAngle(0, 1, 0, 0.4f);
+		ham.rot.forward(ham.vel).scale(200f);
+		for (int i = 0; i < 20; i++) sim2.update(in, 1f / 60f, 1f / 60f);
+		sim2.combat.jumpOut(ham);
+		sim2.ships.remove(ham);
+		float[] at2 = {0.03f, 0.15f, 0.4f};
+		frames.clear();
+		tt = 0f;
+		for (float stop : at2) {
+			while (tt < stop) {
+				sim2.update(in, 1f / 60f, 1f / 60f);
+				tt += 1f / 60f;
+			}
+			renderer.renderScene(sim2, w, h, target[0]);
+			frames.add(read(w, h));
+		}
+		ImageIO.write(gridOf(frames, 3, at2), "png", new File(dir, "jump_out.png"));
+
+		// Battle start: the camera swoops in from far behind; then a heavy hit from the left shows its arc.
+		Sim sim3 = new Sim(t);
+		Ship3D eag = makeShip(game, hulls.get("eagle"), t, "eagle");
+		sim3.addShip(eag);
+		arm(game, eag, "eagle", "eagle_Assault");
+		eag.hullMax = eag.hull = 8000f;
+		sim3.setPlayer(eag);
+		sim3.camera.introTo(eag, 2f);
+		float[] at3 = {0.02f, 0.7f, 1.4f, 2.4f};
+		frames.clear();
+		tt = 0f;
+		for (float stop : at3) {
+			while (tt < stop) {
+				sim3.update(in, 1f / 60f, 1f / 60f);
+				tt += 1f / 60f;
+			}
+			renderer.renderScene(sim3, w, h, target[0]);
+			frames.add(read(w, h));
+		}
+		sim3.combat.hurtAt = sim3.time;
+		sim3.combat.hurtAmount = 600f;
+		Vec3 left = sim3.camera.rot.right(new Vec3()).scale(-1500f).add(eag.pos);
+		sim3.combat.hurtFrom.set(left);
+		sim3.update(in, 1f / 60f, 1f / 60f);
+		renderer.renderScene(sim3, w, h, target[0]);
+		renderer.renderHud(sim3, in, new HudRenderer.Info(), w, h);
+		frames.add(read(w, h));
+		ImageIO.write(gridOf(frames, 3, new float[] {0.02f, 0.7f, 1.4f, 2.4f, 2.42f}), "png", new File(dir, "intro_hurt.png"));
+		System.out.println("wrote death_fx.png, jump_out.png, intro_hurt.png");
+	}
+
+	/**
+	 * One tile per look: venting, overload, then each system kind running (and a displacer blink),
+	 * after a second of battle time so particles have built up: system_fx.png.
+	 */
+	private static void systemFxScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 960, h = 600;
+		int[] target = createCaptureTarget(w, h);
+		Object[][] tiles = {
+				{"VENTING", "eagle", null}, {"OVERLOAD", "eagle", null}, {"BURN DRIVE", "enforcer", Kind.BURN_DRIVE}, {"PLASMA JETS", "eagle", Kind.PLASMA_JETS},
+				{"MICROBURN", "enforcer", Kind.MICROBURN}, {"DISPLACER (charging)", "eagle", Kind.DISPLACER}, {"PHASE TELEPORTER (charging)", "eagle", Kind.PHASE_TELEPORTER},
+				{"DAMPER FIELD", "eagle", Kind.DAMPER}, {"TEMPORAL SHELL", "eagle", Kind.TEMPORAL_SHELL}, {"FORTRESS SHIELD", "eagle", Kind.FORTRESS_SHIELD},
+				{"PHASE CLOAK", "eagle", Kind.PHASE_CLOAK}, {"HIGH ENERGY FOCUS", "eagle", Kind.HIGH_ENERGY_FOCUS}, {"AMMO FEED", "eagle", Kind.AMMO_FEED},
+				{"ENTROPY AMPLIFIER (target red)", "eagle", Kind.ENTROPY_AMPLIFIER}, {"MINE STRIKE", "eagle", Kind.MINE_STRIKE}, {"EMP EMITTER", "eagle", Kind.EMP_EMITTER},
+		};
+		java.util.List<BufferedImage> frames = new java.util.ArrayList<>();
+		String[] labels = new String[tiles.length];
+		for (int ti = 0; ti < tiles.length; ti++) {
+			String label = (String) tiles[ti][0], hullId = (String) tiles[ti][1];
+			s3d.core.ShipSystem3D.Kind kind = (s3d.core.ShipSystem3D.Kind) tiles[ti][2];
+			labels[ti] = label;
+			Sim sim = new Sim(t);
+			Ship3D p = makeShip(game, hulls.get(hullId), t, hullId);
+			sim.addShip(p);
+			arm(game, p, hullId, hullId + "_Assault");
+			p.volume = ShipModel.geometry((ShipModel.Source) p.modelSource, t).volume;
+			for (s3d.core.WeaponMount wm : p.weapons) wm.localPos.y = p.volume.topAt(wm.localPos.x, wm.localPos.z) + 1f; // on the hull, as in game
+			p.flux = CombatBench.flux(hulls.get(hullId), t);
+			sim.setPlayer(p);
+			p.throttle = 0.4f;
+			Ship3D enemy = null;
+			if (kind == Kind.ENTROPY_AMPLIFIER || kind == Kind.EMP_EMITTER) {
+				enemy = makeShip(game, hulls.get("enforcer"), t, "enforcer");
+				enemy.owner = 1;
+				sim.addShip(enemy);
+				enemy.volume = ShipModel.geometry((ShipModel.Source) enemy.modelSource, t).volume;
+				enemy.pos.set(250f, 60f, kind == Kind.EMP_EMITTER ? -500f : -900f);
+			}
+			if ("VENTING".equals(label)) {
+				p.flux.flux = p.flux.maxFlux * 0.8f;
+				p.flux.venting = true;
+			} else if ("OVERLOAD".equals(label)) {
+				p.flux.overloadLeft = 20f;
+			} else if (kind != null) {
+				s3d.core.ShipSystem3D sys = new s3d.core.ShipSystem3D(kind.name().toLowerCase(), label, kind);
+				boolean charging = kind == Kind.DISPLACER || kind == Kind.PHASE_TELEPORTER;
+				sys.active = 60f;
+				sys.chargeUp = charging ? 10f : 0.2f;
+				sys.state = charging ? s3d.core.ShipSystem3D.State.IN : s3d.core.ShipSystem3D.State.ACTIVE;
+				sys.stateTime = charging ? 7f : 0f;
+				sys.effect = 1f;
+				sys.sysTarget = enemy;
+				sys.range = 1500f;
+				sys.damage = 50f;
+				sys.empDamage = 100f;
+				if (kind == Kind.FORTRESS_SHIELD) p.flux.shieldOn = true;
+				if (kind == Kind.PHASE_CLOAK) p.cloak = sys;
+				else p.system = sys;
+			}
+			PilotInput in = new PilotInput();
+			in.screenW = w;
+			in.screenH = h;
+			in.mouseX = w * 0.5f;
+			in.mouseY = h * 0.5f;
+			for (float tt = 0f; tt < 1.2f; tt += 1f / 60f) {
+				if ("VENTING".equals(label)) p.flux.flux = Math.max(p.flux.flux, p.flux.maxFlux * 0.6f);
+				sim.update(in, 1f / 60f, 1f / 60f);
+			}
+			renderer.renderScene(sim, w, h, target[0]);
+			frames.add(read(w, h));
+		}
+		BufferedImage grid = gridOf(frames, 4, new float[tiles.length]);
+		java.awt.Graphics2D g = grid.createGraphics();
+		int fw = w / 2, fh = h / 2;
+		for (int i = 0; i < labels.length; i++) {
+			g.setColor(java.awt.Color.BLACK);
+			g.fillRect((i % 4) * fw, (i / 4) * fh, fw, 22);
+			g.setColor(java.awt.Color.WHITE);
+			g.drawString(labels[i], (i % 4) * fw + 8, (i / 4) * fh + 16);
+		}
+		g.dispose();
+		ImageIO.write(grid, "png", new File(dir, "system_fx.png"));
+		System.out.println("wrote system_fx.png");
+	}
+
+	/** Frames side by side in rows, half size, each with its time stamp. */
+	private static BufferedImage gridOf(java.util.List<BufferedImage> frames, int cols, float[] times) {
+		int fw = frames.get(0).getWidth() / 2, fh = frames.get(0).getHeight() / 2;
+		int rows = (frames.size() + cols - 1) / cols;
+		BufferedImage out = new BufferedImage(fw * cols, fh * rows, BufferedImage.TYPE_INT_RGB);
+		java.awt.Graphics2D g = out.createGraphics();
+		g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+		for (int i = 0; i < frames.size(); i++) {
+			int x = (i % cols) * fw, y = (i / cols) * fh;
+			g.drawImage(frames.get(i), x, y, fw, fh, null);
+			g.setColor(java.awt.Color.WHITE);
+			g.drawString(String.format("t = %.2f s", times[i]), x + 8, y + 16);
+		}
+		g.dispose();
+		return out;
 	}
 
 	/** Player Wolf firing at a targeted Eagle with lead pips, impacts, radar and weapon panel. */

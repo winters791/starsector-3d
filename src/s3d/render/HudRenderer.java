@@ -101,13 +101,17 @@ public final class HudRenderer {
 			drawFleetMarkers(sim, w, h, texts);
 			drawObjectives(sim, w, h, texts);
 			if (!sim.spectating) {
-				if (!sim.camera.tactical) drawFlightMarkers(sim, in, w, h, texts);
+				if (!sim.camera.tactical) {
+					drawFlightMarkers(sim, in, w, h, texts);
+					drawHitMarkers(sim, in, w, h);
+				}
 				drawLead(sim, w, h, texts);
 			}
 			drawThrottle(sim, w, h, texts);
 			drawAttitude(p, w - 95f, 95f, 60f);
 			if (mapSize > 0f) drawMinimap(sim, 14f, h - 14f - mapSize, mapSize, w / (float) h, texts);
 			if (!sim.spectating) drawTargetPanel(sim, sim.aimTarget, w, h, texts, bars); // spectating: no target display
+			if (!sim.spectating) drawDamageDirection(sim, w, h);
 			drawWarnings(sim, w, h, texts);
 			drawIncoming(sim, w, h, texts);
 		}
@@ -130,7 +134,7 @@ public final class HudRenderer {
 		if (sim.paused) status.append("PAUSED   ");
 		if (sim.spectating) status.append("SPECTATING   ");
 		if (sim.worldTimeScale < 0.99f) status.append(String.format("TIME x%.1f   ", 1f / sim.worldTimeScale));
-		if (sim.controls.autoLevel) status.append("AUTO-LEVEL   ");
+		if (sim.controls.autoLevel != sim.tuning.autoLevelDefault) status.append(sim.controls.autoLevel ? "AUTO-LEVEL   " : "AUTO-LEVEL OFF   ");
 		if (sim.camera.tactical) status.append("TACTICAL   ");
 		if (in.freeLook) status.append("FREE LOOK   ");
 		if (status.length() > 0) texts.add(new Text(status.toString().trim(), cx, 30f, AMBER, 1f, true));
@@ -210,6 +214,70 @@ public final class HudRenderer {
 				line(retro[0] - 5f, retro[1] - 5f, retro[0] + 5f, retro[1] + 5f);
 				line(retro[0] - 5f, retro[1] + 5f, retro[0] + 5f, retro[1] - 5f);
 			}
+		}
+	}
+
+	/**
+	 * Hit confirmation around the reticle, no text: short diagonal ticks when your shots land (white
+	 * on hull or armor, blue on shields), bigger red-orange ones that spread out when you kill something.
+	 */
+	private void drawHitMarkers(Sim sim, PilotInput in, int w, int h) {
+		float[] r = MouseSteering.clampedReticle(in.mouseX, in.mouseY, w, h, sim.tuning);
+		float rr = sim.tuning.reticleRadiusPx;
+		float kill = sim.time - sim.combat.lastKillAt, hull = sim.time - sim.combat.lastHullHitAt, shield = sim.time - sim.combat.lastShieldHitAt;
+		float killLife = sim.combat.lastKillShip ? 0.8f : 0.5f;
+		if (kill >= 0f && kill < killLife) {
+			float t = kill / killLife, spread = (sim.combat.lastKillShip ? 14f : 8f) * (float) Math.sqrt(t);
+			color(PIPPER, 1f - t * t);
+			diagonalTicks(r[0], r[1], rr + 6f + spread, rr + (sim.combat.lastKillShip ? 22f : 16f) + spread);
+		} else if (hull >= 0f && hull < 0.22f) {
+			color(new float[] {1f, 0.95f, 0.85f}, 1f - hull / 0.22f);
+			diagonalTicks(r[0], r[1], rr + 5f, rr + 12f);
+		} else if (shield >= 0f && shield < 0.22f) {
+			color(SHIELD, 0.9f * (1f - shield / 0.22f));
+			diagonalTicks(r[0], r[1], rr + 5f, rr + 10f);
+		}
+	}
+
+	/**
+	 * Hull damage you take: a red arc around your ship on the side it came from (the attacker's
+	 * direction on screen), stronger for heavier hits; a faint full ring when it came from straight
+	 * ahead or behind.
+	 */
+	private void drawDamageDirection(Sim sim, int w, int h) {
+		Ship3D p = sim.player;
+		float age = sim.time - sim.combat.hurtAt;
+		if (p == null || p.destroyed || age < 0f || age > 0.7f) return;
+		float[] c = project(sim, p.pos.x, p.pos.y, p.pos.z, w, h);
+		if (c == null) return;
+		float focal = (h * 0.5f) / (float) Math.tan(sim.camera.fovYRad * 0.5);
+		float rr = Math.max(70f, p.radius * focal / Math.max(1f, p.pos.distance(sim.camera.pos)) * 1.25f + 24f);
+		Vec3 rel = new Vec3(sim.combat.hurtFrom).sub(p.pos);
+		float dx = rel.dot(sim.camera.rot.right(new Vec3())), dy = rel.dot(sim.camera.rot.up(new Vec3()));
+		float len = (float) Math.hypot(dx, dy), relLen = Math.max(1f, rel.length());
+		float strength = Math.max(0.4f, Math.min(1f, sim.combat.hurtAmount / Math.max(1f, p.hullMax * 0.03f)));
+		float a = (1f - age / 0.7f) * strength;
+		if (len < relLen * 0.25f) { // along the view axis: no side to point at
+			color(RED, a * 0.35f);
+			circle(c[0], c[1], rr, 40);
+			return;
+		}
+		double mid = Math.atan2(dy, dx), half = Math.toRadians(22);
+		for (int k = 0; k < 3; k++) {
+			color(RED, a * (k == 1 ? 0.9f : 0.45f));
+			float r = rr + k * 2.5f;
+			int seg = 10;
+			for (int i = 0; i < seg; i++) {
+				double a0 = mid - half + 2 * half * i / seg, a1 = mid - half + 2 * half * (i + 1) / seg;
+				line(c[0] + (float) Math.cos(a0) * r, c[1] + (float) Math.sin(a0) * r, c[0] + (float) Math.cos(a1) * r, c[1] + (float) Math.sin(a1) * r);
+			}
+		}
+	}
+
+	private static void diagonalTicks(float cx, float cy, float r0, float r1) {
+		float k = 0.7071f;
+		for (int sx = -1; sx <= 1; sx += 2) {
+			for (int sy = -1; sy <= 1; sy += 2) line(cx + sx * r0 * k, cy + sy * r0 * k, cx + sx * r1 * k, cy + sy * r1 * k);
 		}
 	}
 

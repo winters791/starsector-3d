@@ -22,6 +22,8 @@ import s3d.core.Projectile;
 import s3d.core.WeaponMount;
 import s3d.core.WeaponSpec3D;
 import s3d.core.ShieldFlux;
+import s3d.core.SystemLook;
+import s3d.core.ShipSystem3D;
 import s3d.core.Ship3D;
 import s3d.core.Sim;
 import s3d.core.Tuning;
@@ -36,7 +38,9 @@ import s3d.math.Vec3;
 public final class Renderer3D {
 	private static final Logger log = Global.getLogger(Renderer3D.class);
 
-	private Shader shipShader, fxShader, skyShader, starShader, shieldShader, holoShader;
+	private Shader shipShader, fxShader, skyShader, starShader, shieldShader, holoShader, auraShader;
+	/** Jitter copies get fresh random offsets every frame, as vanilla's do. */
+	private final Random jitterRnd = new Random();
 	private Mesh stars;
 	private int starsBuiltFor = -1;
 	private final SceneTarget target = new SceneTarget();
@@ -64,6 +68,7 @@ public final class Renderer3D {
 		starShader = Shader.build("stars", Shaders.STAR_VS, Shaders.STAR_FS, "a_dir", "a_col");
 		shieldShader = Shader.build("shield", Shaders.SHIELD_VS, Shaders.SHIELD_FS);
 		holoShader = Shader.build("holo", Shaders.HOLO_VS, Shaders.HOLO_FS, "a_pos", "a_nrm");
+		auraShader = Shader.build("aura", Shaders.AURA_VS, Shaders.AURA_FS, "a_pos", "a_nrm", "a_uv");
 		try {
 			font = GlyphFont.create(13);
 		} catch (Throwable t) {
@@ -82,6 +87,26 @@ public final class Renderer3D {
 			if (req.ship != null) renderHologram(req.ship, sim.tuning, req, sim.time, w, h);
 			req.ship = null;
 		}
+	}
+
+	/** Whole screen black at this opacity, over everything drawn so far (the scene fading in at battle start). */
+	public void fade(float alpha, int w, int h) {
+		if (alpha <= 0f) return;
+		GL11.glViewport(0, 0, w, h);
+		GL11.glDisable(GL11.GL_DEPTH_TEST);
+		GL11.glDisable(GL11.GL_CULL_FACE);
+		GL11.glEnable(GL11.GL_BLEND);
+		GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+		fxShader.use().set("u_vp", identity).set("u_mode", 0);
+		GL11.glBegin(GL11.GL_QUADS);
+		GL11.glColor4f(0f, 0f, 0f, Math.min(1f, alpha));
+		GL11.glVertex2f(-1, -1);
+		GL11.glVertex2f(1, -1);
+		GL11.glVertex2f(1, 1);
+		GL11.glVertex2f(-1, 1);
+		GL11.glEnd();
+		GL11.glDisable(GL11.GL_BLEND);
+		GL20.glUseProgram(0);
 	}
 
 	private final Mat4 holoProj = new Mat4(), holoModel = new Mat4(), holoMvp = new Mat4();
@@ -173,11 +198,13 @@ public final class Renderer3D {
 		GL11.glEnable(GL11.GL_BLEND);
 		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
 		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex); // keeps the fx sampler bound to something valid
+		drawSystemLooks(sim);
 		drawShields(sim);
 		fxShader.use().set("u_vp", cam.viewProj).set("u_tex", 0);
 		drawEngines(sim);
 		drawProjectiles(sim);
 		drawBeams(sim);
+		drawLidarBeams(sim);
 		drawArcs(sim);
 		drawMissileFx(sim);
 		drawEffects(sim);
@@ -308,7 +335,7 @@ public final class Renderer3D {
 			for (Ship3D s : ghosts) {
 				ShipModel m = modelFor(s, t);
 				if (m == null) continue;
-				GL14.glBlendColor(0f, 0f, 0f, 1f - 0.7f * s.phaseLevel);
+				GL14.glBlendColor(0f, 0f, 0f, 1f - 0.75f * s.phaseLevel); // vanilla: a quarter visible when fully phased
 				bank.setAxisAngle(0, 0, 1, s.visualBank);
 				q.mul(s.rot, bank);
 				model.fromRotationTranslation(q, s.pos.x, s.pos.y, s.pos.z).scaleLocal(s.scale);
@@ -382,47 +409,303 @@ public final class Renderer3D {
 		Tuning t = sim.tuning;
 		ChaseCamera cam = sim.camera;
 		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
-		Vec3 p = new Vec3(), d = new Vec3(), toCam = new Vec3(), side = new Vec3();
+		float[] look = new float[8];
 
 		fxShader.set("u_mode", 1);
 		GL11.glBegin(GL11.GL_QUADS);
 		for (Ship3D s : sim.ships) {
-			float thrust = s.thrustVisual;
+			engineLook(s, look);
 			for (int ei = 0; ei < s.engines.size(); ei++) {
-				EngineMount e = s.engines.get(ei);
 				if (s.engineDown != null && ei < s.engineDown.length && s.engineDown[ei] > 0f) continue; // knocked out by EMP
-				s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
-				s.rot.rotate(e.dir, d);
-				float len = e.length * (0.25f + 0.85f * thrust) * t.engineFlameScale * s.scale;
-				float wid = e.width * 0.55f * t.engineFlameScale * s.scale;
-				toCam.set(cam.pos).sub(p).normalize();
-				side.set(d).cross(toCam);
-				if (side.lengthSq() < 1e-6f) continue;
-				side.normalize().scale(wid * 0.5f);
-				float a = 0.45f + 0.6f * Math.min(1f, thrust);
-				GL11.glColor4f(e.r, e.g, e.b, a);
-				GL11.glTexCoord2f(0, 0); GL11.glVertex3f(p.x - side.x, p.y - side.y, p.z - side.z);
-				GL11.glTexCoord2f(0, 1); GL11.glVertex3f(p.x + side.x, p.y + side.y, p.z + side.z);
-				GL11.glTexCoord2f(1, 1); GL11.glVertex3f(p.x + d.x * len + side.x * 0.45f, p.y + d.y * len + side.y * 0.45f, p.z + d.z * len + side.z * 0.45f);
-				GL11.glTexCoord2f(1, 0); GL11.glVertex3f(p.x + d.x * len - side.x * 0.45f, p.y + d.y * len - side.y * 0.45f, p.z + d.z * len - side.z * 0.45f);
+				flame(cam, t, s, s.engines.get(ei), s.thrustVisual, 1f, look);
 			}
+			if (look[7] > 0f && !s.destroyed) for (EngineMount e : s.systemEngines) flame(cam, t, s, e, 1f, look[7], look);
 		}
 		GL11.glEnd();
 
 		fxShader.set("u_mode", 2);
 		GL11.glBegin(GL11.GL_QUADS);
+		Vec3 p = new Vec3();
 		for (Ship3D s : sim.ships) {
+			engineLook(s, look);
 			float thrust = Math.min(1f, s.thrustVisual);
+			float glowA = (float) Math.pow(look[2], 0.6);
 			for (int ei = 0; ei < s.engines.size(); ei++) {
 				EngineMount e = s.engines.get(ei);
-				if (s.engineDown != null && ei < s.engineDown.length && s.engineDown[ei] > 0f) continue; // knocked out by EMP
+				if (s.engineDown != null && ei < s.engineDown.length && s.engineDown[ei] > 0f) continue;
+				if (look[0] <= 0.01f || look[1] <= 0.01f) continue;
 				s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
-				float r = e.width * 0.75f * (0.5f + 0.6f * thrust) * t.engineFlameScale * s.scale;
-				GL11.glColor4f(e.r, e.g, e.b, 0.22f + 0.33f * thrust);
+				float r = e.width * 0.75f * (0.5f + 0.6f * thrust) * t.engineFlameScale * s.scale * (float) Math.sqrt(look[1]);
+				GL11.glColor4f(mixc(e.r, look, 3), mixc(e.g, look, 4), mixc(e.b, look, 5), (0.22f + 0.33f * thrust) * glowA);
 				quad(p, camR, camU, r);
+			}
+			if (look[7] > 0f && !s.destroyed) {
+				for (EngineMount e : s.systemEngines) {
+					s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
+					GL11.glColor4f(mixc(e.r, look, 3), mixc(e.g, look, 4), mixc(e.b, look, 5), 0.55f * look[7] * glowA);
+					quad(p, camR, camU, e.width * 0.85f * t.engineFlameScale * s.scale);
+				}
 			}
 		}
 		GL11.glEnd();
+	}
+
+	/** One engine flame (a camera-facing tapered quad) at the given throttle and strength, shaped by the system look. */
+	private final Vec3 fp = new Vec3(), fd = new Vec3(), fToCam = new Vec3(), fSide = new Vec3();
+
+	private void flame(ChaseCamera cam, Tuning t, Ship3D s, EngineMount e, float thrust, float level, float[] look) {
+		float len = e.length * (0.25f + 0.85f * thrust) * t.engineFlameScale * s.scale * look[0] * level;
+		float wid = e.width * 0.55f * t.engineFlameScale * s.scale * look[1];
+		if (len < 0.5f || wid < 0.2f) return;
+		s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, fp).add(s.pos);
+		s.rot.rotate(e.dir, fd);
+		fToCam.set(cam.pos).sub(fp).normalize();
+		fSide.set(fd).cross(fToCam);
+		if (fSide.lengthSq() < 1e-6f) return;
+		fSide.normalize().scale(wid * 0.5f);
+		float a = (0.45f + 0.6f * Math.min(1f, thrust)) * level * (float) Math.pow(look[2], 0.6);
+		Vec3 p = fp, d = fd, side = fSide;
+		GL11.glColor4f(mixc(e.r, look, 3), mixc(e.g, look, 4), mixc(e.b, look, 5), a);
+		GL11.glTexCoord2f(0, 0); GL11.glVertex3f(p.x - side.x, p.y - side.y, p.z - side.z);
+		GL11.glTexCoord2f(0, 1); GL11.glVertex3f(p.x + side.x, p.y + side.y, p.z + side.z);
+		GL11.glTexCoord2f(1, 1); GL11.glVertex3f(p.x + d.x * len + side.x * 0.45f, p.y + d.y * len + side.y * 0.45f, p.z + d.z * len + side.z * 0.45f);
+		GL11.glTexCoord2f(1, 0); GL11.glVertex3f(p.x + d.x * len - side.x * 0.45f, p.y + d.y * len - side.y * 0.45f, p.z + d.z * len - side.z * 0.45f);
+	}
+
+	/**
+	 * What the running system (and phase cloak) does to the engines, as vanilla's engine glow
+	 * settings: {length, width, glow, r, g, b, how far toward that colour, system-only thrusters 0..1}.
+	 */
+	private static void engineLook(Ship3D s, float[] out) {
+		out[0] = out[1] = out[2] = 1f;
+		out[3] = out[4] = out[5] = out[6] = out[7] = 0f;
+		applyEngineLook(s.system, out);
+		applyEngineLook(s.cloak, out);
+	}
+
+	private static void applyEngineLook(ShipSystem3D sys, float[] out) {
+		if (sys == null || sys.effect <= 0f || !sys.supported()) return;
+		SystemLook l = sys.look;
+		float e = sys.effect;
+		out[0] *= 1f + (l.engineLength - 1f) * e;
+		out[1] *= 1f + (l.engineWidth - 1f) * e;
+		out[2] *= 1f + (l.engineGlow - 1f) * e;
+		if (l.engineColor != null && l.engineColor[3] > 0f) {
+			out[3] = l.engineColor[0];
+			out[4] = l.engineColor[1];
+			out[5] = l.engineColor[2];
+			out[6] = Math.max(out[6], e * l.engineColor[3]);
+		}
+		if (l.systemEngines) out[7] = Math.max(out[7], e);
+	}
+
+	private static float mixc(float c, float[] look, int i) {
+		return c + (look[i] - c) * look[6];
+	}
+
+	/**
+	 * Ship system looks as vanilla draws them, plus the vent glow and phase highlight:
+	 * - jitter: copies of the hull, tinted, at fresh random offsets each frame across the screen
+	 *   (vanilla's ranges in sprite pixels). "Under" copies sit just behind the hull so only a fuzzy
+	 *   halo shows round the silhouette; "over" copies sit just in front and tint it.
+	 * - weapon glow: the weapons of the system's type (Lidar: its hardpoints) drawn again, tinted.
+	 * - the system's target (Entropy Amplifier) and the carrier's fighters (Targeting Feed, Recall
+	 *   Device, Termination Sequence) get their jitter / weapon glow too.
+	 */
+	private void drawSystemLooks(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		java.util.Map<Ship3D, float[]> targetJitter = null; // target -> {r, g, b, a, level, copies, range}
+		for (Ship3D s : sim.ships) {
+			ShipSystem3D sys = s.system;
+			if (s.destroyed || sys == null || sys.effect <= 0f || sys.look.targetJitter == null || sys.sysTarget == null || sys.sysTarget.destroyed) continue;
+			if (targetJitter == null) targetJitter = new java.util.IdentityHashMap<>();
+			float[] c = sys.look.targetJitter;
+			targetJitter.put(sys.sysTarget, new float[] {c[0], c[1], c[2], c[3], sys.effect, sys.look.targetJitterCopies, sys.look.targetJitterRange});
+		}
+		boolean begun = false;
+		Quat q = new Quat(), bank = new Quat();
+		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3()), camF = cam.rot.forward(new Vec3());
+		for (Ship3D s : sim.ships) {
+			if (s.destroyed) continue;
+			ShipSystem3D sys = s.system;
+			boolean own = sys != null && sys.effect > 0f && sys.supported();
+			ShipSystem3D carrierSys = s.fighter && s.carrier != null && !s.carrier.destroyed ? s.carrier.system : null;
+			boolean fromCarrier = carrierSys != null && carrierSys.effect > 0f && (carrierSys.look.fighterJitter != null || carrierSys.look.fighterJitterUnder != null || carrierSys.look.fighterWeaponGlow != null);
+			float[] tj = targetJitter != null ? targetJitter.get(s) : null;
+			boolean vent = s.flux != null && s.flux.venting;
+			if (!own && !fromCarrier && tj == null && !vent && s.phaseLevel <= 0.01f) continue;
+			ShipModel m = modelFor(s, sim.tuning);
+			if (m == null) continue;
+			if (!begun) {
+				auraShader.use().set("u_cam", cam.pos.x, cam.pos.y, cam.pos.z).set("u_time", sim.time).set("u_tex", 0);
+				begun = true;
+			}
+			bank.setAxisAngle(0, 0, 1, s.visualBank);
+			q.mul(s.rot, bank);
+			float px = Math.max(1f, s.radius / Math.max(0.01f, s.scale)); // collision radius in sprite pixels
+			if (own) {
+				SystemLook l = sys.look;
+				float lev = l.jitterLevel(sys), grow = l.jitterGrow * sys.effect;
+				if (l.jitterUnder != null && l.jitterUnderCopies > 0) {
+					jitter(sim, m, s, q, l.jitterUnder, lev, l.jitterUnderCopies, l.jitterUnderMin, l.jitterUnderRange + l.jitterUnderRadiusFraction * px + grow, true, camR, camU, camF);
+				}
+				if (l.jitter != null && l.jitterCopies > 0) {
+					jitter(sim, m, s, q, l.jitter, lev, l.jitterCopies, l.jitterMin, l.jitterRange + l.jitterRadiusFraction * px + grow, false, camR, camU, camF);
+				}
+				if (l.weaponGlow != null && l.weaponGlow[3] > 0f) weaponGlow(sim, s, l, l.weaponGlow, sys.effect, camF);
+			}
+			if (fromCarrier) {
+				SystemLook l = carrierSys.look;
+				float e = carrierSys.effect, range = l.fighterJitterRange + (l.fighterJitterGrows ? e * px : 0f);
+				if (l.fighterJitterUnder != null) jitter(sim, m, s, q, l.fighterJitterUnder, e, l.fighterJitterUnderCopies, 0f, range, true, camR, camU, camF);
+				if (l.fighterJitter != null) jitter(sim, m, s, q, l.fighterJitter, e, l.fighterJitterCopies, 0f, range, false, camR, camU, camF);
+				if (l.fighterWeaponGlow != null) weaponGlow(sim, s, null, l.fighterWeaponGlow, e, camF);
+			}
+			if (tj != null) jitter(sim, m, s, q, tj, tj[4], (int) tj[5], 0f, tj[6], false, camR, camU, camF);
+			if (vent) { // vanilla's radial vent glow, in the fringe colour
+				float pulse = 0.25f + 0.1f * (float) Math.sin(sim.time * 9f + s.radius);
+				glow(sim, m, s, q, s.ventFringe, pulse * (0.4f + 0.6f * s.flux.level()), 0f);
+			}
+			if (s.phaseLevel > 0.01f) { // phase highlight: the cloak's effect colour along the silhouette
+				ShipSystem3D cloak = s.cloak != null ? s.cloak : sys;
+				float[] c = cloak != null && cloak.look.effect1 != null ? cloak.look.effect1 : new float[] {1f, 0.69f, 1f};
+				glow(sim, m, s, q, c, 0.45f * s.phaseLevel, 0.4f);
+			}
+		}
+		if (begun) GL20.glUseProgram(0);
+		fxShader.use().set("u_vp", sim.camera.viewProj).set("u_tex", 0);
+		if (!glowSpots.isEmpty()) { // the weapon glows' soft halos, so they read at a distance too
+			fxShader.set("u_mode", 2);
+			GL11.glBegin(GL11.GL_QUADS);
+			Vec3 at = new Vec3();
+			for (float[] g : glowSpots) {
+				GL11.glColor4f(g[4], g[5], g[6], g[7]);
+				quad(at.set(g[0], g[1], g[2]), camR, camU, g[3]);
+			}
+			GL11.glEnd();
+			glowSpots.clear();
+		}
+	}
+
+	/** This frame's weapon glow halos: {x, y, z, size, r, g, b, a}. */
+	private final java.util.List<float[]> glowSpots = new java.util.ArrayList<>();
+
+	/** Most copies drawn per jitter layer (vanilla's damper has 25); the brightness of the rest is kept. */
+	private static final int MAX_JITTER_COPIES = 10;
+
+	/**
+	 * Vanilla's jitter in 3D: `copies` tinted copies of the hull, each shifted by a fresh random
+	 * amount between minPx and maxPx sprite pixels across the screen. Under: pushed just behind
+	 * the hull (only the halo round the silhouette shows). Over: just in front (tints the hull).
+	 */
+	private void jitter(Sim sim, ShipModel m, Ship3D s, Quat rot, float[] col, float level, int copies, float minPx, float maxPx,
+			boolean under, Vec3 camR, Vec3 camU, Vec3 camF) {
+		if (level <= 0.005f || copies <= 0) return;
+		int n = Math.min(copies, MAX_JITTER_COPIES);
+		float alpha = col[3] * level * (copies / (float) n) * (under ? 0.2f : 0.45f);
+		float push = s.radius * 0.04f * (under ? 1f : -1f); // along the view: behind or in front of the hull
+		Vec3 at = new Vec3();
+		auraShader.set("u_col", col[0], col[1], col[2]).set("u_alpha", alpha).set("u_bands", 0f).set("u_textured", 1f).set("u_inflate", 0f);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, m.texture);
+		for (int i = 0; i < n; i++) {
+			double ang = jitterRnd.nextDouble() * Math.PI * 2;
+			float r = (minPx + (maxPx - minPx) * (float) Math.sqrt(jitterRnd.nextFloat())) * s.scale;
+			at.set(s.pos).addScaled(camR, (float) Math.cos(ang) * r).addScaled(camU, (float) Math.sin(ang) * r).addScaled(camF, push);
+			model.fromRotationTranslation(rot, at.x, at.y, at.z).scaleLocal(s.scale);
+			mvp.mul(sim.camera.viewProj, model);
+			auraShader.set("u_mvp", mvp).set("u_model", model);
+			m.mesh.draw(GL11.GL_TRIANGLES);
+			lastTriangles += m.mesh.indexCount() / 3;
+		}
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex);
+	}
+
+	/** A glow along the silhouette (vent, phase highlight): the hull pushed out a little, bright at grazing angles. */
+	private void glow(Sim sim, ShipModel m, Ship3D s, Quat rot, float[] col, float alpha, float bands) {
+		if (alpha <= 0.005f) return;
+		model.fromRotationTranslation(rot, s.pos.x, s.pos.y, s.pos.z).scaleLocal(s.scale);
+		mvp.mul(sim.camera.viewProj, model);
+		auraShader.set("u_mvp", mvp).set("u_model", model).set("u_col", col[0], col[1], col[2]).set("u_alpha", alpha)
+				.set("u_bands", bands).set("u_textured", 0f).set("u_inflate", 1.2f);
+		m.mesh.draw(GL11.GL_TRIANGLES);
+		lastTriangles += m.mesh.indexCount() / 3;
+	}
+
+	/**
+	 * Vanilla's weapon glow: the weapons of the system's types (Lidar Array: non-beam ballistic and
+	 * energy hardpoints; a carrier's feed: all of a fighter's) drawn again in the glow colour.
+	 */
+	private void weaponGlow(Sim sim, Ship3D s, SystemLook l, float[] col, float level, Vec3 camF) {
+		Quat wr = new Quat();
+		Vec3 wp = new Vec3();
+		auraShader.set("u_col", col[0], col[1], col[2]).set("u_alpha", col[3] * level).set("u_bands", 0f).set("u_textured", 1f).set("u_inflate", 0f);
+		for (WeaponMount mt : s.weapons) {
+			if (l != null && !glows(l, mt)) continue;
+			mt.worldPos(s, wp);
+			float px = "LARGE".equals(mt.spec.size) ? 18f : "MEDIUM".equals(mt.spec.size) ? 12f : 8f;
+			glowSpots.add(new float[] {wp.x, wp.y, wp.z, px * 2f * s.scale, col[0], col[1], col[2], 0.8f * Math.min(1f, col[3] * 1.4f) * level});
+			if (!(mt.model instanceof ShipModel)) continue;
+			wp.addScaled(camF, -s.scale); // a hair in front so it reads over the gun
+			mt.worldRot(s, wr);
+			weaponPart(sim, (ShipModel) mt.model, wr, wp, s);
+			if (mt.gunModel instanceof ShipModel) {
+				Vec3 up = wr.up(new Vec3()).scale(0.6f * s.scale);
+				weaponPart(sim, (ShipModel) mt.gunModel, wr, up.add(wp), s);
+			}
+		}
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex);
+	}
+
+	private static boolean glows(SystemLook l, WeaponMount mt) {
+		if (l.glowLidarHardpoints) {
+			return mt.hardpoint && mt.spec.kind != s3d.core.WeaponSpec3D.Kind.BEAM && ("BALLISTIC".equals(mt.spec.type) || "ENERGY".equals(mt.spec.type));
+		}
+		return mt.spec.type != null && l.weaponTypes.contains(mt.spec.type);
+	}
+
+	private void weaponPart(Sim sim, ShipModel m, Quat rot, Vec3 pos, Ship3D s) {
+		model.fromRotationTranslation(rot, pos.x, pos.y, pos.z).scaleLocal(s.scale);
+		mvp.mul(sim.camera.viewProj, model);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, m.texture);
+		auraShader.set("u_mvp", mvp).set("u_model", model);
+		m.mesh.draw(GL11.GL_TRIANGLES);
+		lastTriangles += m.mesh.indexCount() / 3;
+	}
+
+	/**
+	 * Lidar Array winding up: its lidar dishes (vanilla decorative beam weapons) fire their ranging
+	 * beams at what the ship is aiming at, in the dish's own beam colours.
+	 */
+	private void drawLidarBeams(Sim sim) {
+		ChaseCamera cam = sim.camera;
+		boolean begun = false;
+		Vec3 a = new Vec3(), b = new Vec3();
+		for (Ship3D s : sim.ships) {
+			ShipSystem3D sys = s.system;
+			if (s.destroyed || sys == null || sys.kind != ShipSystem3D.Kind.LIDAR_ARRAY || sys.state != ShipSystem3D.State.IN || s.lidarDishes.isEmpty()) continue;
+			Vec3 aim = s == sim.player && sim.hasAimPoint ? sim.aimPoint
+					: s.ai != null && s.ai.target != null && !s.ai.target.destroyed ? s.ai.target.pos : null;
+			for (WeaponMount d : s.lidarDishes) {
+				d.worldPos(s, a);
+				float reach = d.spec.range * sim.tuning.weaponRangeMult;
+				if (aim != null) b.set(aim).sub(a);
+				else s.rot.forward(b);
+				float len = b.length();
+				if (len < 1f) continue;
+				b.scale(Math.min(reach, aim != null ? len : reach) / len).add(a);
+				if (!begun) {
+					fxShader.set("u_mode", 6);
+					GL11.glBegin(GL11.GL_QUADS);
+					begun = true;
+				}
+				float flick = 0.8f + 0.2f * (float) Math.sin(sim.time * 30f + d.localPos.x);
+				beamRibbon(cam, a, b, Math.max(2f, d.spec.beamWidth * 0.5f), d.spec.fringeColor, d.spec.coreColor, sys.effect * flick);
+			}
+		}
+		if (begun) {
+			GL11.glEnd();
+			fxShader.set("u_mode", 2);
+		}
 	}
 
 	/** Camera-facing streaks: fringe colour outside, core colour along the centre, fading toward the tail. */
@@ -582,7 +865,15 @@ public final class Renderer3D {
 			v.set(f).cross(u).normalize();
 			u.set(v).cross(f).normalize();
 			float flicker = sf.level() > 0.8f ? 0.85f + 0.15f * (float) Math.sin(sim.time * 40f + s.radius) : 1f;
-			shieldShader.set("u_inner", sf.innerColor).set("u_ring", sf.ringColor).set("u_alpha", flicker).set("u_bright", sim.tuning.shieldBrightness);
+			// A shield system (Fortress Shield) takes the shield to its own colours as it comes up, as vanilla's does.
+			ShipSystem3D ss = s.system;
+			float fe = ss != null && ss.supported() && (ss.look.shieldRing != null || ss.look.shieldInner != null) ? ss.effect : 0f;
+			float[] inner = sf.innerColor, ring = sf.ringColor;
+			if (fe > 0f) {
+				if (ss.look.shieldInner != null) inner = mixColor(inner, ss.look.shieldInner, fe);
+				if (ss.look.shieldRing != null) ring = mixColor(ring, ss.look.shieldRing, fe);
+			}
+			shieldShader.set("u_inner", inner).set("u_ring", ring).set("u_alpha", flicker).set("u_bright", sim.tuning.shieldBrightness);
 			for (int i = 0; i < ShieldFlux.HITS; i++) {
 				float k = sf.hitSize[i] * Math.max(0f, 1f - sf.hitAge[i] / 0.45f);
 				s.rot.rotate(sf.hitDir[i], hd);
@@ -602,6 +893,12 @@ public final class Renderer3D {
 			}
 			GL11.glEnd();
 		}
+	}
+
+	private static float[] mixColor(float[] a, float[] b, float k) {
+		float[] out = a.clone();
+		for (int i = 0; i < Math.min(3, out.length); i++) out[i] = a[i] + (b[i] - a[i]) * k;
+		return out;
 	}
 
 	private static void shieldVertex(Vec3 c, float r, Vec3 f, Vec3 u, Vec3 v, float theta, float phi, float edge, Vec3 d) {
@@ -734,7 +1031,10 @@ public final class Renderer3D {
 		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
 		fxShader.set("u_mode", 2);
 		GL11.glBegin(GL11.GL_QUADS);
+		boolean rings = false;
 		for (Effect e : sim.combat.effects) {
+			if (!e.visible()) continue;
+			rings |= e.kind == Effect.Kind.RING;
 			float age = e.age01();
 			float size, alpha;
 			switch (e.kind) {
@@ -751,6 +1051,18 @@ public final class Renderer3D {
 			}
 		}
 		GL11.glEnd();
+		if (!rings) return;
+		// Shockwaves: a thin shell racing out fast, then slowing as it fades.
+		fxShader.set("u_mode", 8);
+		GL11.glBegin(GL11.GL_QUADS);
+		for (Effect e : sim.combat.effects) {
+			if (e.kind != Effect.Kind.RING || !e.visible()) continue;
+			float age = e.age01();
+			GL11.glColor4f(e.r, e.g, e.b, (float) Math.pow(1f - age, 1.6));
+			quad(e.pos, camR, camU, e.size * (0.15f + 0.85f * (1f - (1f - age) * (1f - age))));
+		}
+		GL11.glEnd();
+		fxShader.set("u_mode", 2);
 	}
 
 	/**
