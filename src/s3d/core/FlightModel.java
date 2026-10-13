@@ -44,20 +44,21 @@ public final class FlightModel {
 
 		// ---- translation (in the body frame) ----
 		Vec3 vb = s.rot.inverseRotate(s.vel, new Vec3());
-		float fwdSpeed = (p.fwdSpeed * s.sysSpeedMult + (s.speedBonus + s.sysSpeedFlat) * t.speedMult) * Math.max(thrust, 0.0001f);
-		float desZ = s.sysFullThrottle ? -fwdSpeed : s.throttle >= 0f ? -s.throttle * fwdSpeed : -s.throttle * p.revSpeed;
+		float top = s.sysTopSpeedMult; // phase coil stress: the whole envelope shrinks
+		float fwdSpeed = (p.fwdSpeed * s.sysSpeedMult + (s.speedBonus + s.sysSpeedFlat) * t.speedMult) * Math.max(thrust, 0.0001f) * top;
+		float desZ = s.sysFullThrottle ? -fwdSpeed : s.throttle >= 0f ? -s.throttle * fwdSpeed : -s.throttle * p.revSpeed * top;
 		if (s.sysBrake) desZ = 0f; // Convulsive Lunge: no thrust of its own, it decelerates (vanilla) while the lunge pulls
 		boolean speedingUp = desZ * vb.z >= 0f && Math.abs(desZ) > Math.abs(vb.z);
 		if (thrust > 0f) {
 			vb.z = approachAxis(vb.z, desZ, p.fwdAccel * accK, p.fwdDecel * accK, dt);
-			vb.x = approachAxis(vb.x, c.strafeX * p.strafeSpeed * thrust, p.strafeAccel * accK, p.lateralDecel * accK, dt);
-			vb.y = approachAxis(vb.y, c.strafeY * p.verticalSpeed * thrust, p.verticalAccel * accK, p.verticalDecel * accK, dt);
+			vb.x = approachAxis(vb.x, c.strafeX * p.strafeSpeed * thrust * top, p.strafeAccel * accK, p.lateralDecel * accK, dt);
+			vb.y = approachAxis(vb.y, c.strafeY * p.verticalSpeed * thrust * top, p.verticalAccel * accK, p.verticalDecel * accK, dt);
 		}
 		s.rot.rotate(vb, s.vel);
 
 		// Total speed never exceeds the hull's max speed (as in vanilla); bleed off excess smoothly.
 		float speed = s.vel.length();
-		float cap = Math.max(fwdSpeed, p.revSpeed);
+		float cap = Math.max(fwdSpeed, p.revSpeed * top);
 		if (speed > cap && thrust > 0f) { // flamed out: no flight assist, the ship just drifts
 			float target = Math.max(cap, speed - p.fwdDecel * dt);
 			s.vel.scale(target / speed);

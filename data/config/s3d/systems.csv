@@ -1,0 +1,5 @@
+id,kind,params
+# What a ship system does in Starsector 3D. Copy this file to your mod's data/config/s3d/ and add rows; see MODDING.md.
+# kind: one of 3D's system kinds (BURN_DRIVE / DAMPER / FORTRESS_SHIELD ...) or IGNORE. params: keys of the systems section of s3d_tuning.json.
+#mymod_overdrive,BURN_DRIVE,burnDriveSpeed=450 burnDriveTurnMult=0.7
+#mymod_cosmetic_glow,IGNORE,

@@ -76,7 +76,13 @@ public final class Renderer3D {
 		} catch (Throwable t) {
 			log.warn("S3D: HUD font unavailable, text disabled", t);
 		}
-		hud = new HudRenderer(fxShader, font);
+		BitmapFont victor = null; // vanilla's combat HUD font, for your ship panel and the status list
+		try {
+			victor = BitmapFont.load("graphics/fonts/victor14.fnt");
+		} catch (Throwable t) {
+			log.warn("S3D: vanilla HUD font unavailable, the ship panel uses the HUD font", t);
+		}
+		hud = new HudRenderer(fxShader, font, victor);
 		whiteTex = TextureUtil.upload(new int[] {0xFFFFFFFF}, 1, 1, false, 1f);
 		initialized = true;
 		log.info("S3D: renderer initialised");

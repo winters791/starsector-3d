@@ -346,6 +346,10 @@ public final class Sim {
 	/**
 	 * Ship systems: your F (system) and right click (phase cloak, on phase ships), then every ship's
 	 * systems advance and set this frame's modifiers; flux and shields pick up what they block.
+	 * Each ship's systems run on its own clock, as vanilla advances a ship by its own time: a phased
+	 * AI's cloak upkeep and timers run 3x as fast as the battle, and while you're phased everyone
+	 * else's run at the battle's slowed pace. This frame's time mults aren't known until the systems
+	 * have run, so the clock is last frame's.
 	 */
 	private void stepSystems(PilotInput in, float dt) {
 		if (player != null && !player.destroyed && !spectating) {
@@ -357,19 +361,24 @@ public final class Sim {
 		}
 		// Clear everyone's modifiers first: some systems work on other ships (Entropy Amplifier on its
 		// target, Targeting Feed on fighters), whichever order the ships are stepped in.
-		for (Ship3D s : ships) s.resetSystemEffects();
+		for (Ship3D s : ships) {
+			s.clock = worldTimeScale * s.timeMult;
+			s.resetSystemEffects();
+		}
 		for (Ship3D s : ships) {
 			if (s.destroyed) continue;
+			float sdt = dt * s.clock;
 			if (s.system != null) {
-				s.system.step(s, this, dt);
+				s.system.step(s, this, sdt);
 				systemSounds(s, s.system);
 			}
 			if (s.cloak != null) {
-				s.cloak.step(s, this, dt);
+				s.cloak.step(s, this, sdt);
 				systemSounds(s, s.cloak);
 			}
 			if (s.flux != null) {
 				s.flux.noDissipation = s.sysNoDissipation;
+				s.flux.noHardDissipation = s.sysNoHardDissipation;
 				s.flux.dissipationMult = s.sysDissipationMult;
 				s.flux.forceUp = s.sysForceShield;
 				s.flux.blocked = s.sysNoShield || s.phased;
@@ -386,8 +395,9 @@ public final class Sim {
 	}
 
 	/**
-	 * Flux, shields and venting for every ship. Omni shields turn toward incoming fire, else toward
-	 * the ship's target (for you: the aim target; while free-looking, wherever the camera looks).
+	 * Flux, shields and venting for every ship, each on its own time (dt is battle time). Omni shields
+	 * turn toward incoming fire, else toward the ship's target (for you: the aim target; while
+	 * free-looking, wherever the camera looks).
 	 */
 	private void stepFlux(PilotInput in, float dt) {
 		if (player != null && player.flux != null && !player.destroyed) {
@@ -420,7 +430,7 @@ public final class Sim {
 				}
 				desired = s.rot.inverseRotate(want, new Vec3());
 			}
-			f.step(dt, desired, tuning);
+			f.step(dt * s.timeMult, desired, tuning); // on the ship's own time, like its systems
 			s.speedBonus = f.zeroFluxBoostActive() ? f.zeroFluxBoost : 0f;
 		}
 	}

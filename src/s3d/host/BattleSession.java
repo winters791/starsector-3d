@@ -117,6 +117,10 @@ final class BattleSession extends Session3D {
 
 	/** Null if this battle can be played in 3D, else why not. */
 	static String unsupported(CombatEngineAPI engine, s3d.core.Tuning t) {
+		for (ShipAPI s : engine.getShips()) {
+			s3d.core.ModData.HullRow row = ModDataLoader.hullRow(s.getHullSpec());
+			if (row != null && row.vanilla2d) return s.getHullSpec().getHullId() + " (" + row.mod + "'s hulls.csv keeps its battles 2D)";
+		}
 		if (t.battleStations) return null;
 		for (ShipAPI s : engine.getShips()) {
 			if (s.isStation() || s.isStationModule()) return "station battle (battle.stations is off)";

@@ -125,8 +125,8 @@ public final class ShieldFlux {
 		return true;
 	}
 
-	/** Set by the ship's systems each frame: no dissipation (some systems), shield forced up / blocked. */
-	public boolean noDissipation, forceUp, blocked;
+	/** Set by the ship's systems each frame: no dissipation (some systems), no hard flux dissipation (phase cloak), shield forced up / blocked. */
+	public boolean noDissipation, noHardDissipation, forceUp, blocked;
 
 	/** Spends soft flux for a shot. False (nothing spent) if it would exceed capacity, or while overloaded/venting. */
 	public boolean spend(float soft) {
@@ -200,12 +200,13 @@ public final class ShieldFlux {
 			}
 			return;
 		}
-		// Soft flux first; hard flux only with the shield down (or the hullmod/skill fraction while up).
+		// Soft flux first; hard flux only with the shield down (or the hullmod/skill fraction while up),
+		// and not at all while a system blocks it (phased).
 		float d = dissipation * dissipationMult * dt;
 		float soft = flux - hardFlux;
 		float fromSoft = Math.min(soft, d);
 		flux -= fromSoft;
-		float hardBudget = shieldUp() ? dissipation * dt * hardDissipationFrac : d - fromSoft;
+		float hardBudget = noHardDissipation ? 0f : shieldUp() ? dissipation * dt * hardDissipationFrac : d - fromSoft;
 		float fromHard = Math.min(hardFlux, Math.max(0f, hardBudget));
 		hardFlux -= fromHard;
 		flux -= fromHard;

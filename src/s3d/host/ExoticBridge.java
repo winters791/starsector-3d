@@ -57,6 +57,13 @@ final class ExoticBridge {
 
 	private ExoticBridge() {}
 
+	/** The scripts effect() knows (keep in step with its switch). For the compatibility report. */
+	static final java.util.Set<String> EFFECTS = java.util.Set.of("RiftBeamEffect", "RiftCascadeEffect", "RiftLanceEffect", "RiftTorpedoEffect",
+			"RealityDisruptorEffect", "VoltaicDischargeOnFireEffect", "VoltaicCannonEffect", "VoidblasterEffect", "NeutronTorpedoOnFireEffect",
+			"KineticFragmentMissileEffect", "SeekerFragmentMissileEffect", "UnstableFragmentMissileEffect", "DevouringSwarmMissileEffect",
+			"SwarmLauncherEffect", "VortexLauncherEffect", "AbyssalGlareEffect", "AssayingRiftEffect", "InimicalEmanationOnFireEffect",
+			"RiftLightningEffect", "PseudoparticleJetEffect");
+
 	/** A batch-2 script by its simple class name: its 3D version set on ws (or noted as visual only). False if it isn't one. */
 	static boolean effect(WeaponSpec3D ws, String simple, ShipAPI ship, Tuning t) {
 		float energy = ship.getMutableStats().getEnergyWeaponDamageMult().getModifiedValue();

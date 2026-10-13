@@ -5,6 +5,143 @@ known issues and next steps. Newest status first.
 
 ## Status
 
+- **2026-10-13 23:55 — Bug-report files for playtesters (user: "how will a player report bugs?", then "implement 3D
+  specific error logging"; testers will post to a Discord channel or a separate public issues repo). Compiles; a
+  throwaway harness with a fake SettingsAPI passed 12/12 (it isn't part of the bench: BattleLog needs Global). Jar NOT
+  rebuilt (the HUD session was mid-edit). Awaiting in-game test.**
+  - `host/BattleLog`, a log4j appender on the root logger installed first thing in `onApplicationLoad`. It keeps every
+    `s3d.*` line of the current 3D battle, plus WARN+ from any other logger while the battle runs, and writes
+    `saves/common/s3d_last_battle.txt.data` every minute, when the battle ends (handed back, stayed 2D, combat over, or
+    closed by the game: the next battle's init closes it) and on an error. Also `s3d_previous_battle` (the battle before,
+    kept when the next 3D battle starts; also carried over from the last game session) and `s3d_last_error` (written on
+    any ERROR whose trace has an `s3d.` frame, ours or logged by the game, so later battles don't overwrite it).
+  - Header: what to send, the battle and its outcome, mod/game version, OS, Java, heap, GL renderer (`GLCaps`), screen
+    and UI scale, enabled mods with versions, ships by side (refreshed every 10 s on the game thread). Then warnings
+    and errors (up to 60, with traces up to 40 lines), our lines from outside 3D battles (game start: version,
+    compatibility report, data-file problems), and the battle: the first 250 KB plus a rolling last 400 KB, to stay under
+    writeTextFileToCommon's 1 MB.
+  - `CombatHostPlugin.fail` puts `Session3D.state()` in the outcome (battle time, ships per side, shots, player ship
+    and system state) before it logs the error. The in-game message now names `saves/common/s3d_last_error.txt.data`.
+  - Locking: `doAppend` holds the appender's monitor (and log4j holds the root logger's), so nothing inside
+    `synchronized (this)` may log; files are written outside it, and lines logged while writing are skipped (`writer`).
+    The harness checked this with 300 battles opened and closed while two threads log.
+  - Cost to watch: in a big battle each write builds and saves up to ~650 KB once a minute on the game thread (a few
+    ms). If the minute's "S3D perf" worst frame shows it, make the periodic write smaller or less frequent.
+  - Still to do for testers: a short tester README (controls, known issues, which files to attach) and the report form.
+
+- **2026-10-13 23:40 — Modder data layer and compatibility report (user: "is there a way future modders can support this
+  framework?", then "build the data layer and compatibility report"). Bench 5 new checks (`S3D_ONLY=modData`), full
+  bench all pass. Awaiting in-game test.** Reference for modders: `MODDING.md`.
+  - Other mods add `data/config/s3d/systems.csv` (system id -> 3D kind or IGNORE, plus per-system numbers using keys of
+    the tuning file's "systems" section), `weapon_effects.csv` (script class -> EMP_ARCS / ARMOR_STRIP / ARMOR_BURN /
+    SHIELD_BONUS / EXTRA_ARC / ARC_GUN / VISUAL / IGNORE, or a vanilla script's simple name to get its 3D version) and
+    `hulls.csv` (hull -> battles stay 2D). They don't need Java or a dependency on this mod. Templates with commented
+    examples are in our `data/config/s3d/`.
+  - `core/ModData` parses and validates rows (pure, bench-tested). `host/ModDataLoader` reads each enabled mod's files
+    one at a time with `loadCSV(path, modId)` in load order: the game's merged-spreadsheet loader picks between mods
+    "in an undefined manner", and we want to say whose row won. Later mods win and the conflict is logged. The files
+    are read at game start and again at each 3D battle start, so edits show without a restart.
+  - A system row wins over the built-in mapping (it can also rebalance vanilla's own systems). Its numbers become a
+    per-system `Tuning` copy (`Tuning.withSystems`, `ShipSystem3D.tuning`); the battle's tuning is untouched.
+    Misspelt keys are caught by `Tuning.systemKeys()`, which tracks the keys `readSystems` reads, so there is no
+    second list to keep in step. Weapon effect rows are looked up by full class name first, then by simple name, before
+    the built-in scripts (`ShipBridge.effect` -> `builtInEffect`). Hull rows follow skins and (D) hulls to their base.
+  - `host/CompatReport`: at game start, writes `saves/common/s3d_compatibility.txt.data`. For vanilla and each mod it
+    lists systems that are NOT IN 3D (with type, AI type, script and the hulls that have them), systems guessed from
+    their type, weapons with a GAP (unknown on-hit, on-fire, every-frame or beam script, or an unhandled shot
+    behaviour), hulls with a gap, what each data file said, and problems in the data files (unknown kind, effect or
+    key, missing number, an id nothing has, a script no weapon uses, two mods writing the same row). Every-frame
+    scripts come from `data/weapons/<id>.wpn`; 8 vanilla weapons have no file under their id. The log line
+    `S3D: compatibility report: ... (N ms)` gives the time it takes, so watch the load time.
+  - The report's script lists are `ShipBridge.MODELLED_EFFECTS` / `VISUAL_EFFECTS` and `ExoticBridge.EFFECTS`. Keep them
+    in step with the switches; a diff of the switch case labels against the sets matched when this was written.
+  - Offline preview against vanilla's files: 0 unknown vanilla weapon scripts; 10 systems matched by type (drone
+    launchers, energy_conversion / skimmer_drone as DISPLACER); **7 vanilla systems not in 3D**: flarelauncher_single
+    (type WEAPON, AI FLARE_JAMMER), dynamic_stabilizer, inferniuminjector, interdictor, cryoflux, chiral_figment,
+    traveldrive (campaign Full Burn, probably irrelevant in battle).
+  - Not done: a Java API for behaviour no kind or effect covers (MODDING.md says it may come later); the report doesn't
+    check hullmods.
+
+- **2026-10-13 23:35 — MIRV spread is 3D (user: "make the MIRV spread 3D instead of flat"). `S3D_ONLY=missileGuidance`
+  (1 new check). Awaiting in-game test.**
+  - `Combat.split`: warheads used to fan out in one plane (the lead direction x a horizontal side vector). Now each turns
+    away from the spread's centre by the angle vanilla's fan gives it, toward any side of it. Even spread (Hurricane,
+    Hydra, Sabot): vanilla's mirrored pairs keep their angles, each pair on its own spoke, spokes evenly round the
+    half-turn, the whole pattern rolled at random per split: Hurricane = one straight back + pairs at 30/60/90 deg on
+    spokes 60 deg apart (a three-armed flower); Sabot = a + of shells at 5/10 deg. Random spread: angle uniform up to
+    half the arc (as vanilla's), any direction round the centre. Arc offset (backward spill) and spreadInaccuracy as
+    before. Bench: Hurricane angles 0/30/30/60/60/90/90 exactly, flattest plane through two pushes leaves one 49 deg
+    out, 7 of 7 still hit.
+
+- **2026-10-13 23:15 — Phase cloak flux and speed as vanilla, yellow gun crosshairs (user: "the Ziggurat boss (TTS
+  Xenophornica) has unlimited flux and never unphases; phasing uses way less flux than vanilla; add the phase-ship speed
+  loss; make the + crosshair a contrasty yellow"). Full bench 129/129 (4 new, `S3D_ONLY=phaseRules`). Awaiting in-game
+  test.**
+  - **Why phasing was free**: vanilla's ship_systems.csv marks the phase cloak `hardFlux` and `noHardDissipation`. We read
+    the first but not the second, so the hard-flux upkeep dissipated as it came in (Ziggurat: 320/s upkeep vs 1200/s
+    dissipation = phased forever). Now `ShipSystem3D.hardDissipationAllowed` (from `isHardDissipationAllowed()`) ->
+    `ShieldFlux.noHardDissipation`: soft flux still dissipates while phased, hard flux stays until you unphase.
+  - **Ship clocks**: vanilla advances each ship (systems, flux) by battle time x its own time mult. Ours stepped every
+    ship's systems and flux on the battle clock, so a phased AI paid a third of its upkeep per battle second, and while
+    you were phased everyone else's system timers ran 3x too fast for the slowed world. Now `Ship3D.clock` (last frame's
+    world scale x time mult) drives each ship's systems, and flux steps at battle dt x time mult. Bench: AI phased 2 s ->
+    2144 hard flux (3x clock: 2240, old: 960 minus dissipation).
+  - **Phase coil stress** (vanilla `PhaseCloakStats`): while cloaked, top speed = 33% + 67% x (1 - min(1, hard flux
+    level / 50%)) — so it falls from the moment you phase (the upkeep is hard flux) and recovers as hard flux dissipates
+    once you're out. Constants read from PhaseCloakStats' public fields; the 50% threshold from the live ship's
+    `PHASE_CLOAK_FLUX_LEVEL_FOR_MIN_SPEED_MOD` (Adaptive Phase Coils +50%); phased speed / accel bonuses from
+    `PHASE_CLOAK_SPEED_MOD` / `ACCEL_MOD` (Phase Mastery +100% top speed, Phase Corps). New `Ship3D.sysTopSpeedMult`
+    scales the whole envelope (forward, reverse, strafe, vertical, cap). Panel state: `PHASED  SPEED 60%` (red) under
+    stress. Not copied: vanilla also multiplies top speed and accel by the cloak's fade level during the 0.5 s in/out.
+  - **AI boss now has to come out**: under constant fire a Ziggurat AI was phased 64% of 40 s and came out 4 times,
+    hard flux peaking at 85% (its unphase threshold). Before: phased the whole time.
+  - **Right-click systems that aren't cloaks**: the Invictus (Canister Flak) and Vanguard (Damper) have their defence
+    system in the phase-cloak slot; 3D turned it into a phase cloak (log showed `phase cloak Canister Flak -> PHASE_CLOAK`).
+    Now only `isPhaseCloak()` systems become cloaks; others keep their own kind, right click uses them, the AI uses them
+    by their kind.
+  - **Gun crosshairs**: each selected gun's "+" is now solid saturated yellow (2 px arms) with a 1 px dark rim, drawn
+    over the line pass; not-ready guns at 55%. Kill markers keep the red-orange. Offline:
+    `S3D_PREVIEW_ONLY=shipPanel` -> build/preview/ship_panel*.png (new `ship_panel_phase.png`: phased Ziggurat).
+
+- **2026-10-13 — Missile guidance and fuses audited against vanilla's missile AIs (user: "Hurricane MIRV launcher not
+  working as intended; check each weapon against its 2D counterpart"). Bench 125/125 (7 new, `S3D_ONLY=missileGuidance`),
+  jar rebuilt 22:54. First half got into commit 58e94d4; the rest is uncommitted. Awaiting in-game test.**
+  - Read vanilla's behaviour from its data files and (for the order of events) its missile AI classes by type; rebuilt in
+    our own code, nothing copied. Each missile now flies by `WeaponSpec3D.guidance`, from vanilla's missile type:
+  - **Hurricane was broken**: its warheads are vanilla type MISSILE_TWO_STAGE_SECOND_UNGUIDED, which 3D read as "no
+    target", so all seven fanned out backwards (arcOffset 180) and burned away from the target. Now as vanilla: they
+    spawn facing the target, drift out along the backward fan with no thrust while they line up on the lead (flight
+    clock held), lock on (nose within 1 deg after 0.5 s, or after 3 s, or the target phases) and burn straight in,
+    unguided. Bench: 7 of 7 hit, fanned ~220 wide when they lock.
+  - **Two-stage** (TWO_STAGE: Squall, Hurricane warheads, Threat unstable fragments): the same line-up / lock / straight
+    burn. Squall used to home all the way (undodgeable); now a ship that moves after the lock is missed, as in vanilla.
+  - **MIRV split rule** (Sabot, Pilum, Hydra, Hurricane): splits within split range of the hull after its minimum time,
+    or earlier if `canSplitEarly` and it would get there before then (Hurricane, Sabot); only with its nose on the
+    target (within the fan arc less 1.5 deg, or anywhere on the hull for arc-0 Pilum: vanilla allows a tenth of the
+    target's apparent size, our noses lead so the whole hull counts). Near the split it leads for its warheads' speed.
+    `evenSpread` (random within the arc otherwise), `spreadInaccuracy`, and shell warheads' `projectileRange` (Sabot 600)
+    are read. The fan's centre stays the warheads' lead (vanilla: the MIRV's nose, which the lead steering keeps there).
+  - **Heatseeker** (Salamander, Salamander pod): vanilla circles round to within 45 deg of the target's tail before it
+    goes in; it used to home straight at the nose. Now it orbits 225-325 beyond the hull (swinging wide inside that,
+    in when outside, random 15-30 deg weave rerolled every 1-3 s) toward the tail, then commits. Fighters and station
+    sections it goes straight for. Bench: strikes 58 behind the centre (homing: 152 in front).
+  - **Proximity Charge Launcher** (PHASE_CHARGE, also the bomber version): flies to the point it was aimed at, brakes to a
+    stop there and waits for its fuse; it used to home on the ship.
+  - **Fuses** (vanilla ProximityFuseAI): fused shots now also go off by enemy ship hulls (flak bursts just short of a
+    hull instead of needing a direct hit), fused shells burst where their range runs out (flak airbursts), with
+    `shotRangeVariance` (Devastator up to 75% short, Heavy Adjudicator 20%), and fused missiles burst when their flight
+    ends instead of fizzling: **Canister Flak's random fuses now actually go off**, as do proximity charges, Stinger
+    mines and unstable fragments.
+  - Blasts (areaBlast, all of them: flak, mines, rifts...) and the fuse test trace toward the hull's nearest point when
+    the line to its centre misses, so a burst beside a wing or a long nose hurts it (vanilla: anything within radius).
+  - Checked and already matching vanilla: gun cycle (charge, burst, cooldown), beam cycle (charge up, sustain or burst,
+    charge down, cooldown), rockets and bombs straight, homing MISSILE type, DEM missiles, flares, mines.
+  - Not modelled (minor): vanilla homing missiles' small random course weave. (The flat MIRV fan became a 3D spread, 23:35.)
+  - Log line per weapon now names the guidance ("two-stage (aims, locks, burns straight)", "heatseeker (goes for the
+    tail)", "to the aim point, then waits"), split details and fused-shell variance.
+  - Unverified until played: Hurricane / Squall look and feel at 3D scale, Salamander orbit vs fast frigates, more flak
+    explosions on screen (perf), proximity charges from fighters.
+
 - **2026-10-13 — Ship systems batch 4: Mote Attractor, the Threat's and the Shrouded's systems, Swarm Launcher and
   Churning Locus, and vanilla's swarm / shroud looks (user: "make the next batch"). Built from each vanilla script's
   behaviour and look. Full bench 118/118 (with the station / range session's changes); jar rebuilt with both; awaiting

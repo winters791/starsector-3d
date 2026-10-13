@@ -985,16 +985,19 @@ public final class Combat {
 
 	/**
 	 * Vanilla's proximity charge: flies to the point it was aimed at and stops there (braking at its
-	 * acceleration), waiting for its fuse or the end of its flight. Without an aim point it drifts.
+	 * acceleration once that's all the room it has left), waiting for its fuse or the end of its
+	 * flight. Without an aim point it drifts.
 	 */
 	private boolean toAimPoint(Missile3D ms, float dt, float turn) {
 		if (ms.aimPoint == null) return false;
 		Vec3 to = gA.set(ms.aimPoint).sub(ms.pos);
-		if (to.length() > AIM_POINT_STOP) {
-			rotateToward(ms.dir, to.normalize(), turn);
+		float dist = to.length(), speed = ms.vel.length(), acc = Math.max(1f, ms.spec.missileAccel);
+		float closing = dist > 1e-3f ? ms.vel.dot(to) / dist : 0f;
+		if (dist > AIM_POINT_STOP && (closing <= 0f || closing * closing / (2f * acc) < dist - AIM_POINT_STOP * 0.5f)) {
+			rotateToward(ms.dir, to.scale(1f / dist), turn);
 			return true;
 		}
-		float speed = ms.vel.length(), brake = Math.max(1f, ms.spec.missileAccel) * dt;
+		float brake = acc * dt;
 		ms.vel.scale(speed > brake ? (speed - brake) / speed : 0f);
 		return false;
 	}
@@ -1698,9 +1701,53 @@ public final class Combat {
 				continue;
 			}
 			float r = range + s.radius * 1.15f + 2f; // bounding sphere first, the hull's shape only when that's close
-			if (dist2(s.pos, at) <= r * r && s.surfaceDistance(at) <= range) return true;
+			if (s.volume == null || dist2(s.pos, at) > r * r) continue;
+			if (hullWithin(s, at, range)) return true;
 		}
 		return false;
+	}
+
+	private final Vec3 pDir = new Vec3(), pEnd = new Vec3(), pHit = new Vec3(), pLocal = new Vec3(), pNear = new Vec3();
+
+	/**
+	 * True if s's hull comes within `reach` of point `at`: traced along the line to its centre, and if
+	 * that misses (a burst beside a wing or a long nose), toward the nearest point of its hull. The same
+	 * lines a blast follows (areaBlast), so a fuse that goes off by a hull also hurts it.
+	 */
+	private boolean hullWithin(Ship3D s, Vec3 at, float reach) {
+		return hullHit(s, at, s.pos, reach, pHit, pLocal) || hullHit(s, at, nearestHullPoint(s, at, pNear), reach, pHit, pLocal);
+	}
+
+	/** Traces from `at` toward `toward` for up to `reach`; writes the world hit point and local just-outside point. */
+	private boolean hullHit(Ship3D s, Vec3 at, Vec3 toward, float reach, Vec3 hitOut, Vec3 localOut) {
+		Vec3 d = pDir.set(toward).sub(at);
+		float len = d.length();
+		if (len < 1e-3f) d.set(s.pos).sub(at);
+		len = d.length();
+		if (len < 1e-3f) return false;
+		pEnd.set(at).addScaled(d, reach / len);
+		return segmentHit(s, at, pEnd, hitOut, localOut) >= 0f;
+	}
+
+	/** The point of s's hull nearest `at` (world), from the volume's collision samples (outline and surfaces). */
+	private static Vec3 nearestHullPoint(Ship3D s, Vec3 at, Vec3 out) {
+		float[] p = s.volume.collisionSamples();
+		Vec3 l = out.set(at).sub(s.pos);
+		s.rot.inverseRotate(l, l);
+		l.scale(1f / Math.max(1e-3f, s.scale));
+		float best = Float.MAX_VALUE, bx = 0f, by = 0f, bz = 0f;
+		for (int i = 0; i + 2 < p.length; i += 3) {
+			float dx = p[i] - l.x, dy = p[i + 1] - l.y, dz = p[i + 2] - l.z, d2 = dx * dx + dy * dy + dz * dz;
+			if (d2 < best) {
+				best = d2;
+				bx = p[i];
+				by = p[i + 1];
+				bz = p[i + 2];
+			}
+		}
+		out.set(bx, by, bz).scale(s.scale);
+		s.rot.rotate(out, out);
+		return out.add(s.pos);
 	}
 
 	/**
@@ -1746,7 +1793,8 @@ public final class Combat {
 				shieldDamage(source, s, damage * falloff(sHit.distance(at), core, radius), w, false, sHit, sDir, true);
 				continue;
 			}
-			if (segmentHit(s, at, end, hit, local) < 0f) continue;
+			// Along the line to its centre; failing that toward its nearest hull (a burst beside a wing still reaches it).
+			if (segmentHit(s, at, end, hit, local) < 0f && !hullHit(s, at, nearestHullPoint(s, at, pNear), radius, hit, local)) continue;
 			float[] dealt = dealDamage(source, s, damage * falloff(hit.distance(at), core, radius), damage * w.armorMult, w, local);
 			damageText(hit, source, s, dealt);
 			if (s.hull <= 0f && !s.destroyed) destroy(s);
@@ -1759,12 +1807,17 @@ public final class Combat {
 	}
 
 	/**
-	 * Splitting missile: warheads fan out (round the arc offset from the lead direction: Hydra's and
-	 * Hurricane's spill out backwards), evenly over the arc or at random in it, plus the behaviour's
-	 * scatter. Shell warheads fly straight. Missile warheads come out facing the target, as vanilla
-	 * spawns them, drifting along the fan, and go after the same target under their own guidance:
-	 * Pilum's second stage homes, Hydra's DEM warheads swing round and attack, Hurricane's (two-stage)
-	 * line up from where the fan took them, lock on and burn in.
+	 * Splitting missile: warheads spread out round the fan's centre (the arc offset from the lead
+	 * direction: Hydra's and Hurricane's spill out backwards), evenly or at random, plus the behaviour's
+	 * scatter. The spread is a cone, not vanilla's flat fan: each warhead turns away from the centre by
+	 * the angle vanilla's fan would give it (even spread: the same set of angles; random: uniform up to
+	 * half the arc), but toward any side of it. Even spread puts each mirrored pair of the fan on its
+	 * own spoke, spokes evenly round the half-turn and the whole pattern rolled at random, so seven
+	 * Hurricane warheads come out as a centre one and three crossed pairs. Shell warheads fly straight.
+	 * Missile warheads come out facing the target, as vanilla spawns them, drifting along the spread,
+	 * and go after the same target under their own guidance: Pilum's second stage homes, Hydra's DEM
+	 * warheads swing round and attack, Hurricane's (two-stage) line up from where the spread took
+	 * them, lock on and burn in.
 	 */
 	private void split(Missile3D ms) {
 		WeaponSpec3D w = ms.spec, h = w.mirvWarhead;
@@ -1777,13 +1830,27 @@ public final class Combat {
 		float off = (float) Math.toRadians(w.mirvArcOffsetDeg);
 		if (off != 0f) dir.scale((float) Math.cos(off)).addScaled(side, (float) Math.sin(off)).normalize();
 		side.set(Math.abs(dir.y) < 0.9f ? 0f : 1f, Math.abs(dir.y) < 0.9f ? 1f : 0f, 0f).cross(dir).normalize();
+		Vec3 up = new Vec3(dir).cross(side).normalize(); // side, up: the plane round the spread's centre
 		float arc = (float) Math.toRadians(w.mirvArcDeg);
+		float roll = rnd.nextFloat() * (float) (Math.PI * 2);
+		int n = w.mirvCount, pairs = Math.max(1, n / 2);
 		Vec3 facing = new Vec3(ms.target.pos).sub(ms.pos);
 		if (facing.lengthSq() < 1e-4f) facing.set(ms.dir);
 		facing.normalize();
-		for (int i = 0; i < w.mirvCount; i++) {
-			float a = !w.mirvEvenSpread ? arc * (rnd.nextFloat() - 0.5f) : w.mirvCount == 1 ? 0f : -arc * 0.5f + arc * i / (w.mirvCount - 1);
-			Vec3 d = new Vec3(dir).scale((float) Math.cos(a)).addScaled(side, (float) Math.sin(a)).normalize();
+		for (int i = 0; i < n; i++) {
+			float a, around; // angle away from the centre, and which way round it
+			if (!w.mirvEvenSpread) {
+				a = arc * 0.5f * rnd.nextFloat();
+				around = rnd.nextFloat() * (float) (Math.PI * 2);
+			} else {
+				// Vanilla's fan position i, mirrored pair k (0 = the outermost) on spoke roll + k * 180/pairs.
+				float fan = n == 1 ? 0f : -arc * 0.5f + arc * i / (n - 1);
+				int k = Math.min(i, n - 1 - i);
+				a = Math.abs(fan);
+				around = roll + (float) Math.PI * k / pairs + (fan < 0f ? (float) Math.PI : 0f);
+			}
+			float sa = (float) Math.sin(a);
+			Vec3 d = new Vec3(dir).scale((float) Math.cos(a)).addScaled(side, sa * (float) Math.cos(around)).addScaled(up, sa * (float) Math.sin(around)).normalize();
 			if (w.mirvInaccuracyDeg > 0f) jitter(d, (float) Math.toRadians(w.mirvInaccuracyDeg * 0.5f));
 			float speed = (missile ? w.mirvSpreadSpeed : h.projectileSpeed) + rnd.nextFloat() * w.mirvSpreadSpeedRandom;
 			if (missile) {
