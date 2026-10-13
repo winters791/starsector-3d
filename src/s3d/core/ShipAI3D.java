@@ -1053,22 +1053,26 @@ public final class ShipAI3D {
 	 * their reason goes away.
 	 */
 	private void manageSystems(Sim sim, Ship3D s) {
-		ShipSystem3D sys = s.system;
-		if (sys != null && sys.supported()) {
-			boolean want = wantSystem(sim, s, sys);
-			if (sys.toggle) {
-				if (want != sys.on() && (want ? sys.ready(s) : true)) sys.activate(s);
-			} else if (want && sys.ready(s)) {
-				sys.activate(s);
-			}
-		}
+		useSystem(sim, s, s.system);
 		ShipSystem3D cloak = s.cloak;
-		if (cloak != null && cloak.supported()) {
+		if (cloak != null && cloak.kind != ShipSystem3D.Kind.PHASE_CLOAK) {
+			useSystem(sim, s, cloak); // a right-click system that isn't a cloak (Invictus: Canister Flak)
+		} else if (cloak != null) {
 			float threat = threatNow;
 			float level = s.flux != null ? s.flux.level() : 0f;
 			// Phase out of heavy incoming fire; come back to shoot when it's quiet, or before flux runs out.
 			boolean want = cloak.on() ? (threat > 0f || quiet < 0.5f) && level < 0.85f : threat > s.hullMax * 0.02f && level < 0.6f;
 			if (want != cloak.on() && (want ? cloak.ready(s) : true)) cloak.activate(s);
+		}
+	}
+
+	private void useSystem(Sim sim, Ship3D s, ShipSystem3D sys) {
+		if (sys == null || !sys.supported()) return;
+		boolean want = wantSystem(sim, s, sys);
+		if (sys.toggle) {
+			if (want != sys.on() && (want ? sys.ready(s) : true)) sys.activate(s);
+		} else if (want && sys.ready(s)) {
+			sys.activate(s);
 		}
 	}
 

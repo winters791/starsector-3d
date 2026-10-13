@@ -14,6 +14,8 @@ public final class WeaponSpec3D {
 	/** "BALLISTIC", "ENERGY", "MISSILE", ... (for the HUD and future rules). */
 	public String type;
 	public String size;
+	/** The weapon group icon in your ship panel: vanilla's turret sprite layers, bottom first (under, base, barrel); null = none. */
+	public String[] iconSprites;
 	/** False for beams and missiles until they're supported; those mounts never fire. */
 	public boolean supported;
 	public String unsupportedReason;

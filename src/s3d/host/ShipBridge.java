@@ -55,6 +55,9 @@ import com.fs.starfarer.api.impl.combat.LidarArrayStats;
 import com.fs.starfarer.api.impl.combat.MineStrikeStationStats;
 import com.fs.starfarer.api.impl.combat.MineStrikeStats;
 import com.fs.starfarer.api.impl.combat.MiningBlasterOnHitEffect;
+import com.fs.starfarer.api.impl.combat.PhaseCloakStats;
+import com.fs.starfarer.api.impl.campaign.ids.Stats;
+import com.fs.starfarer.api.combat.StatBonus;
 import com.fs.starfarer.api.impl.combat.TargetingFeedStats;
 import com.fs.starfarer.api.impl.combat.ShockRepeaterOnFireEffect;
 import com.fs.starfarer.api.impl.combat.SquallOnFireEffect;
@@ -66,6 +69,7 @@ import s3d.core.ShipSystem3D;
 import s3d.core.SystemLook;
 import s3d.core.EngineMount;
 import s3d.core.HullVolume;
+import s3d.core.ModData;
 import s3d.core.Tuning;
 import s3d.core.WeaponGroup3D;
 import s3d.core.WeaponMount;
@@ -324,9 +328,18 @@ final class ShipBridge {
 		if (sys == null) return null;
 		com.fs.starfarer.api.combat.ShipSystemSpecAPI spec0 = sys.getSpecAPI();
 		JSONObject json = spec0 != null ? spec0.getSpecJson() : null;
-		ShipSystem3D.Kind kind = ShipSystem3D.kindFor(sys.getId(), phase, json != null ? json.optString("type", null) : null,
-				json != null ? json.optString("aiType", null) : null);
+		// The right-click slot isn't always a cloak: the Invictus has Canister Flak there, the Vanguard a Damper.
+		boolean cloak = phase && (spec0 == null || spec0.isPhaseCloak() || json != null && "PHASE_CLOAK".equals(json.optString("type", null)));
+		// A mod's data/config/s3d/systems.csv row wins: the kind it plays as, and its own numbers.
+		ModData.SystemRow row = ModDataLoader.data().system(sys.getId());
+		ShipSystem3D.Kind kind = row != null ? (row.ignored() ? ShipSystem3D.Kind.UNSUPPORTED : row.kind)
+				: ShipSystem3D.kindFor(sys.getId(), cloak, json != null ? json.optString("type", null) : null,
+						json != null ? json.optString("aiType", null) : null);
 		ShipSystem3D s = new ShipSystem3D(sys.getId(), sys.getDisplayName(), kind);
+		if (row != null) {
+			s.tuning = row.tuningFor(t);
+			if (s.tuning != null) t = s.tuning;
+		}
 		s.chargeUp = Math.max(0f, sys.getChargeUpDur());
 		s.active = Math.max(0f, sys.getChargeActiveDur());
 		s.chargeDown = Math.max(0f, sys.getChargeDownDur());
@@ -345,6 +358,7 @@ final class ShipBridge {
 			s.turningAllowed = spec.isTurningAllowed();
 			s.shieldAllowed = spec.isShieldAllowed();
 			s.dissipationAllowed = spec.isDissipationAllowed();
+			s.hardDissipationAllowed = spec.isHardDissipationAllowed();
 			s.alwaysAccelerate = spec.isAlwaysAccelerate();
 			s.range = spec.getRange(ship.getMutableStats());
 			s.useSound = spec.getUseSound();
@@ -353,7 +367,7 @@ final class ShipBridge {
 			s.damage = spec.getDamage();
 			s.empDamage = spec.getEmpDamage();
 		}
-		if (phase) s.toggle = true;
+		if (cloak) s.toggle = true;
 		systemSpecifics(s, ship, spec, json, volume, t);
 		lookFromData(s.look, json);
 		return s;
@@ -409,6 +423,31 @@ final class ShipBridge {
 										HullVolume volume, Tuning t) {
 		MutableShipStatsAPI st = ship.getMutableStats();
 		switch (s.kind) {
+			case PHASE_CLOAK: {
+				// Vanilla's PhaseCloakStats: phase coil stress (top speed falls with hard flux) and the skills /
+				// hullmods that change it (Adaptive Phase Coils) or speed up the phased ship (Phase Mastery,
+				// Phase Corps). Cloaks run by another script don't get the coil stress.
+				String script = json != null ? json.optString("statsScript", "") : "";
+				if (PhaseCloakStats.FLUX_LEVEL_AFFECTS_SPEED && (script.isEmpty() || PhaseCloakStats.class.getName().equals(script))) {
+					s.coilMinSpeed = PhaseCloakStats.MIN_SPEED_MULT;
+					StatBonus level = st.getDynamic().getMod(Stats.PHASE_CLOAK_FLUX_LEVEL_FOR_MIN_SPEED_MOD);
+					float base = PhaseCloakStats.BASE_FLUX_LEVEL_FOR_MIN_SPEED;
+					s.coilStressLevel = Math.max(0f, level != null ? level.computeEffective(base) : base);
+				}
+				StatBonus speed = st.getDynamic().getMod(Stats.PHASE_CLOAK_SPEED_MOD), accel = st.getDynamic().getMod(Stats.PHASE_CLOAK_ACCEL_MOD);
+				if (speed != null) {
+					s.phaseSpeedPercent = speed.computeEffective(0f);
+					s.phaseSpeedMult = speed.getMult();
+				}
+				if (accel != null) {
+					s.phaseAccelPercent = accel.computeEffective(0f);
+					s.phaseAccelMult = accel.getMult();
+				}
+				s.note = String.format("%s upkeep, hard flux %s while phased", s.hardFlux ? "hard" : "soft", s.hardDissipationAllowed ? "dissipates" : "stays")
+						+ (s.coilStressLevel >= 0f ? String.format(", top speed falls to %.0f%% at %.0f%% hard flux", s.coilMinSpeed * 100f, s.coilStressLevel * 100f) : "")
+						+ (s.phaseSpeedPercent != 0f || s.phaseSpeedMult != 1f ? String.format(", phased top speed %+.0f%% x%.2f", s.phaseSpeedPercent, s.phaseSpeedMult) : "");
+				break;
+			}
 			case MISSILE_AUTOFORGE:
 				s.reloadBelow = json != null ? (float) json.optDouble("minFractionToReload", 1) : 1f;
 				s.reloadBaseOnly = json != null && json.optBoolean("reloadBaseAmmoAmountOnly", false);
@@ -634,7 +673,9 @@ final class ShipBridge {
 				+ (s.fluxPerUse > 0f ? String.format(", %.0f flux/use", s.fluxPerUse) : "")
 				+ (s.fluxPerSecond > 0f ? String.format(", %.0f flux/s", s.fluxPerSecond) : "")
 				+ (s.toggle ? ", toggle" : "") + (!s.firingAllowed ? ", no firing" : "");
-		return String.format(", %s %s (%s)%s: %s%s", what, s.name, s.id, s.supported() ? " -> " + s.kind : " NOT IN 3D YET", timing,
+		ModData.SystemRow row = ModDataLoader.data().system(s.id);
+		String by = row == null ? "" : row.ignored() ? " (left out by " + row.mod + "'s systems.csv)" : " (" + row.mod + "'s systems.csv" + (row.params != null ? " " + row.params : "") + ")";
+		return String.format(", %s %s (%s)%s%s: %s%s", what, s.name, s.id, s.supported() ? " -> " + s.kind : row != null ? "" : " NOT IN 3D YET", by, timing,
 				s.note != null ? "; " + s.note : "");
 	}
 
@@ -676,6 +717,7 @@ final class ShipBridge {
 		Vec3 rest = new Vec3((float) -Math.sin(a), 0f, (float) -Math.cos(a));
 		WeaponMount m = new WeaponMount(slot.getId(), ws, new Vec3(x, y, z), rest, slot.getArc(), slot.isHardpoint());
 		m.hostRef = w;
+		ws.iconSprites = iconSprites(w.getSpec());
 		if (!slot.isHidden()) {
 			WeaponSpecAPI spec = w.getSpec();
 			m.modelSource = weaponSprite(slot.isHardpoint() ? spec.getHardpointSpriteName() : spec.getTurretSpriteName(), slot.isHardpoint());
@@ -685,6 +727,22 @@ final class ShipBridge {
 			}
 		}
 		return m;
+	}
+
+	/** The weapon's icon as vanilla shows weapons: its turret sprite layers (under, base, barrel), else the hardpoint one; null if it has none. */
+	private static String[] iconSprites(WeaponSpecAPI spec) {
+		if (spec == null) return null;
+		String base = spec.getTurretSpriteName(), under = spec.getTurretUnderSpriteName();
+		String gun = spec instanceof ProjectileWeaponSpecAPI ? ((ProjectileWeaponSpecAPI) spec).getTurretGunSpriteName() : null;
+		if (base == null || base.isEmpty()) {
+			base = spec.getHardpointSpriteName();
+			under = spec.getHardpointUnderSpriteName();
+			gun = spec instanceof ProjectileWeaponSpecAPI ? ((ProjectileWeaponSpecAPI) spec).getHardpointGunSpriteName() : null;
+		}
+		if (base == null || base.isEmpty()) return null;
+		java.util.List<String> layers = new java.util.ArrayList<>(3);
+		for (String p : new String[] {under, base, gun}) if (p != null && !p.isEmpty()) layers.add(p);
+		return layers.toArray(new String[0]);
 	}
 
 	/** Turret sprites pivot on their centre; hardpoint sprites on a point a quarter up from the back. */
@@ -884,14 +942,41 @@ final class ShipBridge {
 	}
 
 	/**
-	 * Vanilla weapon scripts (on-hit, on-fire, every-frame, beam) by class name. Those with a 3D
-	 * version set their numbers on the spec, read from the script's own public constants where it has
-	 * them (so a mod that rebalances them carries over); purely visual ones are noted; anything else
-	 * is named in the log as not modelled.
+	 * The scripts builtInEffect gives a 3D version (keep in step with its switch; ExoticBridge has its
+	 * own list), and the ones that only change the look. For the compatibility report.
+	 */
+	static final java.util.Set<String> MODELLED_EFFECTS = java.util.Set.of("IonCannonOnHitEffect", "IonBeamEffect", "TachyonLanceEffect",
+			"BreachOnHitEffect", "MiningBlasterOnHitEffect", "DisintegratorEffect", "GravitonBeamEffect", "PaladinEffect", "PilumOnHitEffect",
+			"SabotOnHitEffect", "SquallOnFireEffect", "ShockRepeaterOnFireEffect", "DEMEffect", "CanisterFlakPlugin");
+	static final java.util.Set<String> VISUAL_EFFECTS = java.util.Set.of("CryoblasterEffect", "CryofluxTransducerEffect",
+			"HeavyAdjudicatorEffect", "LightsEffect", "BlinkerEffect", "SensorDishRotationEffect", "VPDriverEffect");
+
+	/**
+	 * Weapon scripts (on-hit, on-fire, every-frame, beam) by class name. Another mod's row in its
+	 * data/config/s3d/weapon_effects.csv comes first (an effect with its numbers, the 3D version of a
+	 * vanilla script, looks only, or left out); else the vanilla script's 3D version, by simple name.
 	 */
 	private static void effect(WeaponSpec3D ws, String className, ShipAPI ship, Tuning t) {
 		if (className == null || className.isEmpty()) return;
-		String simple = className.substring(className.lastIndexOf('.') + 1);
+		String simple = ModData.simpleName(className);
+		ModData.EffectRow row = ModDataLoader.data().effect(className);
+		if (row == null) {
+			builtInEffect(ws, simple, ship, t);
+		} else if (row.vanillaScript != null) {
+			builtInEffect(ws, row.vanillaScript, ship, t);
+		} else if (row.effect == ModData.Effect.VISUAL) {
+			ws.visualEffect = append(ws.visualEffect, simple);
+		} else if (row.effect != ModData.Effect.IGNORE) {
+			note(ws, ModData.apply(row, ws));
+		}
+	}
+
+	/**
+	 * Vanilla weapon scripts by simple class name. Those with a 3D version set their numbers on the
+	 * spec, read from the script's own public constants where it has them (so a mod that rebalances
+	 * them carries over); purely visual ones are noted; anything else is named in the log as not modelled.
+	 */
+	private static void builtInEffect(WeaponSpec3D ws, String simple, ShipAPI ship, Tuning t) {
 		switch (simple) {
 			case "IonCannonOnHitEffect":
 			case "IonBeamEffect":

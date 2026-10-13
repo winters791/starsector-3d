@@ -38,6 +38,15 @@ public final class ShipSystem3D {
 	public boolean toggle, hardFlux;
 	/** What vanilla blocks while it runs. */
 	public boolean firingAllowed = true, turningAllowed = true, shieldAllowed = true, dissipationAllowed = true, alwaysAccelerate;
+	/** False = hard flux can't dissipate while it runs (the phase cloak: its upkeep is hard flux that stays until you unphase). */
+	public boolean hardDissipationAllowed = true;
+	/**
+	 * Phase cloak, vanilla's "phase coil stress": while cloaked, top speed falls from 100% to coilMinSpeed
+	 * as hard flux climbs to coilStressLevel of capacity (0 = always at the minimum, negative = off).
+	 * Skills and hullmods add top speed / acceleration while cloaked (percent, then multiplier).
+	 */
+	public float coilMinSpeed = 1f, coilStressLevel = -1f;
+	public float phaseSpeedPercent, phaseSpeedMult = 1f, phaseAccelPercent, phaseAccelMult = 1f;
 	/** Vanilla sound ids for using, running and switching off the system (null = none). */
 	public String useSound, loopSound, offSound;
 	/** EMP emitter: range, damage and EMP per arc. Also the reach of the systems that act at a distance (vanilla map units). */
@@ -61,6 +70,8 @@ public final class ShipSystem3D {
 	public int dronesPerUse = 1;
 	/** For the log: what the host set up for this system. */
 	public String note;
+	/** Its own effect sizes, from another mod's data/config/s3d/systems.csv row (null = the battle's tuning). */
+	public Tuning tuning;
 	/** How it looks while it runs (vanilla's jitter, weapon glow, engine and shield colours). */
 	public SystemLook look;
 	/** Orion Device / Nova Burst: the charges, the push and the train (null for other kinds). */
@@ -375,7 +386,7 @@ public final class ShipSystem3D {
 	private void onFullyActive(Ship3D s, Sim sim) {
 		if (fired) return;
 		fired = true;
-		Tuning t = sim.tuning;
+		Tuning t = tuning != null ? tuning : sim.tuning;
 		switch (kind) {
 			case DISPLACER: {
 				// Short blink along the way the ship is going (its nose if it's nearly still).
@@ -552,12 +563,13 @@ public final class ShipSystem3D {
 
 	/** Continuous effects, scaled by the effect level. */
 	private void apply(Ship3D s, Sim sim, float dt) {
-		Tuning t = sim.tuning;
+		Tuning t = tuning != null ? tuning : sim.tuning;
 		float e = effect;
 		if (!firingAllowed) s.sysNoFire = true;
 		if (!turningAllowed && kind != Kind.BURN_DRIVE) s.sysTurnMult *= 1f - e; // Burn Drive keeps some steering (sysBurnTurnMult)
 		if (!shieldAllowed) s.sysNoShield = true;
 		if (!dissipationAllowed) s.sysNoDissipation = true;
+		if (!hardDissipationAllowed) s.sysNoHardDissipation = true;
 		if (alwaysAccelerate) s.sysFullThrottle = true;
 		switch (kind) {
 			case BURN_DRIVE:
@@ -616,6 +628,9 @@ public final class ShipSystem3D {
 				s.phaseLevel = e;
 				if (e > 0.5f) s.phased = true;
 				s.timeMult *= 1f + (t.sysPhaseTimeMult - 1f) * e;
+				s.sysSpeedMult *= (1f + phaseSpeedPercent / 100f * e) * (1f + (phaseSpeedMult - 1f) * e);
+				s.sysAccelMult *= (1f + phaseAccelPercent / 100f * e) * (1f + (phaseAccelMult - 1f) * e);
+				s.sysTopSpeedMult *= coilSpeed(s, e);
 				break;
 			case EMP_EMITTER:
 				if (state == State.ACTIVE) {
@@ -653,6 +668,16 @@ public final class ShipSystem3D {
 				break;
 			default:
 		}
+	}
+
+	/**
+	 * Phase coil stress, as vanilla's: hard flux over coilStressLevel of capacity pushes top speed down
+	 * to coilMinSpeed (scaled by how far the cloak is in, e). 1 = no stress.
+	 */
+	public float coilSpeed(Ship3D s, float e) {
+		if (coilStressLevel < 0f || s.flux == null || s.flux.maxFlux <= 0f) return 1f;
+		float stress = coilStressLevel <= 0f ? 1f : Math.min(1f, s.flux.hardFlux / s.flux.maxFlux / coilStressLevel);
+		return coilMinSpeed + (1f - coilMinSpeed) * (1f - stress * e);
 	}
 
 	public void reset() {

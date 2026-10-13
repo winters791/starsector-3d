@@ -20,6 +20,7 @@ import s3d.core.Sim;
 import s3d.core.Tuning;
 import s3d.core.WeaponMount;
 import s3d.render.FxSprites;
+import s3d.render.GameFiles;
 import s3d.render.GLStateGuard;
 import s3d.render.HudRenderer;
 import s3d.render.Renderer3D;
@@ -37,6 +38,8 @@ abstract class Session3D {
 	static {
 		// Vanilla's sprite sheets for the swarm effects (fragments, shroud blobs, glows), from the game's own files.
 		FxSprites.loader = (category, key) -> ShipBridge.loadSprite(Global.getSettings().getSpriteName(category, key));
+		// Vanilla's HUD font, weapon and status icons, by path (mods' files included).
+		GameFiles.opener = path -> Global.getSettings().openStream(path);
 	}
 
 	protected final CombatEngineAPI engine;
@@ -121,6 +124,21 @@ abstract class Session3D {
 	}
 
 	protected void afterTuningReload(boolean meshChanged) {}
+
+	/** Where the battle stood, for the bug-report file when the 3D layer hits an error. */
+	String state() {
+		int yours = 0, enemy = 0, fighters = 0, gone = 0;
+		for (Ship3D s : sim.ships) {
+			if (s.destroyed) gone++;
+			else if (s.fighter) fighters++;
+			else if (s.owner == 0) yours++;
+			else enemy++;
+		}
+		Ship3D p = sim.player;
+		return String.format("battle time %.1f s; ships: %d yours, %d enemy, %d fighters, %d gone; %d projectiles, %d missiles; flying %s%s",
+				sim.time, yours, enemy, fighters, gone, sim.combat.projectiles.size(), sim.combat.missiles.size(),
+				p != null ? p.name + " (" + p.hullName + ")" : "nothing", p != null && p.system != null ? ", system " + p.system.id + " " + p.system.state : "");
+	}
 
 	/** True once the session has handed the battle back to vanilla for good. */
 	boolean done() {
@@ -447,6 +465,7 @@ abstract class Session3D {
 		}
 		hud.toast = toast;
 		hud.toastAlpha = Math.max(0f, Math.min(1f, toastTime));
+		VanillaStatus.read(engine, hud.statuses);
 	}
 
 	/** Display name(s) for an action's key(s), e.g. "F10 / \ / G". */

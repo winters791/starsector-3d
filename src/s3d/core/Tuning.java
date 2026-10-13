@@ -13,7 +13,7 @@ import org.json.JSONObject;
  * overrides any subset and can be reloaded in-game. Units: game units (1 sprite pixel),
  * seconds, degrees in the JSON (converted where used).
  */
-public final class Tuning {
+public final class Tuning implements Cloneable {
 
 	// ---- flight ----
 	/** 3D turn rate = turnCurveRef * (hullTurnRate / turnCurveRef)^turnCurveExp * turnRateMult. Exp < 1 compresses the frigate/capital gap. */
@@ -546,35 +546,7 @@ public final class Tuning {
 			t.engineRepairTime = num(em, "engineRepairTime", t.engineRepairTime);
 		}
 		JSONObject sy = root.optJSONObject("systems");
-		if (sy != null) {
-			t.sysBurnSpeed = num(sy, "burnDriveSpeed", t.sysBurnSpeed);
-			t.sysBurnAccelMult = num(sy, "burnDriveAccelMult", t.sysBurnAccelMult);
-			t.sysBurnTurnMult = num(sy, "burnDriveTurnMult", t.sysBurnTurnMult);
-			t.sysJetsSpeed = num(sy, "jetsSpeed", t.sysJetsSpeed);
-			t.sysJetsAccelMult = num(sy, "jetsAccelMult", t.sysJetsAccelMult);
-			t.sysJetsTurn = num(sy, "jetsTurn", t.sysJetsTurn);
-			t.sysPlasmaSpeed = num(sy, "plasmaJetsSpeed", t.sysPlasmaSpeed);
-			t.sysMicroburnSpeed = num(sy, "microburnSpeed", t.sysMicroburnSpeed);
-			t.sysDisplacerDistance = num(sy, "phaseSkimmerDistance", t.sysDisplacerDistance);
-			t.sysAmmoFeedRof = num(sy, "ammoFeedRateOfFire", t.sysAmmoFeedRof);
-			t.sysAmmoFeedFlux = num(sy, "ammoFeedFluxPerShot", t.sysAmmoFeedFlux);
-			t.sysEnergyFocusDamage = num(sy, "highEnergyFocusDamage", t.sysEnergyFocusDamage);
-			t.sysFortressShieldTaken = num(sy, "fortressShieldDamageTaken", t.sysFortressShieldTaken);
-			t.sysDamperTaken = num(sy, "damperDamageTaken", t.sysDamperTaken);
-			t.sysTemporalTimeMult = num(sy, "temporalShellTimeMult", t.sysTemporalTimeMult);
-			t.sysPhaseTimeMult = num(sy, "phaseTimeMult", t.sysPhaseTimeMult);
-			t.sysEmpInterval = num(sy, "empEmitterInterval", t.sysEmpInterval);
-			t.sysEmpTargets = sy.optInt("empEmitterTargets", t.sysEmpTargets);
-			t.sysFlareCount = sy.optInt("flareCount", t.sysFlareCount);
-			t.sysFlareLife = num(sy, "flareLife", t.sysFlareLife);
-			t.sysFlareLure = num(sy, "flareLureRange", t.sysFlareLure);
-			t.sysFlareLureChance = num(sy, "flareLureChance", t.sysFlareLureChance);
-			t.sysEntropyRange = num(sy, "entropyAmplifierRange", t.sysEntropyRange);
-			t.sysMineWeapon = sy.optString("mineStrikeWeapon", t.sysMineWeapon);
-			t.sysMineArmTime = num(sy, "mineArmTime", t.sysMineArmTime);
-			t.sysMineWindup = num(sy, "mineWindup", t.sysMineWindup);
-			t.sysDroneStrikeWeapon = sy.optString("droneStrikeWeapon", t.sysDroneStrikeWeapon);
-		}
+		if (sy != null) readSystems(t, sy);
 		JSONObject co = root.optJSONObject("collisions");
 		if (co != null) {
 			t.collisions = co.optBoolean("enabled", t.collisions);
@@ -648,6 +620,77 @@ public final class Tuning {
 				+ meshTierHeight + "|" + meshTierLumInfluence + "|" + meshTierLumSteps + "|" + meshUnderHeight + "|" + meshKeelHeight + "|" + meshWallFrac + "|"
 				+ meshCellsAcross + "|" + meshAlphaThreshold + "|" + meshRoundRadiusFrac + "|" + meshTopHeight + "|"
 				+ meshBottomHeight + "|" + meshKeel + "|" + meshDetailAmp + "|" + meshEdgeThickness + "|" + meshSdfBlur;
+	}
+
+	/** The "systems" section, over t's values (also another mod's per-system numbers, see withSystems). */
+	private static void readSystems(Tuning t, JSONObject sy) {
+		t.sysBurnSpeed = num(sy, "burnDriveSpeed", t.sysBurnSpeed);
+		t.sysBurnAccelMult = num(sy, "burnDriveAccelMult", t.sysBurnAccelMult);
+		t.sysBurnTurnMult = num(sy, "burnDriveTurnMult", t.sysBurnTurnMult);
+		t.sysJetsSpeed = num(sy, "jetsSpeed", t.sysJetsSpeed);
+		t.sysJetsAccelMult = num(sy, "jetsAccelMult", t.sysJetsAccelMult);
+		t.sysJetsTurn = num(sy, "jetsTurn", t.sysJetsTurn);
+		t.sysPlasmaSpeed = num(sy, "plasmaJetsSpeed", t.sysPlasmaSpeed);
+		t.sysMicroburnSpeed = num(sy, "microburnSpeed", t.sysMicroburnSpeed);
+		t.sysDisplacerDistance = num(sy, "phaseSkimmerDistance", t.sysDisplacerDistance);
+		t.sysAmmoFeedRof = num(sy, "ammoFeedRateOfFire", t.sysAmmoFeedRof);
+		t.sysAmmoFeedFlux = num(sy, "ammoFeedFluxPerShot", t.sysAmmoFeedFlux);
+		t.sysEnergyFocusDamage = num(sy, "highEnergyFocusDamage", t.sysEnergyFocusDamage);
+		t.sysFortressShieldTaken = num(sy, "fortressShieldDamageTaken", t.sysFortressShieldTaken);
+		t.sysDamperTaken = num(sy, "damperDamageTaken", t.sysDamperTaken);
+		t.sysTemporalTimeMult = num(sy, "temporalShellTimeMult", t.sysTemporalTimeMult);
+		t.sysPhaseTimeMult = num(sy, "phaseTimeMult", t.sysPhaseTimeMult);
+		t.sysEmpInterval = num(sy, "empEmitterInterval", t.sysEmpInterval);
+		t.sysEmpTargets = sy.optInt("empEmitterTargets", t.sysEmpTargets);
+		t.sysFlareCount = sy.optInt("flareCount", t.sysFlareCount);
+		t.sysFlareLife = num(sy, "flareLife", t.sysFlareLife);
+		t.sysFlareLure = num(sy, "flareLureRange", t.sysFlareLure);
+		t.sysFlareLureChance = num(sy, "flareLureChance", t.sysFlareLureChance);
+		t.sysEntropyRange = num(sy, "entropyAmplifierRange", t.sysEntropyRange);
+		t.sysMineWeapon = sy.optString("mineStrikeWeapon", t.sysMineWeapon);
+		t.sysMineArmTime = num(sy, "mineArmTime", t.sysMineArmTime);
+		t.sysMineWindup = num(sy, "mineWindup", t.sysMineWindup);
+		t.sysDroneStrikeWeapon = sy.optString("droneStrikeWeapon", t.sysDroneStrikeWeapon);
+	}
+
+	/**
+	 * A copy of this tuning with one ship system's own numbers (keys of the "systems" section), for a
+	 * system another mod mapped in its data/config/s3d/systems.csv. Everything else is shared.
+	 */
+	public Tuning withSystems(JSONObject overrides) {
+		Tuning c;
+		try {
+			c = (Tuning) clone();
+		} catch (CloneNotSupportedException e) {
+			throw new IllegalStateException(e);
+		}
+		readSystems(c, overrides);
+		return c;
+	}
+
+	/** The keys the "systems" section reads (to tell a modder about a misspelt one). */
+	public static java.util.Set<String> systemKeys() {
+		java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+		readSystems(new Tuning(), new JSONObject() {
+			@Override
+			public double optDouble(String key, double def) {
+				seen.add(key);
+				return def;
+			}
+
+			@Override
+			public int optInt(String key, int def) {
+				seen.add(key);
+				return def;
+			}
+
+			@Override
+			public String optString(String key, String def) {
+				seen.add(key);
+				return def;
+			}
+		});
+		return seen;
 	}
 
 	private static float num(JSONObject o, String key, float def) {

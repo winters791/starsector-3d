@@ -60,6 +60,7 @@ public final class MeshPreview {
 		Tuning t = GameData.modTuning(build);
 		Map<String, GameData.Hull> hulls = GameData.hulls(game);
 		Renderer3D renderer = new Renderer3D();
+		s3d.render.GameFiles.opener = path -> new java.io.FileInputStream(new File(game, path)); // vanilla's HUD font and icons
 		renderer.init();
 		String settings = new String(java.nio.file.Files.readAllBytes(new File(game, "data/config/settings.json").toPath()), java.nio.charset.StandardCharsets.UTF_8);
 		s3d.render.FxSprites.loader = (category, key) -> { // vanilla's sprite sheets, by their settings.json key
@@ -439,6 +440,12 @@ public final class MeshPreview {
 			}
 			ws.type = wj.optString("type", "?");
 			ws.size = wj.optString("size", null);
+			java.util.List<String> iconLayers = new java.util.ArrayList<>(); // as ShipBridge: turret under, base, barrel
+			for (String key : new String[] {"turretUnderSprite", "turretSprite", "turretGunSprite"}) {
+				String sp = wj.optString(key, "");
+				if (!sp.isEmpty()) iconLayers.add(sp);
+			}
+			if (!wj.optString("turretSprite", "").isEmpty()) ws.iconSprites = iconLayers.toArray(new String[0]);
 			ws.supported = true;
 			ws.damage = 100f;
 			ws.range = 700f;
@@ -544,7 +551,8 @@ public final class MeshPreview {
 		int w = 1920, h = 1200;
 		int[] target = createCaptureTarget(w, h);
 		String[][] ships = {{"eagle", "eagle_Assault", "ISS Zenith", "Eagle-class", "Assault Heavy Cruiser", "maneuveringjets", "Maneuvering Jets"},
-				{"hammerhead", "hammerhead_Elite", "ISS Lucky Break", "Hammerhead-class", "Elite Destroyer", "ammofeed", "Accelerated Ammo Feeder"}};
+				{"hammerhead", "hammerhead_Elite", "ISS Lucky Break", "Hammerhead-class", "Elite Destroyer", "ammofeed", "Accelerated Ammo Feeder"},
+				{"ziggurat", "ziggurat_Experimental", "TTS Xenophornica", "Ziggurat-class", "Experimental", "mote_control", "Mote Attractor"}};
 		for (int v = 0; v < ships.length; v++) {
 			String[] d = ships[v];
 			Sim sim = new Sim(t);
@@ -604,6 +612,14 @@ public final class MeshPreview {
 					break;
 				}
 				p.selectedGroup = 0;
+			} else if (v == 2) {
+				// Phased with 30% hard flux: coil stress has top speed at 60%.
+				p.cloak = CombatBench.zigguratCloak(p);
+				p.cloak.state = s3d.core.ShipSystem3D.State.ACTIVE;
+				p.cloak.effect = 1f;
+				p.flux.flux = p.flux.hardFlux = p.flux.maxFlux * 0.3f;
+				sim.update(in, 1f / 60f, 1f / 60f);
+				p.selectedGroup = 0;
 			} else {
 				p.flux.flux = p.flux.hardFlux = 0f;
 				p.system.state = s3d.core.ShipSystem3D.State.ACTIVE;
@@ -612,9 +628,27 @@ public final class MeshPreview {
 			}
 			renderer.renderScene(sim, w, h, target[0]);
 			HudRenderer.Info info = new HudRenderer.Info();
+			if (v == 0) { // vanilla's status list as in a campaign fight (bottom entry first), vanilla's own icons
+				String[][] st = {{"graphics/icons/tactical/cr_tactical3.png", "Ion storm", "reduced peak time", "d"},
+						{"graphics/icons/tactical/cr_tactical3.png", "Ion storm", "faster CR degradation", "d"},
+						{"graphics/icons/tactical/cr_tactical.png", "Combat readiness 60%", "standard performance", ""},
+						{"graphics/icons/tactical/cr_tactical.png", "Peak active performance", "remaining time: 243 sec", ""},
+						{"graphics/warroom/objective_nav_buoy.png", "Coordinated maneuvers: 19%", "+19% top speed", ""},
+						{"graphics/warroom/objective_sensor_array.png", "ECM rating: 24%", "-8% enemy weapon range", ""},
+						{"graphics/warroom/objective_sensor_array.png", "Enemy ECM rating: 6%", "-1% weapon range", "d"},
+						{"graphics/warroom/objective_comm_relay.png", "Command network", "+50% CP recovery rate", ""}};
+				for (String[] e : st) {
+					HudRenderer.Status s = new HudRenderer.Status();
+					s.icon = e[0];
+					s.title = e[1];
+					s.data = e[2];
+					s.debuff = !e[3].isEmpty();
+					info.statuses.add(s);
+				}
+			}
 			renderer.renderHud(sim, in, info, w, h);
 			BufferedImage img = read(w, h);
-			String name = v == 0 ? "ship_panel" : "ship_panel_b";
+			String name = v == 0 ? "ship_panel" : v == 1 ? "ship_panel_b" : "ship_panel_phase";
 			ImageIO.write(img, "png", new File(dir, name + ".png"));
 			ImageIO.write(img.getSubimage(0, h - 380, 760, 380), "png", new File(dir, name + "_crop.png"));
 			StringBuilder groups = new StringBuilder();

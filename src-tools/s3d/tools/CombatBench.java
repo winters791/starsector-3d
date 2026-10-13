@@ -99,9 +99,11 @@ public final class CombatBench {
 		weaponScripts2(game, hulls, t);
 		fighterRules(game, hulls, t);
 		systemRules(game, hulls, t);
+		phaseRules(game, hulls, t);
 		systemsBatch2(game, hulls, t);
 		systemsBatch3(game, hulls, t);
 		systemsBatch4(game, hulls, t);
+		modData(game, hulls, t);
 		collisionRules(game, hulls, t);
 		soundEvents(game, hulls, t);
 		weightRules(game, hulls, t);
@@ -1027,18 +1029,24 @@ public final class CombatBench {
 			sh.weapons.add(new WeaponMount("H", hu, new Vec3(0, 10, -30), new Vec3(0, 0, -1), 10f, true));
 			c.world = java.util.List.of(sh, tg);
 			java.util.List<s3d.core.Missile3D> heads = new java.util.ArrayList<>();
+			java.util.List<Vec3> spreadDirs = new java.util.ArrayList<>(); // each warhead's push out of the MIRV
+			Vec3 mirvVel = new Vec3();
 			float splitAt = -1f, splitDist = 0f, minFacing = 1f, coastMax = 0f, lockLatest = 0f, spreadAtLock = 0f;
 			int coastingEarly = 0;
 			for (float tt = 0; tt < 20f; tt += DT) {
 				c.stepMount(sh, sh.weapons.get(0), tg.pos, tt < DT, tg, DT, t);
 				s3d.core.Missile3D mirv = c.missiles.stream().filter(m -> m.spec == hu).findFirst().orElse(null);
-				if (mirv != null) splitDist = mirv.pos.distance(tg.pos) - tg.radius;
+				if (mirv != null) {
+					splitDist = mirv.pos.distance(tg.pos) - tg.radius;
+					mirvVel.set(mirv.vel);
+				}
 				c.stepProjectiles(c.world, DT);
 				c.stepMissiles(c.world, DT);
 				c.stepEffects(DT);
 				for (s3d.core.Missile3D m : c.missiles) {
 					if (m.spec != wh || heads.contains(m)) continue;
 					heads.add(m);
+					spreadDirs.add(new Vec3(m.vel).sub(mirvVel).normalize());
 					if (splitAt < 0f) splitAt = tt;
 					minFacing = Math.min(minFacing, new Vec3(tg.pos).sub(m.pos).normalize().dot(m.dir));
 				}
@@ -1059,6 +1067,33 @@ public final class CombatBench {
 					&& coastingEarly == 7 && lockLatest > 0.5f && lockLatest <= 3.05f && spreadAtLock > 150f,
 					String.format("split %.0f from the hull, %d warheads (facing the target: worst cos %.2f), all coasting for 0.4 s: %s, all locked %.1f s after"
 							+ " the split, fanned %.0f wide by then, %d of 7 hit", splitDist, heads.size(), minFacing, coastingEarly == 7, lockLatest, spreadAtLock, hits));
+
+			// The spread is 3D: no plane holds all seven pushes, and each turns from the spread's centre
+			// (straight back) by one of vanilla's even-fan angles 0, 30, 30, 60, 60, 90, 90.
+			Vec3 centre = new Vec3();
+			for (Vec3 d : spreadDirs) centre.add(d); // mirrored pairs cancel sideways
+			centre.normalize();
+			float[] ang = new float[spreadDirs.size()];
+			for (int i = 0; i < ang.length; i++) ang[i] = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, spreadDirs.get(i).dot(centre)))));
+			java.util.Arrays.sort(ang);
+			StringBuilder angs = new StringBuilder();
+			for (float a : ang) angs.append(angs.length() > 0 ? "/" : "").append(Math.round(a));
+			float[] vanilla = {0f, 30f, 30f, 60f, 60f, 90f, 90f};
+			float angErr = ang.length == vanilla.length ? 0f : 999f;
+			for (int i = 0; i < Math.min(ang.length, vanilla.length); i++) angErr = Math.max(angErr, Math.abs(ang[i] - vanilla[i]));
+			float flattest = 1f; // the plane (through two pushes) that leaves the others closest to it: how far out the farthest is
+			for (Vec3 a : spreadDirs) for (Vec3 b : spreadDirs) {
+				Vec3 nrm = new Vec3(a).cross(b);
+				if (nrm.length() < 0.3f) continue;
+				nrm.normalize();
+				float out = 0f;
+				for (Vec3 d : spreadDirs) out = Math.max(out, Math.abs(d.dot(nrm)));
+				flattest = Math.min(flattest, out);
+			}
+			check("hurricane spread is 3D", angErr < 3f && flattest > 0.4f && centre.dot(new Vec3(sh.pos).sub(tg.pos).normalize()) > 0.9f,
+					String.format("warheads turn %s deg from the spread's centre (vanilla 0/30/30/60/60/90/90, worst off by %.1f); the flattest plane"
+							+ " through two of them still leaves one %.0f deg out of it; centre points back at the launcher: cos %.2f",
+							angs, angErr, Math.toDegrees(Math.asin(Math.min(1f, flattest))), centre.dot(new Vec3(sh.pos).sub(tg.pos).normalize())));
 		}
 
 		// Two-stage (Squall): lines up while coasting (flight clock held), then its heading never changes
@@ -1100,7 +1135,7 @@ public final class CombatBench {
 							clockGap[k] = rocket.age - rocket.flight;
 							if (k == 1) tg.vel.set(0f, 0f, -250f); // moves off once the rocket is committed
 						}
-						maxTurnAfterLock[k] = Math.max(maxTurnAfterLock[k], (float) Math.toDegrees(Math.acos(Math.min(1f, lockedDir.dot(rocket.dir)))));
+						maxTurnAfterLock[k] = Math.max(maxTurnAfterLock[k], (float) Math.toDegrees(2.0 * Math.asin(Math.min(1.0, lockedDir.distance(rocket.dir) * 0.5))));
 					}
 					tg.pos.addScaled(tg.vel, DT);
 				}
@@ -2508,6 +2543,220 @@ public final class CombatBench {
 		sys.ammo = charges;
 		sys.ammoPerSecond = regen;
 		return sys;
+	}
+
+	/**
+	 * A phase cloak as ShipBridge reads vanilla's on a Ziggurat: 2% of capacity to activate and per
+	 * second, hard flux that can't dissipate while phased, coil stress to 33% top speed at 50% hard flux.
+	 */
+	static s3d.core.ShipSystem3D zigguratCloak(Ship3D s) {
+		s3d.core.ShipSystem3D c = system("phasecloak", 0.5f, 0f, 0.5f, 2f, 0, 0f);
+		c.toggle = true;
+		c.fluxPerUse = c.fluxPerSecond = 0.02f * s.flux.maxFlux;
+		c.hardFlux = true;
+		c.hardDissipationAllowed = false;
+		c.firingAllowed = false;
+		c.coilMinSpeed = 0.33f;
+		c.coilStressLevel = 0.5f;
+		return c;
+	}
+
+	/**
+	 * Phase cloak flux and speed as vanilla: the upkeep is hard flux that stays while phased (so no
+	 * phase ship can stay in forever), paid on the ship's own 3x clock, and hard flux slows the phased
+	 * ship down (phase coil stress) until it unphases and dissipates it.
+	 */
+	static void phaseRules(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		s3d.core.PilotInput in = screen();
+		GameData.Hull zh = hulls.get("ziggurat");
+
+		// You, phased 5 s: 320 to activate + 320/s, all hard, none of it dissipating; gone soon after you unphase.
+		s3d.core.Sim sim = new s3d.core.Sim(t);
+		Ship3D me = ship(game, zh, t, "me", 0, 1500, 1e9f);
+		me.cloak = zigguratCloak(me);
+		sim.addShip(me);
+		sim.setPlayer(me);
+		me.cloak.activate(me);
+		for (float tt = 0; tt < 5f; tt += DT) sim.update(in, DT, DT);
+		float hardIn = me.flux.hardFlux;
+		me.cloak.activate(me);
+		for (float tt = 0; tt < 4f; tt += DT) sim.update(in, DT, DT);
+		float hardOut = me.flux.hardFlux;
+		float expect = 320f + 320f * 5f;
+		check("phase upkeep is hard, stays phased", Math.abs(hardIn - expect) < expect * 0.08f && hardOut < hardIn * 0.1f,
+				String.format("Ziggurat (16000 flux, 1200/s): hard flux after 5 s phased %.0f (vanilla %.0f), 4 s after unphasing %.0f", hardIn, expect, hardOut));
+
+		// An AI phased for 2 s of battle time lives ~3x that on its own clock, and pays for it.
+		sim = new s3d.core.Sim(t);
+		Ship3D ai = ship(game, zh, t, "ai", 1, 1500, 1e9f);
+		ai.cloak = zigguratCloak(ai);
+		sim.addShip(ai);
+		Ship3D watcher = ship(game, hulls.get("wolf"), t, "watcher", 0, 150, 1e9f);
+		watcher.pos.set(0f, 0f, 6000f);
+		sim.addShip(watcher);
+		sim.setPlayer(watcher);
+		ai.cloak.activate(ai);
+		for (float tt = 0; tt < 2f; tt += DT) sim.update(in, DT, DT);
+		check("AI phase upkeep on its own clock", ai.flux.hardFlux > 320f + 320f * 2f * 2.5f && ai.flux.hardFlux < 320f + 320f * 2f * 3f,
+				String.format("hard flux after 2 s of battle phased %.0f (one clock would be %.0f, three %.0f)", ai.flux.hardFlux, 320f + 640f, 320f + 1920f));
+
+		// Coil stress: full speed in, falling as hard flux builds, a third at half hard flux; back to full once it dissipates.
+		sim = new s3d.core.Sim(t);
+		me = ship(game, zh, t, "me", 0, 1500, 1e9f);
+		me.cloak = zigguratCloak(me);
+		me.flux.zeroFluxBoost = 0f; // the zero-flux boost goes as soon as the cloak costs flux; measure the coils alone
+		me.throttle = 1f;
+		sim.addShip(me);
+		sim.setPlayer(me);
+		for (float tt = 0; tt < 6f; tt += DT) sim.update(in, DT, DT);
+		float v0 = me.speed();
+		me.cloak.activate(me);
+		for (float tt = 0; tt < 1f; tt += DT) sim.update(in, DT, DT);
+		float v1 = me.speed();
+		for (float tt = 0; tt < 5f; tt += DT) sim.update(in, DT, DT);
+		float v6 = me.speed(), coil6 = me.sysTopSpeedMult;
+		me.flux.flux = me.flux.hardFlux = me.flux.maxFlux * 0.5f;
+		for (float tt = 0; tt < 3f; tt += DT) sim.update(in, DT, DT);
+		float vHalf = me.speed();
+		me.cloak.activate(me);
+		for (float tt = 0; tt < 12f; tt += DT) sim.update(in, DT, DT);
+		float vBack = me.speed();
+		check("phase coil stress slows the ship", v1 > v0 * 0.9f && v6 < v1 && Math.abs(v6 / v0 - coil6) < 0.04f
+						&& Math.abs(vHalf / v0 - 0.33f) < 0.05f && vBack > v0 * 0.97f,
+				String.format("top speed %.0f; phased 1 s %.0f%%, 6 s %.0f%%, at 50%% hard flux %.0f%%; unphased 12 s later %.0f%%",
+						v0, v1 / v0 * 100f, v6 / v0 * 100f, vHalf / v0 * 100f, vBack / v0 * 100f));
+
+		// The AI boss under fire can't hide in phase all fight: it has to come out to let hard flux go.
+		sim = new s3d.core.Sim(t);
+		Ship3D zig = ship(game, zh, t, "zig", 1, 1500, 14000f);
+		zig.cloak = zigguratCloak(zig);
+		zig.ai = new s3d.core.ShipAI3D(5);
+		zig.ai.homeDir.set(0f, 0f, -1f);
+		sim.addShip(zig);
+		Ship3D shooter = ship(game, hulls.get("lasher"), t, "lasher", 0, 300, 1e9f);
+		shooter.pos.set(0f, 0f, 1200f * fk(t));
+		WeaponSpec3D g = gun("HIGH_EXPLOSIVE", 2f, 150f, 900f, 1100f);
+		g.cooldown = 0.15f;
+		WeaponMount gm = new WeaponMount("G", g, new Vec3(0, 5, 0), new Vec3(0, 0, -1), 360f, false);
+		shooter.weapons.add(gm);
+		sim.addShip(shooter);
+		int frames = 0, phasedFrames = 0, phaseOuts = 0;
+		boolean was = false;
+		float peakHard = 0f;
+		for (float time = 0; time < 40f; time += DT) {
+			sim.update(in, DT, DT);
+			sim.combat.stepMount(shooter, gm, zig.pos, true, DT, t);
+			zig.hull = zig.hullMax; // only its phasing is being measured
+			boolean now = zig.cloak.on();
+			if (was && !now) phaseOuts++;
+			was = now;
+			frames++;
+			if (zig.phased) phasedFrames++;
+			peakHard = Math.max(peakHard, zig.flux.hardFlux / zig.flux.maxFlux);
+		}
+		check("AI phase ship has to unphase", phasedFrames > 0 && phasedFrames < frames * 0.85f && phaseOuts >= 1,
+				String.format("40 s under fire: phased %.0f%% of the time, came out %d times, hard flux peaked at %.0f%%",
+						phasedFrames * 100f / frames, phaseOuts, peakHard * 100f));
+	}
+
+	/** Rows as the game's CSV loader gives them: one JSONObject per line, cells by column name (split on '|' here). */
+	private static org.json.JSONArray csvRows(String columns, String... lines) throws Exception {
+		String[] cols = columns.split("\\|");
+		org.json.JSONArray a = new org.json.JSONArray();
+		for (String line : lines) {
+			String[] cells = line.split("\\|", -1);
+			org.json.JSONObject o = new org.json.JSONObject();
+			for (int i = 0; i < cols.length; i++) o.put(cols[i], i < cells.length ? cells[i] : "");
+			a.put(o);
+		}
+		return a;
+	}
+
+	private static boolean problem(s3d.core.ModData d, String text) {
+		for (String p : d.problems) if (p.contains(text)) return true;
+		return false;
+	}
+
+	/**
+	 * Other mods' data/config/s3d files (ModData): systems.csv maps a system to a 3D kind with its own
+	 * numbers, weapon_effects.csv a script to an effect or a vanilla script's 3D version, hulls.csv a
+	 * hull to vanilla 2D battles. Bad rows are named and skipped; a later mod's row replaces an earlier one's.
+	 */
+	static void modData(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		s3d.core.ModData d = new s3d.core.ModData();
+		d.addSystems("modA", csvRows("id|kind|params",
+				"mod_overdrive|BURN_DRIVE|burnDriveSpeed=600 burnDriveTurnMult=0.8",
+				"#mod_commented|DAMPER|",
+				"mod_cloak|IGNORE|",
+				"mod_warp|WARP_DRIVE|",
+				"mod_shell|damper|damperTaken=0.5"));
+		d.addSystems("modB", csvRows("id|kind|params", "mod_cloak|DAMPER|"));
+		s3d.core.ModData.SystemRow over = d.system("mod_overdrive"), cloak = d.system("mod_cloak"), shell = d.system("mod_shell");
+		check("mod data: systems.csv rows", over != null && over.kind == s3d.core.ShipSystem3D.Kind.BURN_DRIVE && d.system("#mod_commented") == null
+				&& d.system("mod_warp") == null && cloak != null && "modB".equals(cloak.mod) && cloak.kind == s3d.core.ShipSystem3D.Kind.DAMPER
+				&& shell != null && shell.kind == s3d.core.ShipSystem3D.Kind.DAMPER && shell.params == null
+				&& problem(d, "unknown kind 'WARP_DRIVE'") && problem(d, "unknown param 'damperTaken'") && problem(d, "replaces modA's row")
+				&& d.problems.size() == 3 && s3d.core.Tuning.systemKeys().size() == 27,
+				d.read + ", problems " + d.problems);
+
+		// Its own numbers: a copy of the battle's tuning with the row's keys on top, the battle's own untouched.
+		Tuning own = over.tuningFor(t);
+		check("mod data: system's own numbers", own != null && own.sysBurnSpeed == 600f && own.sysBurnTurnMult == 0.8f && t.sysBurnSpeed != 600f
+				&& own.sysDamperTaken == t.sysDamperTaken && own.weaponRangeMult == t.weaponRangeMult && over.tuningFor(t) == own
+				&& cloak.tuningFor(t) == null,
+				String.format("burn speed %.0f (battle's %.0f), turn %.2f (battle's %.2f)", own != null ? own.sysBurnSpeed : -1f, t.sysBurnSpeed,
+						own != null ? own.sysBurnTurnMult : -1f, t.sysBurnTurnMult));
+
+		// A modded system mapped to Burn Drive with burnDriveSpeed=600 outruns one on the battle's numbers.
+		float[] speed = new float[2];
+		for (int k = 0; k < 2; k++) {
+			s3d.core.PilotInput in = screen();
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D wolf = ship(game, hulls.get("wolf"), t, "wolf", 0, 150, 1e9f);
+			wolf.system = new s3d.core.ShipSystem3D("mod_overdrive", "Overdrive", over.kind);
+			wolf.system.chargeUp = 1f;
+			wolf.system.active = 5f;
+			wolf.system.chargeDown = 1f;
+			wolf.system.cooldown = 10f;
+			wolf.system.toggle = true;
+			if (k == 1) wolf.system.tuning = own;
+			sim.addShip(wolf);
+			sim.setPlayer(wolf);
+			wolf.throttle = 1f;
+			for (float tt = 0; tt < 4f; tt += DT) sim.update(in, DT, DT);
+			in.useSystem = true;
+			sim.update(in, DT, DT);
+			in.clearPressed();
+			for (float tt = 0; tt < 3f; tt += DT) sim.update(in, DT, DT);
+			speed[k] = wolf.speed();
+		}
+		check("mod data: system plays its numbers", speed[1] > speed[0] * 1.2f,
+				String.format("Overdrive (BURN_DRIVE) after 3 s: %.0f on the battle's numbers, %.0f with burnDriveSpeed=600", speed[0], speed[1]));
+
+		d.addEffects("modA", csvRows("script|effect|params",
+				"com.foo.MyBreach|ARMOR_STRIP|amount=300",
+				"MyBurn|armor_burn|amount=200, ticks=5",
+				"MyIon|IonCannonOnHitEffect|",
+				"MyLights|VISUAL|",
+				"MyBroken|ARMOR_STRIP|",
+				"MyArc|EXTRA_ARC|chance=0.5 pierce=1 colour=2",
+				"MyOdd|NOT A NAME|"));
+		WeaponSpec3D a = new WeaponSpec3D(), b = new WeaponSpec3D(), c = new WeaponSpec3D();
+		String na = s3d.core.ModData.apply(d.effect("com.foo.MyBreach"), a);
+		String nb = s3d.core.ModData.apply(d.effect("org.bar.MyBurn"), b);
+		String nc = s3d.core.ModData.apply(d.effect("MyArc"), c);
+		s3d.core.ModData.EffectRow ion = d.effect("x.y.MyIon"), lights = d.effect("MyLights");
+		check("mod data: weapon_effects.csv rows", a.armorBreak == 300f && b.armorBurn == 200f && b.armorBurnTicks == 5 && c.bonusArcChance == 0.5f
+				&& c.bonusArcPierces && d.effect("org.other.MyBreach") == null // a full-name row matches only that class
+				&& ion != null && "IonCannonOnHitEffect".equals(ion.vanillaScript) && ion.effect == null
+				&& lights != null && lights.effect == s3d.core.ModData.Effect.VISUAL && d.effect("MyBroken") == null && d.effect("MyOdd") == null
+				&& problem(d, "ARMOR_STRIP needs amount") && problem(d, "unknown param 'colour'") && problem(d, "unknown effect 'NOT A NAME'"),
+				na + " / " + nb + " / " + nc + "; as vanilla: " + (ion != null ? ion.vanillaScript : null));
+
+		d.addHulls("modA", csvRows("id|battle", "wolf|2d", "hound|sideways", "lasher|3D"));
+		check("mod data: hulls.csv rows", d.hull("wolf") != null && d.hull("wolf").vanilla2d && d.hull("hound") == null && d.hull("lasher") != null
+				&& !d.hull("lasher").vanilla2d && problem(d, "battle should be 2d or 3d"),
+				d.read.toString());
 	}
 
 	/** Each system kind does its job; the AI uses them at sensible moments. */

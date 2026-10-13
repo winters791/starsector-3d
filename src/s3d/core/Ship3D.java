@@ -164,9 +164,11 @@ public final class Ship3D {
 	public ShipSystem3D system, cloak;
 	/** What running systems do this frame (reset every frame, then set by the systems). */
 	public float sysSpeedMult = 1f, sysSpeedFlat, sysAccelMult = 1f, sysTurnMult = 1f, sysTurnAccelMult = 1f;
+	/** Scales the whole speed envelope (forward, reverse, strafe, vertical and the speed cap): phase coil stress. */
+	public float sysTopSpeedMult = 1f;
 	public float sysBallisticRofMult = 1f, sysBallisticFluxMult = 1f, sysEnergyDamageMult = 1f;
 	public float sysDamageTakenMult = 1f, sysShieldDamageTakenMult = 1f;
-	public boolean sysNoFire, sysNoShield, sysNoDissipation, sysFullThrottle, sysForceShield;
+	public boolean sysNoFire, sysNoShield, sysNoDissipation, sysNoHardDissipation, sysFullThrottle, sysForceShield;
 	/** Damage multiplier on all of this ship's weapons this frame (a carrier's Targeting Feed on its fighters). */
 	public float sysDamageMult = 1f;
 	/**
@@ -188,16 +190,21 @@ public final class Ship3D {
 	public Missile3D carriedBy;
 	/** Time dilation (temporal shell, phase): this ship's own flight and weapons run this much faster. */
 	public float timeMult = 1f;
+	/**
+	 * This ship's clock against the sim's frame time: world time scale x its own time mult, as of
+	 * the last frame (its systems run on it, like vanilla advancing a ship by its own time).
+	 */
+	public float clock = 1f;
 	/** Phase cloak: phased = intangible and can't fire; phaseLevel 0..1 for the look. */
 	public boolean phased;
 	public float phaseLevel;
 
 	public void resetSystemEffects() {
-		sysSpeedMult = sysAccelMult = sysTurnMult = sysTurnAccelMult = 1f;
+		sysSpeedMult = sysAccelMult = sysTurnMult = sysTurnAccelMult = sysTopSpeedMult = 1f;
 		sysSpeedFlat = 0f;
 		sysBallisticRofMult = sysBallisticFluxMult = sysEnergyDamageMult = 1f;
 		sysDamageTakenMult = sysShieldDamageTakenMult = 1f;
-		sysNoFire = sysNoShield = sysNoDissipation = sysFullThrottle = sysForceShield = false;
+		sysNoFire = sysNoShield = sysNoDissipation = sysNoHardDissipation = sysFullThrottle = sysForceShield = false;
 		sysDamageMult = 1f;
 		sysLidar = 0;
 		sysLidarRangeMult = sysLidarRofMult = sysLidarSpeedMult = 1f;
@@ -319,6 +326,7 @@ public final class Ship3D {
 		if (system != null) system.reset();
 		if (cloak != null) cloak.reset();
 		resetSystemEffects();
+		clock = 1f;
 		repairRateMult = 1f;
 		if (fragments != null) fragments.count = fragments.size;
 	}

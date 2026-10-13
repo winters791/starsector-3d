@@ -12,7 +12,9 @@ public class S3DModPlugin extends BaseModPlugin {
 
 	@Override
 	public void onApplicationLoad() {
+		BattleLog.install(); // first, so the lines below go into the bug-report files too
 		log.info("S3D: Starsector 3D " + VERSION + " loaded (java " + System.getProperty("java.version")
 				+ ", " + System.getProperty("os.arch") + ")");
+		CompatReport.write(); // also reads the mods' data/config/s3d files
 	}
 }

@@ -1,0 +1,5 @@
+script,effect,params
+# What a weapon script does in Starsector 3D. Copy this file to your mod's data/config/s3d/ and add rows; see MODDING.md.
+# script: full or simple class name. effect: EMP_ARCS / ARMOR_STRIP / ARMOR_BURN / SHIELD_BONUS / EXTRA_ARC / ARC_GUN / VISUAL / IGNORE, or a vanilla script's simple name.
+#com.mymod.combat.ShredderOnHit,ARMOR_STRIP,amount=150
+#com.mymod.combat.ArcRifleOnHit,IonCannonOnHitEffect,

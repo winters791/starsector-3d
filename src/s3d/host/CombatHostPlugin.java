@@ -46,9 +46,11 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 			if (battleCfg.tuning.battleEnabled) mode = Mode.CAMPAIGN;
 			else why = " (battle.enabled is off in s3d_tuning.json)";
 		}
+		BattleLog.battleInit(engine, mode == Mode.SANDBOX ? "3D sandbox" : mode == Mode.CAMPAIGN ? "3D campaign battle" : null);
 		log.info("S3D: battle start (mission=" + mission + ", campaign=" + engine.isInCampaign() + ", campaignSim=" + campaignSim
 				+ ", simulation=" + engine.isSimulation() + ") -> "
 				+ (mode == Mode.SANDBOX ? "3D sandbox" : mode == Mode.CAMPAIGN ? "3D campaign battle" : "vanilla 2D" + why));
+		if (mode != Mode.VANILLA) ModDataLoader.reload(); // other mods' data/config/s3d files, re-read so edits show without a restart
 	}
 
 	@Override
@@ -65,6 +67,7 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 	public void advance(float amount, List<InputEventAPI> events) {
 		if (mode == Mode.VANILLA || failed) return;
 		try {
+			BattleLog.tick();
 			if (session == null) {
 				if (mode == Mode.SANDBOX) {
 					if (!SandboxSession.ready(engine)) return;
@@ -72,7 +75,8 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 				} else {
 					String unsupported = BattleSession.unsupported(engine, battleCfg.tuning);
 					if (unsupported != null) {
-						log.info("S3D: this battle stays vanilla 2D: " + unsupported + " (not supported in 3D yet)");
+						log.info("S3D: this battle stays vanilla 2D: " + unsupported);
+						BattleLog.end("stayed vanilla 2D: " + unsupported);
 						mode = Mode.VANILLA;
 						return;
 					}
@@ -80,8 +84,12 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 					session = new BattleSession(engine, battleCfg);
 				}
 			}
-			if (session.done()) return;
+			if (session.done()) {
+				BattleLog.end("handed back to vanilla 2D");
+				return;
+			}
 			session.advance(amount);
+			if (engine.isCombatOver()) BattleLog.end("battle over");
 		} catch (Throwable t) {
 			fail("advance", t);
 		}
@@ -99,7 +107,14 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 
 	private void fail(String where, Throwable t) {
 		failed = true;
-		log.error("S3D: 3D layer disabled after an error in " + where + "; the battle continues in vanilla 2D", t);
+		String state = "";
+		try {
+			if (session != null) state = "; " + session.state();
+		} catch (Throwable ignored) {
+			// the state is a nice-to-have
+		}
+		BattleLog.failing("3D switched off after an error in " + where + state);
+		log.error("S3D: 3D layer disabled after an error in " + where + "; the battle continues in vanilla 2D", t); // writes the bug-report files
 		if (session != null) {
 			try {
 				session.shutdown();
@@ -108,7 +123,7 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 			}
 		}
 		if (engine != null && engine.getCombatUI() != null) {
-			engine.getCombatUI().addMessage(0, "Starsector 3D hit an error and switched off (details in starsector.log)");
+			engine.getCombatUI().addMessage(0, "Starsector 3D hit an error and switched off (saved to saves/common/s3d_last_error.txt.data)");
 		}
 	}
 }

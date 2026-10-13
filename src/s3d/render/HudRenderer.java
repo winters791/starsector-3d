@@ -36,6 +36,15 @@ public final class HudRenderer {
 		public final List<String> perf = new ArrayList<>();
 		public String toast;
 		public float toastAlpha;
+		/** Vanilla's status list for your ship (ECM, peak time, CR, skills...), bottom entry first; drawn above your hologram. */
+		public final List<Status> statuses = new ArrayList<>();
+	}
+
+	/** One entry of vanilla's status list: its icon sprite, title and data lines, debuff, fade. */
+	public static final class Status {
+		public String icon, title, data;
+		public boolean debuff;
+		public float alpha = 1f;
 	}
 
 	private static final float[] CYAN = {0.55f, 0.9f, 1f};
@@ -46,8 +55,10 @@ public final class HudRenderer {
 	private static final float[] SHIELD = {0.55f, 0.8f, 1f};
 	private static final float[] FLUX_SOFT = {0.62f, 0.7f, 1f};
 	private static final float[] FLUX_HARD = {0.42f, 0.38f, 1f};
-	/** Gun pippers: red-orange, apart from the green / amber lead circle. */
+	/** Kill markers around the reticle: red-orange. */
 	private static final float[] PIPPER = {1f, 0.42f, 0.18f};
+	/** Gun "+" crosshairs: saturated yellow (with a dark rim), readable on anything. */
+	private static final float[] CROSSHAIR = {1f, 0.93f, 0.05f};
 	/** Your ship panel: the target hologram's cyan, bright for what's selected or up, dim for what's off. */
 	private static final float[] HOLO = {0.45f, 0.85f, 1f};
 	private static final float[] HOLO_HI = {0.8f, 0.97f, 1f};
@@ -59,14 +70,39 @@ public final class HudRenderer {
 
 	private final Shader fx;
 	private final GlyphFont font;
+	/**
+	 * Vanilla's combat HUD font (Victor's Pixel Font) for your ship panel and the status list, at a
+	 * whole-pixel scale (2x from 1800 px tall); null if it couldn't be loaded (the HUD font instead).
+	 */
+	private final BitmapFont vanilla;
+	private float vanillaScale = 1f;
 	private final Mat4 ortho = new Mat4();
 	private final float[] clip = new float[4];
 	/** Screen positions of this frame's off-screen ship arrows (fleet markers stay clear of them). */
 	private final List<float[]> edgeArrows = new ArrayList<>();
+	/** This frame's icons (weapon groups, statuses), drawn after the bars and before the text. */
+	private final List<IconQuad> icons = new ArrayList<>();
 
-	HudRenderer(Shader fx, GlyphFont font) {
+	private static final class IconQuad {
+		final int tex;
+		final float x0, y0, x1, y1, a;
+		final float[] c;
+
+		IconQuad(int tex, float x0, float y0, float x1, float y1, float[] c, float a) {
+			this.tex = tex;
+			this.x0 = x0;
+			this.y0 = y0;
+			this.x1 = x1;
+			this.y1 = y1;
+			this.c = c;
+			this.a = a;
+		}
+	}
+
+	HudRenderer(Shader fx, GlyphFont font, BitmapFont vanilla) {
 		this.fx = fx;
 		this.font = font;
+		this.vanilla = vanilla;
 	}
 
 	public void render(Sim sim, PilotInput in, Info info, int w, int h) {
@@ -81,6 +117,8 @@ public final class HudRenderer {
 		List<Text> texts = new ArrayList<>();
 		Ship3D p = sim.viewer();
 		float cx = w * 0.5f, cy = h * 0.5f;
+		vanillaScale = h >= 1800 ? 2f : 1f;
+		icons.clear();
 
 		List<float[]> bars = new ArrayList<>();
 		float mapSize = sim.tuning.minimapSize;
@@ -94,7 +132,10 @@ public final class HudRenderer {
 			GL11.glVertex2f(14f, h - 14f);
 			GL11.glEnd();
 		}
-		if (p != null && !sim.spectating) drawShipPanel(sim, texts, bars); // its own backdrop and lines, under the rest
+		if (p != null && !sim.spectating) {
+			drawShipPanel(sim, texts, bars); // its own backdrop and lines, under the rest
+			drawStatusList(info.statuses, texts);
+		}
 		GL11.glBegin(GL11.GL_LINES);
 		if (p != null) {
 			drawTargets(sim, w, h, texts);
@@ -105,7 +146,7 @@ public final class HudRenderer {
 					drawFlightMarkers(sim, in, w, h, texts);
 					drawHitMarkers(sim, in, w, h);
 				}
-				drawLead(sim, w, h, texts);
+				drawLead(sim, w, h, texts, bars);
 			}
 			drawThrottle(sim, w, h, texts);
 			drawAttitude(p, w - 95f, 95f, 60f);
@@ -127,6 +168,7 @@ public final class HudRenderer {
 			}
 			GL11.glEnd();
 		}
+		drawIcons();
 		if (sim.tuning.damageNumbers) drawDamageNumbers(sim, w, h, texts);
 
 		// Status line
@@ -513,8 +555,10 @@ public final class HudRenderer {
 	 * War Thunder-style aiming: a lead circle (10% bigger than the reticle) where the selected group's
 	 * shots meet the aim target along its predicted path (reticle inside = shots go there), plus one small "+" per
 	 * selected weapon showing where its barrel points at that distance. Put the + in the circle.
+	 * The + are solid yellow bars with a dark rim (drawn as quads, over the line pass) so they show
+	 * against bright shields, explosions and dark space alike.
 	 */
-	private void drawLead(Sim sim, int w, int h, List<Text> texts) {
+	private void drawLead(Sim sim, int w, int h, List<Text> texts, List<float[]> bars) {
 		Ship3D p = sim.player, t = sim.aimTarget;
 		if (p == null || t == null || t.destroyed || !sim.hasLead) return;
 		float[] s = project(sim, sim.leadPoint.x, sim.leadPoint.y, sim.leadPoint.z, w, h);
@@ -535,6 +579,7 @@ public final class HudRenderer {
 		s3d.core.WeaponGroup3D g = sim.selectedGroup();
 		if (g == null) return;
 		Vec3 mw = new Vec3(), dir = new Vec3(), pt = new Vec3();
+		List<float[]> fills = new ArrayList<>();
 		for (WeaponMount m : g.mounts) {
 			if (!m.spec.supported) continue;
 			m.worldPos(p, mw);
@@ -544,11 +589,20 @@ public final class HudRenderer {
 			float[] q = project(sim, pt.x, pt.y, pt.z, w, h);
 			if (q == null) continue;
 			boolean ready = m.readiness() >= 1f;
-			color(PIPPER, ready ? 1f : 0.45f);
-			line(q[0] - 5f, q[1], q[0] - 1.5f, q[1]);
-			line(q[0] + 1.5f, q[1], q[0] + 5f, q[1]);
-			line(q[0], q[1] - 5f, q[0], q[1] - 1.5f);
-			line(q[0], q[1] + 1.5f, q[0], q[1] + 5f);
+			plus(bars, fills, q[0], q[1], ready ? 1f : 0.55f);
+		}
+		bars.addAll(fills); // every rim under every fill: converging guns' + overlap
+	}
+
+	/** One gun pipper: four 2 px yellow arms around a small gap, each with a 1 px dark rim (rims to bars, fills to fills). */
+	private static void plus(List<float[]> rims, List<float[]> fills, float x, float y, float a) {
+		final float arm = 7f, gap = 2f, half = 1f, rim = 1f;
+		float[][] arms = {
+				{x - arm, y - half, x - gap, y + half}, {x + gap, y - half, x + arm, y + half},
+				{x - half, y - arm, x + half, y - gap}, {x - half, y + gap, x + half, y + arm}};
+		for (float[] b : arms) {
+			rims.add(new float[] {b[0] - rim, b[1] - rim, b[2] + rim, b[3] + rim, 0.04f, 0.03f, 0f, 0.85f * a});
+			fills.add(new float[] {b[0], b[1], b[2], b[3], CROSSHAIR[0], CROSSHAIR[1], CROSSHAIR[2], a});
 		}
 	}
 
@@ -735,21 +789,22 @@ public final class HudRenderer {
 	 * Your ship, bottom left, laid out like vanilla's ship panel in the target display's hologram
 	 * style: your hull as a hologram (nose up, a little smaller than the target's) over its name,
 	 * class and variant; a slanted divider; flux and hull bars, ship state and system above a rule;
-	 * the weapon groups under it, stepping left along the divider (number, mount icon, weapons,
-	 * LINKED / ALTERNATING, readiness, damage type, AUTOFIRE box, ammo). Draws its own backdrop
-	 * and lines before the main line pass, so the rest of the HUD sits on top.
+	 * the weapon groups under it, stepping left along the divider (number, weapon icon, weapons,
+	 * LINKED / ALTERNATING, readiness, damage type, AUTOFIRE box, ammo). Text in vanilla's HUD
+	 * font. Draws its own backdrop and lines before the main line pass, so the rest of the HUD sits
+	 * on top.
 	 */
 	private void drawShipPanel(Sim sim, List<Text> texts, List<float[]> bars) {
 		Ship3D p = sim.player;
-		float k = 0.8f, lh = lineH() * k, adv = textW("x") * k;
+		float lh = panelLineH(), adv = panelAdvance();
 		float m = 14f;
 
 		// Left column: the hologram over name, class and variant.
 		float holoW = 160f, holoH = 148f, holoY = m + lh * 3f + 8f;
 		ownHolo.set(p, m, holoY, holoW, holoH);
-		texts.add(new Text(caps(p.name, 24), m + 2f, m + lh * 3f, HOLO_HI, 0.95f, false, k));
-		texts.add(new Text(caps(p.hullName, 24), m + 2f, m + lh * 2f, HOLO, 0.8f, false, k));
-		if (p.variantName != null) texts.add(new Text(caps(p.variantName, 24), m + 2f, m + lh, HOLO, 0.6f, false, k));
+		texts.add(pt(caps(p.name, 24), m + 2f, m + lh * 3f, HOLO_HI, 0.95f));
+		texts.add(pt(caps(p.hullName, 24), m + 2f, m + lh * 2f, HOLO, 0.8f));
+		if (p.variantName != null) texts.add(pt(caps(p.variantName, 24), m + 2f, m + lh, HOLO, 0.6f));
 
 		// Divider from the bottom edge up to the rule; groups below the rule, ship status above it.
 		int rows = Math.max(1, p.groups.size());
@@ -800,34 +855,34 @@ public final class HudRenderer {
 		float barX0 = sx + adv * 6f, barX1 = barX0 + 130f, valX = barX1 + 8f, stateX = valX + adv * 7f + 4f;
 		float y = top;
 		if (wings) {
-			texts.add(new Text(String.format("WINGS  %s  (%d OUT)", p.wingsRegroup ? "REGROUP" : "ENGAGE", wingsUp),
-					sx, y, p.wingsRegroup ? AMBER : HOLO, 0.85f, false, k));
+			texts.add(pt(String.format("WINGS  %s  (%d OUT)", p.wingsRegroup ? "REGROUP" : "ENGAGE", wingsUp),
+					sx, y, p.wingsRegroup ? AMBER : HOLO, 0.85f));
 			y -= step;
 		}
 		if (p.fragments != null) { // Threat fragment swarm: what fragment weapons draw on
 			int have = p.fragments.active();
-			texts.add(new Text(String.format("FRAGMENTS  %d / %d", have, p.fragments.size), sx, y, have < fragNeed ? RED : HOLO, 0.85f, false, k));
+			texts.add(pt(String.format("FRAGMENTS  %d / %d", have, p.fragments.size), sx, y, have < fragNeed ? RED : HOLO, 0.85f));
 			y -= step;
 		}
 		if (slowed > 0f) {
-			texts.add(new Text(String.format("REALITY DISRUPTED  slower repairs %.0f s", Math.max(1f, slowed)).toUpperCase(java.util.Locale.ROOT),
-					sx, y, AMBER, 0.85f, false, k));
+			texts.add(pt(String.format("REALITY DISRUPTED  slower repairs %.0f s", Math.max(1f, slowed)).toUpperCase(java.util.Locale.ROOT),
+					sx, y, AMBER, 0.85f));
 			y -= step;
 		}
 		float barY = lh * 0.72f;
 		if (p.flux != null && p.flux.maxFlux > 0f) {
-			texts.add(new Text("FLUX", sx, y, HOLO, 0.9f, false, k));
+			texts.add(pt("FLUX", sx, y, HOLO, 0.9f));
 			barTicks(barX0, barX1, y - barY, 7f);
 			fluxBar(bars, barX0, y - barY, barX1, 7f, p.flux);
-			texts.add(new Text(String.format("%.0f", p.flux.flux), valX, y, HOLO, 0.9f, false, k));
-			if (p.flux.zeroFluxBoostActive() && !p.destroyed) texts.add(new Text("0-FLUX BOOST", stateX, y, HOLO_HI, 0.85f, false, k));
+			texts.add(pt(String.format("%.0f", p.flux.flux), valX, y, HOLO, 0.9f));
+			if (p.flux.zeroFluxBoostActive() && !p.destroyed) texts.add(pt("0-FLUX BOOST", stateX, y, HOLO_HI, 0.85f));
 			y -= step;
 		}
 		float hullFrac = p.hullMax > 0f ? Math.max(0f, Math.min(1f, p.hull / p.hullMax)) : 0f;
-		texts.add(new Text("HULL", sx, y, HOLO, 0.9f, false, k));
+		texts.add(pt("HULL", sx, y, HOLO, 0.9f));
 		barTicks(barX0, barX1, y - barY, 7f);
 		bar(bars, barX0, y - barY, barX1, 7f, hullFrac, hullFrac > 0.5f ? HOLO : hullFrac > 0.25f ? AMBER : RED);
-		texts.add(new Text(String.format("%.0f", Math.max(0f, p.hull)), valX, y, HOLO, 0.9f, false, k));
+		texts.add(pt(String.format("%.0f", Math.max(0f, p.hull)), valX, y, HOLO, 0.9f));
 		String state = null;
 		float[] stateCol = HOLO;
 		if (p.destroyed) {
@@ -840,43 +895,46 @@ public final class HudRenderer {
 			state = "VENTING FLUX";
 			stateCol = SHIELD;
 		} else if (p.phased) {
-			state = "PHASED";
-			stateCol = AMBER;
+			// Phase coil stress (hard flux) cuts top speed; vanilla shows it as a debuff.
+			boolean stressed = p.sysTopSpeedMult < 0.995f;
+			state = stressed ? String.format("PHASED  SPEED %.0f%%", p.sysTopSpeedMult * 100f) : "PHASED";
+			stateCol = stressed ? RED : AMBER;
 		} else if (p.flux != null && p.flux.hasShield()) {
 			state = p.flux.shieldOn ? "SHIELDS UP" : "SHIELDS DOWN";
 			stateCol = p.flux.shieldOn ? HOLO_HI : HOLO_DIM;
 		}
-		if (state != null) texts.add(new Text(state, stateX, y, stateCol, 0.9f, false, k));
+		if (state != null) texts.add(pt(state, stateX, y, stateCol, 0.9f));
 		y -= step;
 		for (s3d.core.ShipSystem3D sys : new s3d.core.ShipSystem3D[] {p.system, p.cloak}) {
 			if (sys == null) continue;
 			if (!sys.supported()) {
-				texts.add(new Text(caps(sys.name, 26), sx, y, GRAY, 0.8f, false, k));
-				texts.add(new Text("NOT IN 3D YET", stateX, y, GRAY, 0.8f, false, k));
+				texts.add(pt(caps(sys.name, 26), sx, y, GRAY, 0.8f));
+				texts.add(pt("NOT IN 3D YET", stateX, y, GRAY, 0.8f));
 			} else {
 				boolean ready = sys.ready(p);
 				float[] col = sys.on() ? AMBER : ready ? HOLO_HI : HOLO;
-				texts.add(new Text(caps(sys.name, 26), sx, y, col, 0.95f, false, k));
-				if (sys.maxAmmo > 0) texts.add(new Text(String.valueOf((int) sys.ammo), valX, y, sys.ammo >= 1f ? HOLO : RED, 0.9f, false, k));
+				texts.add(pt(caps(sys.name, 26), sx, y, col, 0.95f));
+				if (sys.maxAmmo > 0) texts.add(pt(String.valueOf((int) sys.ammo), valX, y, sys.ammo >= 1f ? HOLO : RED, 0.9f));
 				color(HOLO, 0.6f);
 				line(stateX, y - lh * 0.9f, stateX, y - lh * 0.1f);
 				bar(bars, stateX + 4f, y - barY, stateX + 40f, 5f, systemFrac(sys), sys.on() ? AMBER : ready ? HOLO_HI : HOLO_DIM);
-				texts.add(new Text(sys.status(), stateX + 46f, y, col, 0.9f, false, k));
+				texts.add(pt(sys.status(), stateX + 46f, y, col, 0.9f));
 			}
 			y -= step;
 		}
 
 		// Weapon groups.
-		texts.add(new Text("WEAPON GROUPS", slant0 + PANEL_SLANT * (ruleY - 3f) + 6f, ruleY - 3f, HOLO, 0.8f, false, k));
+		texts.add(pt("WEAPON GROUPS", slant0 + PANEL_SLANT * (ruleY - 3f) + 6f, ruleY - 3f, HOLO, 0.8f));
 		if (p.groups.isEmpty()) {
 			float rt = ruleY - headH;
-			texts.add(new Text("NO WEAPONS", slant0 + PANEL_SLANT * rt + 6f, rt, HOLO_DIM, 0.7f, false, k));
+			texts.add(pt("NO WEAPONS", slant0 + PANEL_SLANT * rt + 6f, rt, HOLO_DIM, 0.7f));
 		}
 		for (int i = 0; i < p.groups.size(); i++) {
 			s3d.core.WeaponGroup3D g = p.groups.get(i);
 			float rt = ruleY - headH - i * rowH; // top of the row's first line
 			float rx = slant0 + PANEL_SLANT * rt + 6f; // clear of the divider along the first line
-			float nx = rx + adv * 3f + 12f, cx = nx + adv * 24f, bx = cx + adv * 12.5f;
+			float ix0 = rx + adv * 2f + 3f, ix1 = ix0 + 22f; // weapon icon box, both lines tall
+			float nx = ix1 + 6f, cx = nx + adv * 24f, bx = cx + adv * 12.5f;
 			boolean selected = i == p.selectedGroup;
 			WeaponMount first = null;
 			int off = 0, working = 0, ammo = 0, maxAmmo = 0;
@@ -901,27 +959,33 @@ public final class HudRenderer {
 			}
 			float a = selected ? 1f : 0.75f;
 			float[] col = first == null ? GRAY : off == working ? RED : selected ? HOLO_HI : HOLO;
-			texts.add(new Text((i + 1) + ".", rx, rt, col, a, false, k));
+			texts.add(pt((i + 1) + ".", rx, rt, col, a));
 			WeaponMount iconOf = first != null ? first : g.mounts.isEmpty() ? null : g.mounts.get(0);
 			if (iconOf != null) {
-				color(col, 0.9f * a);
-				mountIcon(iconOf.spec.type, iconOf.spec.size, rx + adv * 2.5f + 5f, rt - lh * 0.5f);
+				// Vanilla's weapon icon (its turret sprite) in the panel's colour; the slot shape if it has none.
+				HudIcons.Icon wi = HudIcons.get(iconOf.spec.iconSprites);
+				if (wi != null) {
+					icon(wi, ix0, rt - lh * 2f - 1f, ix1, rt - 1f, col, 0.95f * a);
+				} else {
+					color(col, 0.9f * a);
+					mountIcon(iconOf.spec.type, iconOf.spec.size, (ix0 + ix1) * 0.5f, rt - lh);
+				}
 			}
-			texts.add(new Text(caps(groupLabel(g), 22), nx, rt, col, a, false, k));
+			texts.add(pt(caps(groupLabel(g), 22), nx, rt, col, a));
 			if (first == null) {
-				texts.add(new Text("NOT IN 3D YET", cx, rt, GRAY, 0.7f, false, k));
+				texts.add(pt("NOT IN 3D YET", cx, rt, GRAY, 0.7f));
 				continue;
 			}
-			texts.add(new Text(g.alternating ? "ALTERNATING" : "LINKED", cx, rt, col, 0.85f * a, false, k));
-			texts.add(new Text("DMG: " + dmg.replace('_', ' '), nx + adv * 2f, rt - lh, col, 0.8f * a, false, k));
+			texts.add(pt(g.alternating ? "ALTERNATING" : "LINKED", cx, rt, col, 0.85f * a));
+			texts.add(pt("DMG: " + dmg.replace('_', ' '), nx + adv * 2f, rt - lh, col, 0.8f * a));
 			if (off == working) {
-				texts.add(new Text(String.format("OFF %.0fs", back), bx, rt, RED, 0.9f, false, k));
+				texts.add(pt(String.format("OFF %.0fs", back), bx, rt, RED, 0.9f));
 			} else {
 				bar(bars, bx, rt - barY + 1f, bx + 40f, 5f, r, r >= 1f ? (selected ? HOLO_HI : HOLO) : AMBER);
-				if (off > 0) texts.add(new Text(off + " OFF", bx + 46f, rt, RED, 0.9f, false, k));
+				if (off > 0) texts.add(pt(off + " OFF", bx + 46f, rt, RED, 0.9f));
 			}
 			boolean auto = g.autofire; // the group's setting; while selected it's still fired by hand
-			texts.add(new Text("AUTOFIRE", cx, rt - lh, auto ? col : HOLO_DIM, (auto ? 0.85f : 0.6f) * a, false, k));
+			texts.add(pt("AUTOFIRE", cx, rt - lh, auto ? col : HOLO_DIM, (auto ? 0.85f : 0.6f) * a));
 			float boxX = cx + adv * 9f + 2f, boxY = rt - lh * 1.5f - 3.5f;
 			if (auto) {
 				bars.add(new float[] {boxX, boxY, boxX + 7f, boxY + 7f, col[0], col[1], col[2], 0.9f});
@@ -932,7 +996,7 @@ public final class HudRenderer {
 				line(boxX + 7f, boxY + 7f, boxX, boxY + 7f);
 				line(boxX, boxY + 7f, boxX, boxY);
 			}
-			if (maxAmmo > 0) texts.add(new Text(ammo + "/" + maxAmmo, bx, rt - lh, ammo > 0 ? col : RED, 0.85f * a, false, k));
+			if (maxAmmo > 0) texts.add(pt(ammo + "/" + maxAmmo, bx, rt - lh, ammo > 0 ? col : RED, 0.85f * a));
 		}
 		GL11.glEnd();
 	}
@@ -1134,17 +1198,86 @@ public final class HudRenderer {
 		return font != null ? font.width(s) : s.length() * 8f;
 	}
 
+	/** Line height and a capital's advance of your ship panel's text (vanilla's font, else the HUD font at 0.8). */
+	private float panelLineH() {
+		return vanilla != null ? vanilla.lineHeight * vanillaScale : lineH() * 0.8f;
+	}
+
+	private float panelAdvance() {
+		return vanilla != null ? vanilla.width("X", vanillaScale) : textW("x") * 0.8f;
+	}
+
+	/** Text in your ship panel or the status list: vanilla's HUD font if it loaded. */
+	private Text pt(String s, float x, float y, float[] c, float a) {
+		return vanilla != null ? new Text(s, x, y, c, a, false, vanillaScale, vanilla) : new Text(s, x, y, c, a, false, 0.8f);
+	}
+
+	/** Queues an icon fitted (aspect kept) and centred in the box x0..x1, y0..y1, in colour c. */
+	private void icon(HudIcons.Icon ic, float x0, float y0, float x1, float y1, float[] c, float a) {
+		float k = Math.min((x1 - x0) / ic.w, (y1 - y0) / ic.h);
+		float w = ic.w * k, h = ic.h * k, cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+		icons.add(new IconQuad(ic.tex, cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f, c, a));
+	}
+
+	private void drawIcons() {
+		if (icons.isEmpty()) return;
+		fx.set("u_mode", 10); // tinted sprite with its own alpha
+		GL11.glEnable(GL11.GL_TEXTURE_2D);
+		for (IconQuad q : icons) {
+			GL11.glBindTexture(GL11.GL_TEXTURE_2D, q.tex);
+			GL11.glBegin(GL11.GL_QUADS);
+			GL11.glColor4f(q.c[0], q.c[1], q.c[2], q.a);
+			GL11.glTexCoord2f(0f, 1f); GL11.glVertex2f(q.x0, q.y0);
+			GL11.glTexCoord2f(1f, 1f); GL11.glVertex2f(q.x1, q.y0);
+			GL11.glTexCoord2f(1f, 0f); GL11.glVertex2f(q.x1, q.y1);
+			GL11.glTexCoord2f(0f, 0f); GL11.glVertex2f(q.x0, q.y1);
+			GL11.glEnd();
+		}
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+		fx.set("u_mode", 0);
+	}
+
+	/**
+	 * Vanilla's status list (ECM rating, Coordinated Maneuvers, peak time, CR, ion storms, skills...)
+	 * as vanilla stacks it: above your ship's hologram, bottom entry first, each its icon beside a
+	 * title and a data line, fading out as vanilla fades it; in the panel's cyan, debuff lines red.
+	 */
+	private void drawStatusList(List<Status> statuses, List<Text> texts) {
+		if (statuses.isEmpty()) return;
+		float lh = panelLineH(), m = 14f;
+		float iconBox = lh * 2f, entryH = lh * 2f + 6f;
+		float y = ownHolo.y + ownHolo.h + 12f; // just above your hologram's frame (drawShipPanel set it this frame)
+		int shown = Math.min(statuses.size(), 9); // the throttle scale sits above that
+		for (int i = 0; i < shown; i++) {
+			Status s = statuses.get(i);
+			float a = Math.max(0f, Math.min(1f, s.alpha));
+			if (a <= 0.02f) continue;
+			HudIcons.Icon ic = s.icon != null ? HudIcons.get(s.icon) : null;
+			if (ic != null) icon(ic, m, y, m + iconBox, y + iconBox, HOLO, 0.9f * a);
+			float tx = m + iconBox + 6f, top = y + lh * 2f;
+			if (s.title != null) texts.add(pt(s.title.toUpperCase(java.util.Locale.ROOT), tx, top, HOLO_HI, 0.95f * a));
+			if (s.data != null) texts.add(pt(s.data.toUpperCase(java.util.Locale.ROOT), tx, top - lh, s.debuff ? RED : HOLO, 0.85f * a));
+			y += entryH;
+		}
+	}
+
 	private static final class Text {
 		final String s;
 		final float x, y, a, scale;
 		final float[] c;
 		final boolean centred;
+		/** Vanilla's bitmap font, or null for the HUD's own font. */
+		final BitmapFont bmp;
 
 		Text(String s, float x, float y, float[] c, float a, boolean centred) {
 			this(s, x, y, c, a, centred, 1f);
 		}
 
 		Text(String s, float x, float y, float[] c, float a, boolean centred, float scale) {
+			this(s, x, y, c, a, centred, scale, null);
+		}
+
+		Text(String s, float x, float y, float[] c, float a, boolean centred, float scale, BitmapFont bmp) {
 			this.s = s;
 			this.x = x;
 			this.y = y;
@@ -1152,24 +1285,41 @@ public final class HudRenderer {
 			this.a = a;
 			this.centred = centred;
 			this.scale = scale;
+			this.bmp = bmp;
 		}
 	}
 
 	private void drawTexts(List<Text> texts) {
-		if (font == null || texts.isEmpty()) return;
+		if (texts.isEmpty()) return;
 		fx.set("u_mode", 3);
 		GL11.glEnable(GL11.GL_TEXTURE_2D);
-		GL11.glBindTexture(GL11.GL_TEXTURE_2D, font.texture);
-		GL11.glBegin(GL11.GL_QUADS);
-		for (Text t : texts) {
-			float x = t.centred ? t.x - font.width(t.s) * t.scale * 0.5f : t.x;
-			// Drop shadow keeps text readable over bright nebula and hulls.
-			GL11.glColor4f(0f, 0f, 0f, t.a * 0.7f);
-			font.emit(t.s, Math.round(x) + 1f, Math.round(t.y) - 1f, t.scale);
-			GL11.glColor4f(t.c[0], t.c[1], t.c[2], t.a);
-			font.emit(t.s, Math.round(x), Math.round(t.y), t.scale);
+		if (font != null) {
+			GL11.glBindTexture(GL11.GL_TEXTURE_2D, font.texture);
+			GL11.glBegin(GL11.GL_QUADS);
+			for (Text t : texts) {
+				if (t.bmp != null) continue;
+				float x = t.centred ? t.x - font.width(t.s) * t.scale * 0.5f : t.x;
+				// Drop shadow keeps text readable over bright nebula and hulls.
+				GL11.glColor4f(0f, 0f, 0f, t.a * 0.7f);
+				font.emit(t.s, Math.round(x) + 1f, Math.round(t.y) - 1f, t.scale);
+				GL11.glColor4f(t.c[0], t.c[1], t.c[2], t.a);
+				font.emit(t.s, Math.round(x), Math.round(t.y), t.scale);
+			}
+			GL11.glEnd();
 		}
-		GL11.glEnd();
+		if (vanilla != null) {
+			GL11.glBindTexture(GL11.GL_TEXTURE_2D, vanilla.texture);
+			GL11.glBegin(GL11.GL_QUADS);
+			for (Text t : texts) {
+				if (t.bmp != vanilla) continue;
+				float x = t.centred ? t.x - vanilla.width(t.s, t.scale) * 0.5f : t.x;
+				GL11.glColor4f(0f, 0f, 0f, t.a * 0.7f);
+				vanilla.emit(t.s, x + t.scale, t.y - t.scale, t.scale);
+				GL11.glColor4f(t.c[0], t.c[1], t.c[2], t.a);
+				vanilla.emit(t.s, x, t.y, t.scale);
+			}
+			GL11.glEnd();
+		}
 		GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
 		fx.set("u_mode", 0);
 	}
