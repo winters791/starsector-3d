@@ -56,6 +56,8 @@ public final class ShipSystem3D {
 	public int dronesPerUse = 1;
 	/** For the log: what the host set up for this system. */
 	public String note;
+	/** How it looks while it runs (vanilla's jitter, weapon glow, engine and shield colours). */
+	public SystemLook look;
 
 	// ---- state ----
 	public State state = State.IDLE;
@@ -80,6 +82,7 @@ public final class ShipSystem3D {
 		this.id = id;
 		this.name = name;
 		this.kind = kind;
+		this.look = SystemLook.defaults(kind);
 	}
 
 	/** Maps a vanilla system id to the 3D kind that rebuilds it (UNSUPPORTED if there's none yet). */
@@ -280,10 +283,7 @@ public final class ShipSystem3D {
 			case DISPLACER: {
 				// Short blink along the way the ship is going (its nose if it's nearly still).
 				Vec3 dir = s.vel.lengthSq() > 100f ? new Vec3(s.vel).normalize() : s.rot.forward(new Vec3());
-				Vec3 from = new Vec3(s.pos);
-				s.pos.addScaled(dir, t.sysDisplacerDistance * Math.max(0.5f, s.scale));
-				sim.combat.effects.add(new Effect(Effect.Kind.FLASH, from, s.radius * 1.5f, 0.4f).color(0.6f, 0.4f, 1f));
-				sim.combat.effects.add(new Effect(Effect.Kind.FLASH, s.pos, s.radius * 1.5f, 0.4f).color(0.6f, 0.4f, 1f));
+				s.pos.addScaled(dir, t.sysDisplacerDistance * Math.max(0.5f, s.scale)); // the jitter (SystemLook) is the visual
 				break;
 			}
 			case FAST_MISSILE_RACKS:
@@ -303,7 +303,6 @@ public final class ShipSystem3D {
 					int add = reloadBaseOnly && m.spec.baseMaxAmmo > 0 ? m.spec.baseMaxAmmo : m.spec.maxAmmo;
 					m.ammo = Math.min(m.spec.maxAmmo, m.ammo + add);
 				}
-				sim.combat.effects.add(new Effect(Effect.Kind.FLASH, s.pos, s.radius * 0.6f, 0.4f).color(1f, 0.7f, 0.3f));
 				break;
 			case PHASE_TELEPORTER:
 				teleport(s, sim);
@@ -353,10 +352,7 @@ public final class ShipSystem3D {
 			if (away.lengthSq() < 1e-6f) away.set(0f, 1f, 0f);
 			dest.set(o.pos).addScaled(away.normalize(), clear);
 		}
-		Vec3 from = new Vec3(s.pos);
-		s.pos.set(dest);
-		sim.combat.effects.add(new Effect(Effect.Kind.FLASH, from, s.radius * 1.6f, 0.5f).color(0.4f, 0.65f, 1f));
-		sim.combat.effects.add(new Effect(Effect.Kind.FLASH, s.pos, s.radius * 1.6f, 0.5f).color(0.4f, 0.65f, 1f));
+		s.pos.set(dest); // the jitter (SystemLook) is the visual
 	}
 
 	/**
@@ -383,7 +379,8 @@ public final class ShipSystem3D {
 		}
 		Vec3 jitter = new Vec3(RND.nextFloat() - 0.5f, RND.nextFloat() - 0.5f, RND.nextFloat() - 0.5f).scale(60f);
 		sim.combat.spawnMissile(s, payload, at.add(jitter), new Vec3(RND.nextFloat() - 0.5f, 0f, RND.nextFloat() - 0.5f), 0f, null);
-		sim.combat.effects.add(new Effect(Effect.Kind.FLASH, at, payload.missileRadius * 6f, 0.5f).color(1f, 0.35f, 0.25f));
+		// Vanilla's mine fades in through a pink jitter: a pink shimmer where it appears.
+		sim.combat.effects.add(new Effect(Effect.Kind.FLASH, at, payload.missileRadius * 6f, 0.5f).color(1f, 0.6f, 1f));
 	}
 
 	/**
@@ -508,14 +505,7 @@ public final class ShipSystem3D {
 				if (tg == null || tg.destroyed) break;
 				float k = 1f + (effectMult - 1f) * e;
 				tg.sysDamageTakenMult *= k;
-				tg.sysShieldDamageTakenMult *= k;
-				pulseTimer -= dt;
-				if (pulseTimer <= 0f) {
-					pulseTimer = 0.25f;
-					Effect glow = new Effect(Effect.Kind.FLASH, tg.pos, tg.radius * (0.9f + 0.3f * RND.nextFloat()), 0.35f).color(1f, 0.2f, 0.2f);
-					glow.vel.set(tg.vel);
-					sim.combat.effects.add(glow);
-				}
+				tg.sysShieldDamageTakenMult *= k; // the red jitter on it is drawn from SystemLook.targetJitter
 				break;
 			}
 			case TARGETING_FEED:

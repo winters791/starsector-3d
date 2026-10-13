@@ -16,6 +16,8 @@ public final class Sim {
 	public final ChaseCamera camera = new ChaseCamera();
 	public final ShipControls controls = new ShipControls();
 	public final Combat combat = new Combat();
+	/** Vent clouds and overload arcs (looks only, own random numbers). */
+	public final ShipFx fx = new ShipFx();
 	public boolean paused;
 	public float time;
 
@@ -114,7 +116,7 @@ public final class Sim {
 			if (spectatorPilot != null && spectatorPilot == player) player.ai = null;
 			spectatorPilot = null;
 			viewShip = null;
-			if (player != null) camera.snapTo(player);
+			if (player != null) camera.glideTo(player, 0.6f);
 		}
 	}
 
@@ -133,7 +135,7 @@ public final class Sim {
 		if (mine.isEmpty()) return;
 		int i = mine.indexOf(viewShip);
 		viewShip = mine.get(Math.floorMod((i < 0 ? 0 : i + dir), mine.size()));
-		camera.snapTo(viewShip);
+		camera.glideTo(viewShip, 0.6f);
 	}
 
 	/** Locked target (R), or null. */
@@ -274,6 +276,7 @@ public final class Sim {
 		worldTimeScale = player != null && !player.destroyed && !spectating && player.timeMult > 1f ? 1f / player.timeMult : 1f;
 		simDt *= worldTimeScale;
 		stepFlux(in, simDt);
+		fx.step(this, simDt);
 		lap = lap(2, lap);
 		if (profile != null) {
 			profile.worstShipNs = 0L;
@@ -911,7 +914,7 @@ public final class Sim {
 				best = s;
 			}
 		}
-		if (autoTarget != null && currentScore <= bestScore + 2f) return autoTarget;
+		if (autoTarget != null && currentScore < Float.MAX_VALUE && currentScore <= bestScore + 2f) return autoTarget; // still a candidate (not a wreck)
 		return best;
 	}
 

@@ -39,6 +39,15 @@ public final class Combat {
 	 */
 	public boolean mergeNumbers;
 	private static final float MERGE_SECONDS = 0.5f;
+	/** Sim clock of numbersFor's (your) latest hit on an enemy's hull/armor, on a shield, and latest kill: HUD hit markers. */
+	public float lastHullHitAt = -1e9f, lastShieldHitAt = -1e9f, lastKillAt = -1e9f;
+	/** Whether that kill was a ship (big marker) rather than a fighter. */
+	public boolean lastKillShip;
+	/** Latest hull/armor damage numbersFor (you) took: when, from where (the attacker, else the hit), how much (HUD damage direction). */
+	public float hurtAt = -1e9f, hurtAmount;
+	public final Vec3 hurtFrom = new Vec3();
+	/** Wrecks still burning: {seconds left, flame budget}. */
+	private final java.util.Map<Ship3D, float[]> burning = new java.util.IdentityHashMap<>();
 
 	private static final class Tally {
 		float sum, age;
@@ -1311,7 +1320,8 @@ public final class Combat {
 		float[] sT = new float[1];
 		for (int i = 0; i < Math.min(targets, picks.size()); i++) {
 			Object o = picks.get(i);
-			Effect arc = new Effect(Effect.Kind.ARC, s.pos, Math.max(3f, 2.5f * s.scale), 0.3f).color(0.55f, 0.75f, 1f);
+			float[] ac = s.system != null && s.system.look.effect1 != null ? s.system.look.effect1 : new float[] {0.55f, 0.75f, 1f}; // the system's arc colour
+			Effect arc = new Effect(Effect.Kind.ARC, s.pos, Math.max(3f, 2.5f * s.scale), 0.3f).color(ac[0], ac[1], ac[2]);
 			if (o instanceof Missile3D) {
 				Missile3D m = (Missile3D) o;
 				m.hp -= spec.damage;
@@ -1645,6 +1655,10 @@ public final class Combat {
 
 	/** Adds a hit you dealt to the target's running number (merged mode). */
 	private void tally(Ship3D attacker, Ship3D target, Vec3 at, float amount, boolean hull, boolean armor) {
+		if (attacker != null && attacker == numbersFor && target != null && target.owner != attacker.owner && amount >= 0.5f) {
+			if (hull || armor) lastHullHitAt = clock;
+			else lastShieldHitAt = clock;
+		}
 		if (!mergeNumbers || attacker == null || attacker != numbersFor || target == null || amount < 0.5f) return;
 		Tally t = tallies.computeIfAbsent(target, k -> new Tally());
 		t.sum += amount;
@@ -1672,6 +1686,11 @@ public final class Combat {
 	}
 
 	void damageText(Vec3 at, Ship3D attacker, Ship3D target, float[] dealt) {
+		if (target != null && target == numbersFor && dealt[0] + dealt[1] > 0.5f) {
+			hurtAmount = (clock - hurtAt < 0.2f ? hurtAmount : 0f) + dealt[0] + dealt[1];
+			hurtAt = clock;
+			hurtFrom.set(attacker != null && attacker != target ? attacker.pos : at);
+		}
 		tally(attacker, target, at, dealt[0] + dealt[1], dealt[1] > 0.5f, dealt[0] > 0.5f);
 		if (!showNumbers(attacker, target)) return;
 		Effect text = new Effect(Effect.Kind.DAMAGE_TEXT, at, 0f, 1.1f);
@@ -1695,6 +1714,7 @@ public final class Combat {
 		burns.clear();
 		ridden.clear();
 		exotic.clear();
+		burning.clear();
 	}
 
 	// ---- projectiles -----------------------------------------------------------------------
@@ -1848,15 +1868,52 @@ public final class Combat {
 		s.angVel.set((rnd.nextFloat() - 0.5f) * 0.6f, (rnd.nextFloat() - 0.5f) * 0.6f, (rnd.nextFloat() - 0.5f) * 0.6f);
 		sounds.play("explosion_ship", s.pos, s.fighter ? 0.4f : 1.2f);
 		blast(s.pos, s.radius * 2.5f, s);
+		if (numbersFor != null && s.lastHitBy == numbersFor && s.owner != numbersFor.owner) {
+			lastKillAt = clock;
+			lastKillShip = !s.fighter;
+		}
+		deathVisuals(s);
+	}
+
+	/**
+	 * The big blast, a shockwave, sparks thrown off the hull; then (not fighters) a few secondary
+	 * pops across the hull over the next couple of seconds, and the wreck burns for a while.
+	 */
+	private void deathVisuals(Ship3D s) {
 		Effect boom = new Effect(Effect.Kind.EXPLOSION, s.pos, s.radius * 2.2f, 1.4f).color(1f, 0.65f, 0.3f);
 		boom.vel.set(s.vel);
 		effects.add(boom);
+		Effect flash = new Effect(Effect.Kind.FLASH, s.pos, s.radius * 3f, 0.25f).color(1f, 0.9f, 0.75f);
+		flash.vel.set(s.vel);
+		effects.add(flash);
+		Effect ring = new Effect(Effect.Kind.RING, s.pos, s.radius * (s.fighter ? 3f : 4.5f), s.fighter ? 0.5f : 1.1f).color(1f, 0.72f, 0.45f);
+		ring.vel.set(s.vel);
+		effects.add(ring);
 		for (int i = 0; i < 12; i++) {
 			Effect f = new Effect(Effect.Kind.FLASH, s.pos, s.radius * (0.4f + rnd.nextFloat() * 0.5f), 0.6f + rnd.nextFloat() * 0.8f)
 					.color(1f, 0.55f + rnd.nextFloat() * 0.3f, 0.25f);
 			f.vel.set(rnd.nextFloat() - 0.5f, rnd.nextFloat() - 0.5f, rnd.nextFloat() - 0.5f).normalize().scale(s.radius * 0.6f).add(s.vel);
 			effects.add(f);
 		}
+		int sparks = s.fighter ? 6 : 18;
+		for (int i = 0; i < sparks; i++) { // hot debris flung out fast
+			Effect d = new Effect(Effect.Kind.FLASH, s.pos, Math.max(3f, s.radius * (0.04f + rnd.nextFloat() * 0.05f)), 0.5f + rnd.nextFloat() * 1.2f)
+					.color(1f, 0.85f + rnd.nextFloat() * 0.15f, 0.55f);
+			d.vel.set(rnd.nextFloat() - 0.5f, (rnd.nextFloat() - 0.5f) * 0.6f, rnd.nextFloat() - 0.5f).normalize().scale(s.radius * (1.5f + rnd.nextFloat() * 3f)).add(s.vel);
+			effects.add(d);
+		}
+		if (s.fighter) return;
+		int pops = "capital".equals(s.sizeClass) ? 6 : "cruiser".equals(s.sizeClass) ? 4 : "destroyer".equals(s.sizeClass) ? 3 : 2;
+		Vec3 at = new Vec3();
+		for (int i = 0; i < pops; i++) {
+			hullPoint(s, at);
+			float when = 0.35f + (i + rnd.nextFloat()) * (1.8f / pops);
+			Effect pop = new Effect(Effect.Kind.EXPLOSION, at, s.radius * (0.5f + rnd.nextFloat() * 0.4f), 0.7f).color(1f, 0.6f, 0.28f)
+					.delayed(when).withSound("explosion_ship", 0.45f);
+			pop.vel.set(s.vel);
+			effects.add(pop);
+		}
+		burning.put(s, new float[] {Math.min(14f, 6f + s.radius * 0.02f), 0f});
 	}
 
 	/** Visual effects age and move; lingering weapon effects (graviton marks, disintegrator burns) tick too. */
@@ -1867,11 +1924,72 @@ public final class Combat {
 		exotic.step(dt); // rifts, Reality Disruptor orbs, Defabrication swarms, fragment swarms, slowed repairs
 		for (Iterator<Effect> it = effects.iterator(); it.hasNext(); ) {
 			Effect e = it.next();
-			e.life -= dt;
 			e.pos.addScaled(e.vel, dt);
+			if (e.delay > 0f) { // staged: drifts along until its moment, then plays its sound
+				e.delay -= dt;
+				if (e.delay <= 0f && e.sound != null) sounds.play(e.sound, e.pos, e.soundVolume);
+				continue;
+			}
+			e.life -= dt;
 			if (e.kind == Effect.Kind.ARC) e.end.addScaled(e.vel, dt);
 			if (e.life <= 0f) it.remove();
 		}
+		stepWreckFires(dt);
+	}
+
+	/** Fresh wrecks keep burning for a while: flames licking off the hull, now and then a small pop. */
+	private void stepWreckFires(float dt) {
+		if (burning.isEmpty()) return;
+		Vec3 at = new Vec3();
+		for (Iterator<java.util.Map.Entry<Ship3D, float[]>> it = burning.entrySet().iterator(); it.hasNext(); ) {
+			java.util.Map.Entry<Ship3D, float[]> en = it.next();
+			Ship3D s = en.getKey();
+			float[] b = en.getValue();
+			b[0] -= dt;
+			if (b[0] <= 0f || !s.destroyed || world != null && !world.contains(s)) { // burnt out, repaired (sandbox) or gone
+				it.remove();
+				continue;
+			}
+			float heat = Math.min(1f, b[0] / 4f); // dies down over the last few seconds
+			b[1] += dt * heat * Math.min(25f, 2f + s.radius * 0.05f); // flames per second, more on bigger hulls
+			while (b[1] >= 1f) {
+				b[1] -= 1f;
+				hullPoint(s, at);
+				Effect f = new Effect(Effect.Kind.FLASH, at, Math.max(5f, s.radius * (0.06f + rnd.nextFloat() * 0.08f)), 0.45f + rnd.nextFloat() * 0.5f)
+						.color(1f, 0.42f + rnd.nextFloat() * 0.3f, 0.12f);
+				f.vel.set(s.vel).add(new Vec3(rnd.nextFloat() - 0.5f, 0.6f + rnd.nextFloat(), rnd.nextFloat() - 0.5f).scale(s.radius * 0.12f));
+				effects.add(f);
+				if (rnd.nextFloat() < 0.08f * heat) {
+					Effect pop = new Effect(Effect.Kind.EXPLOSION, at, Math.max(12f, s.radius * 0.35f), 0.5f).color(1f, 0.6f, 0.25f);
+					pop.vel.set(s.vel);
+					effects.add(pop);
+					sounds.play("hit_hull_heavy", at, 0.5f);
+				}
+			}
+		}
+	}
+
+	/** A point on the hull: one of its weapon mounts if it has any, else near its middle. */
+	private void hullPoint(Ship3D s, Vec3 out) {
+		if (!s.weapons.isEmpty() && rnd.nextFloat() < 0.75f) {
+			s.weapons.get(rnd.nextInt(s.weapons.size())).worldPos(s, out);
+		} else {
+			out.set(rnd.nextFloat() - 0.5f, (rnd.nextFloat() - 0.5f) * 0.3f, rnd.nextFloat() - 0.5f).scale(s.radius * 0.7f).add(s.pos);
+		}
+	}
+
+	/** A retreating ship leaving the battle: a flash stretched ahead along its course and a ring, instead of just vanishing. */
+	public void jumpOut(Ship3D s) {
+		Vec3 dir = s.vel.lengthSq() > 1f ? new Vec3(s.vel).normalize() : s.rot.forward(new Vec3());
+		for (int i = 0; i < 8; i++) {
+			float k = i / 7f;
+			Effect f = new Effect(Effect.Kind.FLASH, new Vec3(s.pos).addScaled(dir, s.radius * 3f * k), s.radius * (1.5f - k), 0.3f + 0.3f * (1f - k))
+					.color(0.6f, 0.8f, 1f);
+			f.vel.set(dir).scale(s.radius * 8f);
+			effects.add(f);
+		}
+		effects.add(new Effect(Effect.Kind.RING, s.pos, s.radius * 3f, 0.6f).color(0.55f, 0.75f, 1f));
+		sounds.play("system_burn_drive_activate", s.pos, 0.9f);
 	}
 
 	// ---- aiming math -----------------------------------------------------------------------

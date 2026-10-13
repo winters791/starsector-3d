@@ -4,8 +4,8 @@ import s3d.math.Vec3;
 
 /** Short-lived visual events produced by the sim (drawn by the renderer / HUD, never simulated). */
 public final class Effect {
-	/** RIFT: a dark tear with a coloured rim (Omega / Dweller rifts). */
-	public enum Kind { FLASH, SPARK, DAMAGE_TEXT, EXPLOSION, ARC, RIFT }
+	/** RIFT: a dark tear with a coloured rim (Omega / Dweller rifts). RING: an expanding shockwave shell. */
+	public enum Kind { FLASH, SPARK, DAMAGE_TEXT, EXPLOSION, ARC, RIFT, RING }
 
 	public final Kind kind;
 	public final Vec3 pos = new Vec3(), vel = new Vec3();
@@ -14,6 +14,10 @@ public final class Effect {
 	public float size, life, maxLife;
 	public float r = 1f, g = 1f, b = 1f;
 	public String text;
+	/** Seconds before it appears (it drifts with vel meanwhile); then sound, if set, plays once. */
+	public float delay;
+	public String sound;
+	public float soundVolume = 1f;
 
 	public Effect(Kind kind, Vec3 at, float size, float life) {
 		this.kind = kind;
@@ -28,6 +32,21 @@ public final class Effect {
 		this.g = g;
 		this.b = b;
 		return this;
+	}
+
+	public Effect delayed(float seconds) {
+		delay = Math.max(0f, seconds);
+		return this;
+	}
+
+	public Effect withSound(String id, float volume) {
+		sound = id;
+		soundVolume = volume;
+		return this;
+	}
+
+	public boolean visible() {
+		return delay <= 0f;
 	}
 
 	public float age01() {

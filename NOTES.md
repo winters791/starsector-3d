@@ -5,6 +5,65 @@ known issues and next steps. Newest status first.
 
 ## Status
 
+- **2026-10-13 — Ship system, vent and overload looks rebuilt to match vanilla's 2D ones (user: "don't resemble their
+  original 2D visuals"). Looks only. Bench 100/100; jar rebuilt; awaiting in-game test.**
+  - Went through each vanilla system's data file and stats script and rebuilt its look from vanilla's own building
+    blocks, in `core/SystemLook` (defaults per kind; the host overrides them from the system's own data file at
+    runtime, so other mods' systems keep their colours):
+    - Jitter (tinted copies of the ship at fresh random offsets every frame, vanilla's ranges in sprite pixels):
+      "under" copies sit just behind the hull so only a fuzzy halo shows; "over" copies just in front tint it. At
+      most 10 copies drawn per layer, brightness of the rest kept. Damper orange, Temporal Shell blue (it was red),
+      Displacer / Phase Teleporter blue, Mine Strike pink, Entropy Amplifier red on the ship (charge-up only) and
+      on its target, Targeting Feed orange-red / Recall blue / Termination Sequence orange on the carrier's
+      fighters.
+    - Weapon glow (the weapons drawn again, tinted, plus a soft halo so it reads at chase distance): High Energy
+      Focus magenta on energy weapons (it was a blue hull glow), Ammo Feed yellow on ballistics (was orange), Lidar
+      Array red on its non-beam ballistic/energy hardpoints, Targeting Feed on fighters' guns.
+    - Engines from vanilla's engine glow settings: Burn Drive 2.5x long, 3x wide, 2x glow in the ship's own colour
+      (no white-hot); Microburn and Plasma Jets green (Plasma Jets were violet); Temporal Shell blue and 25% shorter;
+      Displacer blue; phase cloak and Phase Teleporter put the flames out. The hull's system-only thrusters
+      (vanilla's system-activated engines, now read from the hull; looks only, no thrust, not EMP targets) light
+      while a movement system runs.
+    - Fortress Shield takes the shield to its own colours (white ring, magenta inside; was gold).
+    - Phase: a quarter visible at full phase as vanilla, with the cloak's pink highlight along the silhouette.
+    - EMP Emitter arcs in the system's effect colours (pink); Lidar dishes (vanilla decorative beam weapons, now
+      read from the hull) fire their ranging beams at the aim while it winds up, in the dish's own beam colours.
+    - Venting: clouds in the hull style's vent colours (white core, violet fringe on most hulls) over the whole
+      hull, and a soft glow in the fringe colour; overload arcs in the hull style's overload colour. Both read from
+      the ship at battle start.
+  - Removed, as vanilla has nothing like them: the entropy tether and targeting-feed lines, temporal afterimages,
+    activation rings and flashes, burn-drive sparks, jet puffs, mote particles, reload flashes, canister muzzle
+    flashes, the EMP charge crackle, the blink trails and the gold/blue/orange hull auras.
+  - Preview: `S3D_PREVIEW_ONLY=systemFx ./build.sh preview` -> system_fx.png. Not visible offline (needs the real
+    hull): system-only thrusters, lidar dishes, fighter jitter.
+  - Flaky check: "DEM stands off, paints, fires" failed once in four full runs earlier (payload hull loss 747 of
+    ~840; the closest approach varies 400-425 between JVM runs). Not related to these changes.
+
+- **2026-10-13 — Polish pass 1 (user: "polish tf out of the game"): deaths, retreats, battle start/end, camera,
+  hit feedback. No gameplay numbers changed. Bench 100/100; jar rebuilt 15:22; awaiting in-game test.**
+  - Ship deaths: the big blast now comes with a white flash, an expanding shockwave ring (new effect kind RING,
+    fx shader mode 8) and hot debris flung off the hull; then (not fighters) 2-6 secondary explosions pop across
+    the hull over ~2 s, each with its own sound (effects can now be delayed and carry a sound), and the wreck
+    burns for 6-14 s (flames off its weapon mounts, the odd small pop), dying down at the end.
+  - Retreats: a ship leaving the battle (past its edge, or taken early by vanilla: the "left the vanilla battle by
+    itself" case) jumps out with a blue flash stretched ahead and a ring plus the burn drive sound, instead of
+    blinking out.
+  - Battle start: the 3D view fades in from black (0.6 s) while the camera swoops in from behind and above your
+    ship (2 s, ease-out). Battle end: when vanilla calls the battle, the 3D scene plays on for up to 6 s with the
+    HUD off (no write-back to vanilla any more) until vanilla's own screens come up, instead of cutting to the
+    empty 2D map.
+  - Camera: switching ships glides instead of cutting (taking over your next ship 0.9 s; spectate [ / ] and leaving
+    spectate 0.6 s). `ChaseCamera.glideTo` / `introTo`.
+  - Hit feedback, no text: diagonal ticks round the reticle when your shots land (white hull/armor, blue shields),
+    bigger red-orange ticks spreading out on a kill (ships 0.8 s, fighters 0.5 s): this replaces the kill-feed
+    toasts. Hull damage you take shows as a red arc round your ship on the side the attacker is (faint full ring
+    when it's straight ahead/behind), stronger for heavier hits.
+  - Fixes: the automatic target stuck on a wreck when no other enemy was near the reticle (target panel showed a
+    dead ship at "HULL 100%" indefinitely); AUTO-LEVEL only shows on the status line when it differs from
+    `flight.autoLevelDefault` (it was permanently on screen).
+  - Preview: `S3D_PREVIEW_ONLY=deathFx ./build.sh preview` -> death_fx.png (kill sequence), jump_out.png,
+    intro_hurt.png (start swoop + damage arc).
+
 - **2026-10-13 — UI/UX cleanup (user: "too many hotkeys"); fighters no longer hold a battle open; Burn Drive steers.
   Headless checks pass; awaiting in-game test.**
   - Keys: `H` (help overlay) removed, along with the overlay itself; the controls are listed under How to test.

@@ -47,6 +47,44 @@ public final class ChaseCamera {
 		shake *= (float) Math.exp(-dt / 0.22f);
 	}
 
+	/** Glide from the last pose to the new ship's chase view: 1 at the switch, 0 when done. */
+	private float glide;
+	private float glideSeconds = 0.8f;
+	/** Ease out (fast start, gentle settle) instead of ease in-out: the battle-start swoop. */
+	private boolean glideEaseOut;
+	private final Vec3 glideFromPos = new Vec3();
+	private final Quat glideFromRot = new Quat();
+
+	/**
+	 * Like snapTo, but the camera flies from where it is now to the new ship's view over a moment
+	 * (switching ships while spectating, taking over another ship) instead of cutting.
+	 */
+	public void glideTo(Ship3D s, float seconds) {
+		boolean had = initialized;
+		glideFromPos.set(pos);
+		glideFromRot.set(rot);
+		snapTo(s);
+		if (!had || seconds <= 0f) return;
+		glide = 1f;
+		glideSeconds = seconds;
+		glideEaseOut = false;
+	}
+
+	/**
+	 * Battle start: the camera begins far behind and above the ship, looking at it, and swoops into
+	 * the chase view over the given seconds.
+	 */
+	public void introTo(Ship3D s, float seconds) {
+		snapTo(s);
+		Vec3 f = s.rot.forward(new Vec3()), up = new Vec3(0f, 1f, 0f);
+		float d = Math.max(300f, s.radius * 12f);
+		glideFromPos.set(s.pos).addScaled(f, -d).addScaled(up, d * 0.5f);
+		glideFromRot.setLookRotation(new Vec3(s.pos).sub(glideFromPos).normalize(), up);
+		glide = 1f;
+		glideSeconds = seconds;
+		glideEaseOut = true;
+	}
+
 	public void snapTo(Ship3D s) {
 		chaseRot.set(s.rot);
 		s.rot.forward(tacHeading);
@@ -109,6 +147,15 @@ public final class ChaseCamera {
 		float b = blend * blend * (3f - 2f * blend);
 		pos.set(chasePos).lerp(tacPos, b);
 		rot.set(chaseView).slerpTo(tacRot, b);
+		if (glide > 0f) {
+			glide = Math.max(0f, glide - dt / glideSeconds);
+			float k = 1f - glide;
+			k = glideEaseOut ? 1f - glide * glide * glide : k * k * (3f - 2f * k);
+			Vec3 toPos = new Vec3(pos);
+			Quat toRot = new Quat().set(rot);
+			pos.set(glideFromPos).lerp(toPos, k);
+			rot.set(glideFromRot).slerpTo(toRot, k);
+		}
 		applyShake(Math.max(20f, camR), dt);
 
 		this.aspect = aspect;

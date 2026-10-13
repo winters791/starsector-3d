@@ -145,7 +145,10 @@ final class BattleSession extends Session3D {
 		ShipAPI flag = engine.getPlayerShip();
 		Ship3D player = flag != null ? twins.get(flag) : null;
 		if (player == null || player.owner != 0) player = pickNextPlayer(null);
-		if (player != null) takeControl(player, false);
+		if (player != null) {
+			takeControl(player, false);
+			sim.camera.introTo(player, 2f); // swoop in from far behind as the 3D view fades in
+		}
 		log.info(String.format("S3D: campaign battle in 3D: map %.0f x %.0f, 3D edges at z = +/-%.0f, %d ships mirrored, you fly %s; tuning #%s",
 				mapW, mapH, edgeZ, twins.size(), player != null ? player.name : "nothing", cfg.hash));
 	}
@@ -183,6 +186,7 @@ final class BattleSession extends Session3D {
 				// Vanilla took it out on its own (it shouldn't); drop the twin so the two sides agree.
 				log.warn("S3D: " + e.getValue().name + " left the vanilla battle by itself; removing its 3D twin");
 				finished.add(ship);
+				if (!e.getValue().destroyed && !e.getValue().fighter) sim.combat.jumpOut(e.getValue()); // usually a retreat vanilla finished early
 				removeTwin(e.getValue());
 				continue;
 			}
@@ -858,6 +862,7 @@ final class BattleSession extends Session3D {
 		ship.getLocation().set(p.x, outY);
 		ship.getVelocity().set(0f, s.owner == 0 ? -100f : 100f);
 		retreatPending.put(ship, clock);
+		sim.combat.jumpOut(s);
 		removeTwin(s);
 		log.info("S3D: " + s.name + " retreated in 3D; puppet sent off the " + (s.owner == 0 ? "bottom" : "top") + " edge");
 	}
@@ -993,6 +998,7 @@ final class BattleSession extends Session3D {
 		}
 		s.ai = null;
 		sim.setPlayer(s);
+		if (announce) sim.camera.glideTo(s, 0.9f); // fly over to the new ship rather than cut
 		ShipAPI puppet = s.hostRef instanceof ShipAPI ? (ShipAPI) s.hostRef : null;
 		if (puppet != null && engine.getPlayerShip() != puppet) {
 			try {

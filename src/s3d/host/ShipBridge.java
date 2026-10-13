@@ -49,6 +49,7 @@ import s3d.core.ArmorShell;
 import s3d.core.DemSpec;
 import s3d.core.ShieldFlux;
 import s3d.core.ShipSystem3D;
+import s3d.core.SystemLook;
 import s3d.core.EngineMount;
 import s3d.core.HullVolume;
 import s3d.core.Tuning;
@@ -161,13 +162,37 @@ final class ShipBridge {
 		}
 
 		for (ShipEngineAPI e : ship.getEngineController().getShipEngines()) {
-			if (e.isSystemActivated()) continue;
 			EngineSlotAPI slot = e.getEngineSlot();
 			Vector2f loc = slot.computePosition(new Vector2f(0f, 0f), 0f); // ship space: x forward, y left
 			Color c = slot.getColor() != null ? slot.getColor() : e.getEngineColor();
 			if (c == null) c = new Color(255, 150, 80);
-			s.engines.add(EngineMount.fromShipSpace(loc.x, loc.y, slot.getAngle(), slot.getLength(), slot.getWidth(),
-					c.getRed() / 255f, c.getGreen() / 255f, c.getBlue() / 255f));
+			EngineMount em = EngineMount.fromShipSpace(loc.x, loc.y, slot.getAngle(), slot.getLength(), slot.getWidth(),
+					c.getRed() / 255f, c.getGreen() / 255f, c.getBlue() / 255f);
+			// System-activated thrusters only light while a movement system runs (looks only: no thrust, no EMP).
+			if (e.isSystemActivated()) s.systemEngines.add(em);
+			else s.engines.add(em);
+		}
+		try {
+			Color vc = ship.getVentCoreColor(), vf = ship.getVentFringeColor(), oc = ship.getOverloadColor();
+			if (vc != null) s.ventCore = new float[] {vc.getRed() / 255f, vc.getGreen() / 255f, vc.getBlue() / 255f};
+			if (vf != null) s.ventFringe = new float[] {vf.getRed() / 255f, vf.getGreen() / 255f, vf.getBlue() / 255f};
+			if (oc != null) s.overloadColor = new float[] {oc.getRed() / 255f, oc.getGreen() / 255f, oc.getBlue() / 255f};
+		} catch (Throwable ignored) {
+			// older API: keep the defaults
+		}
+		for (WeaponAPI w : ship.getAllWeapons()) {
+			if (!w.isDecorative() || w.getSlot() == null || w.getSpec() == null || !w.getSpec().hasTag("lidar")) continue;
+			try {
+				WeaponSlotAPI slot = w.getSlot();
+				Vector2f loc = slot.getLocation();
+				float x = -loc.y, z = -loc.x;
+				float y = s.volume != null ? s.volume.topAt(x, z) + 1f : 0f;
+				double a = Math.toRadians(slot.getAngle());
+				s.lidarDishes.add(new WeaponMount(slot.getId(), weaponSpec(w, ship, t), new Vec3(x, y, z),
+						new Vec3((float) -Math.sin(a), 0f, (float) -Math.cos(a)), slot.getArc(), slot.isHardpoint()));
+			} catch (Throwable e) {
+				log.warn("S3D: lidar dish " + w.getId() + " on " + ship.getName() + " left out (" + e + ")");
+			}
 		}
 
 		float engineMax = 0f;
@@ -313,7 +338,50 @@ final class ShipBridge {
 		}
 		if (phase) s.toggle = true;
 		systemSpecifics(s, ship, spec, json, volume, t);
+		lookFromData(s.look, json);
 		return s;
+	}
+
+	/**
+	 * The system's own data file wins over the kind's default look wherever it says something
+	 * (jitter, weapon glow, engine glow, shield and effect colours), so another mod's systems keep
+	 * their colours. Script-made looks (temporal shell, entropy, ...) keep the defaults.
+	 */
+	static void lookFromData(SystemLook l, JSONObject j) {
+		if (j == null) return;
+		l.jitter = color(j, "jitterColor", l.jitter);
+		l.jitterCopies = j.optInt("jitterCopies", l.jitterCopies);
+		l.jitterMin = (float) j.optDouble("jitterMinRange", l.jitterMin);
+		l.jitterRange = (float) j.optDouble("jitterRange", l.jitterRange);
+		l.jitterRadiusFraction = (float) j.optDouble("jitterRangeRadiusFraction", l.jitterRadiusFraction);
+		l.jitterUnder = color(j, "jitterUnderColor", l.jitterUnder);
+		l.jitterUnderCopies = j.optInt("jitterUnderCopies", l.jitterUnderCopies);
+		l.jitterUnderMin = (float) j.optDouble("jitterUnderMinRange", l.jitterUnderMin);
+		l.jitterUnderRange = (float) j.optDouble("jitterUnderRange", l.jitterUnderRange);
+		l.jitterUnderRadiusFraction = (float) j.optDouble("jitterUnderRangeRadiusFraction", l.jitterUnderRadiusFraction);
+		l.weaponGlow = color(j, "weaponGlowColor", l.weaponGlow);
+		JSONArray types = j.optJSONArray("weaponTypes");
+		if (types != null) {
+			l.weaponTypes.clear();
+			for (int i = 0; i < types.length(); i++) l.weaponTypes.add(types.optString(i).toUpperCase(java.util.Locale.ROOT));
+		}
+		l.engineColor = color(j, "engineGlowColor", l.engineColor);
+		l.engineLength = (float) j.optDouble("engineGlowLengthMult", l.engineLength);
+		l.engineWidth = (float) j.optDouble("engineGlowWidthMult", l.engineWidth);
+		l.engineGlow = (float) j.optDouble("engineGlowGlowMult", l.engineGlow);
+		if ("ENGINE_MOD".equals(j.optString("type", null))) l.systemEngines = true;
+		l.shieldRing = color(j, "shieldRingColor", l.shieldRing);
+		l.shieldInner = color(j, "shieldInnerColor", l.shieldInner);
+		l.effect1 = color(j, "effectColor1", l.effect1);
+		l.effect2 = color(j, "effectColor2", l.effect2);
+	}
+
+	/** An [r, g, b, a] colour (0-255) from the data file as 0..1, or the fallback if it isn't there. */
+	private static float[] color(JSONObject j, String key, float[] fallback) {
+		JSONArray a = j.optJSONArray(key);
+		if (a == null || a.length() < 3) return fallback;
+		return new float[] {(float) a.optDouble(0) / 255f, (float) a.optDouble(1) / 255f, (float) a.optDouble(2) / 255f,
+				a.length() > 3 ? (float) a.optDouble(3) / 255f : 1f};
 	}
 
 	/**

@@ -92,6 +92,16 @@ public final class Ship3D {
 	}
 	/** Flux, shield, vent and overload; null = no flux limits (test ships). */
 	public ShieldFlux flux;
+
+	// ---- looks only (render) ----
+	/** Extra thrusters that light only while a movement system runs (vanilla's system-activated engines). */
+	public final java.util.List<EngineMount> systemEngines = new java.util.ArrayList<>();
+	/** Lidar dishes (vanilla decorative weapons): fire their ranging beams while a Lidar Array winds up. Never fire for real. */
+	public final java.util.List<WeaponMount> lidarDishes = new java.util.ArrayList<>();
+	/** Vent clouds: core and fringe colour (the hull style's). */
+	public float[] ventCore = {1f, 1f, 1f}, ventFringe = {0.49f, 0f, 0.61f};
+	/** Overload arcs (the hull style's). */
+	public float[] overloadColor = {0.75f, 0.6f, 1f};
 	/** Engine health (EMP), per entry in engines; down = seconds until repaired. Null until initComponents. */
 	public float[] engineHp, engineDown;
 	public float engineMaxHp = 100f;

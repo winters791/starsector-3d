@@ -111,7 +111,7 @@ final class Shaders {
 			}
 			""";
 
-	/** Modes: 0 vertex colour, 1 engine flame, 2 radial glow, 3 text, 4 texture copy, 5 projectile streak, 6 beam (core = secondary colour). */
+	/** Modes: 0 vertex colour, 1 engine flame, 2 radial glow, 3 text, 4 texture copy, 5 projectile streak, 6 beam (core = secondary colour), 8 shockwave ring. */
 	static final String FX_FS = """
 			#version 120
 			uniform int u_mode;
@@ -136,6 +136,12 @@ final class Shaders {
 					float tail = pow(1.0 - along, 1.2);
 					vec3 c = (v_col.rgb * fringe + v_col2.rgb * core * 1.4) * tail;
 					gl_FragColor = vec4(c * v_col.a, 1.0);
+				} else if (u_mode == 8) {
+					vec2 d = v_uv * 2.0 - 1.0;
+					float r = length(d);
+					float a = exp(-pow((r - 0.86) / 0.05, 2.0)) + 0.3 * exp(-pow((r - 0.78) / 0.16, 2.0));
+					a *= 1.0 - smoothstep(0.96, 1.0, r);
+					gl_FragColor = vec4(v_col.rgb * a * v_col.a, 1.0);
 				} else if (u_mode == 0) {
 					gl_FragColor = v_col;
 				} else if (u_mode == 1) {
@@ -241,6 +247,56 @@ final class Shaders {
 				float scan = 0.65 + 0.35 * sin(v_local.z * 0.8 - u_time * 5.0);
 				vec3 c = base * (0.1 + 0.9 * fres) * scan * (0.45 + 0.55 * u_hull);
 				gl_FragColor = vec4(c, 1.0);
+			}
+			""";
+
+	// ---- aura / jitter: a ship's own mesh, additive. Glow mode: pushed out a little along its normals,
+	// bright at the silhouette (phase highlight, vent glow). Textured mode: the hull itself tinted, as
+	// vanilla's jitter copies and weapon glow are tinted copies of the sprite. ----
+	static final String AURA_VS = """
+			#version 120
+			uniform mat4 u_mvp;
+			uniform mat4 u_model;
+			uniform float u_inflate;
+			attribute vec3 a_pos;
+			attribute vec3 a_nrm;
+			attribute vec2 a_uv;
+			varying vec3 v_world;
+			varying vec3 v_nrm;
+			varying vec3 v_local;
+			varying vec2 v_uv;
+			void main() {
+				vec3 p = a_pos + a_nrm * u_inflate;
+				v_local = a_pos;
+				v_uv = a_uv;
+				v_nrm = mat3(u_model[0].xyz, u_model[1].xyz, u_model[2].xyz) * a_nrm;
+				v_world = (u_model * vec4(p, 1.0)).xyz;
+				gl_Position = u_mvp * vec4(p, 1.0);
+			}
+			""";
+
+	/** u_bands: 0 = even glow, 1 = bands sweeping along the hull. u_textured: 0 = silhouette glow, 1 = tinted hull. */
+	static final String AURA_FS = """
+			#version 120
+			uniform vec3 u_cam;
+			uniform vec3 u_col;
+			uniform float u_alpha;
+			uniform float u_time;
+			uniform float u_bands;
+			uniform float u_textured;
+			uniform sampler2D u_tex;
+			varying vec3 v_world;
+			varying vec3 v_nrm;
+			varying vec3 v_local;
+			varying vec2 v_uv;
+			void main() {
+				vec3 n = normalize(v_nrm);
+				vec3 v = normalize(u_cam - v_world);
+				float fres = pow(1.0 - abs(dot(n, v)), 2.0);
+				float band = 1.0 - u_bands + u_bands * (0.5 + 0.5 * sin(v_local.z * 0.3 - u_time * 6.0));
+				vec3 glow = u_col * (0.12 + 0.88 * fres) * band;
+				vec3 tint = u_col * (0.2 + 1.6 * texture2D(u_tex, v_uv).rgb);
+				gl_FragColor = vec4(mix(glow, tint, u_textured) * u_alpha, 1.0);
 			}
 			""";
 
