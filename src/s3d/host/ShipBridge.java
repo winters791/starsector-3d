@@ -232,6 +232,7 @@ final class ShipBridge {
 		// Carriers: fighters land on the first launch bay (else the middle of the hull's top).
 		s.landingLocal.set(0f, s.volume != null ? s.volume.topAt(0f, 0f) + 2f : 0f, 0f);
 		java.util.List<com.fs.starfarer.api.combat.FighterLaunchBayAPI> bays = ship.getLaunchBaysCopy();
+		s.hasBays = bays != null && !bays.isEmpty();
 		if (bays != null && !bays.isEmpty() && bays.get(0).getWeaponSlot() != null) launchPoint(s, bays.get(0).getWeaponSlot(), s.landingLocal);
 
 		if (ship.isFighter() && !LOGGED_FIGHTERS.add(ship.getHullSpec().getHullId())) return s;

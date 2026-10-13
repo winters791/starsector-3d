@@ -5,6 +5,27 @@ known issues and next steps. Newest status first.
 
 ## Status
 
+- **2026-10-13 — Ships ignore station spurs; stations turn 4x faster; weapon range +20% (user). Headless-tested;
+  awaiting in-game test.**
+  - Unarmed sections are never picked as targets: `Ship3D.unarmedPart()` = a module with no weapons and no launch
+    bays (`hasBays`, set in ShipBridge). That covers Station Structural Spurs (5000 hull / 1500 armour, no guns),
+    Station Armour, extensions and struts, and the Onslaught Mk.I's vambraces. Skipped by: ship AI `pickTarget`,
+    fighters (unless their carrier's target is one), turret autofire (unless it's the ship's locked target), the
+    player's automatic lead target (R still locks one), and Quantum Disruptor's fallback pick (with batch 3). Shots
+    that hit a spur still damage it; it just stops soaking whole fleets' attention.
+  - Safe because vanilla ends a station when its armed sections are gone: the user's Xantu Ravach battle log shows
+    the last Heavy Combat Module die and vanilla end the remaining spur and the station in the same frame. The 6 s
+    fallback (`checkStationBeaten`) now counts armed sections only and removes leftover spur puppets with the core.
+  - `battle.stationSpinDeg` 1 -> 4 (a full turn in 90 s). Bench side effect: the station1 stand-in's armed sections
+    die in ~74 s instead of ~125 s and it lands far fewer hits (sections sweep past attackers); watch station danger
+    in game.
+  - `weapons.rangeMult` 1 -> 1.2. Everything that scales with it grows 20% too, as when it was halved: system ranges
+    (Entropy, Teleporter, Mine Strike...), missile flight time, DEM/rift/orb distances, HUD range rings.
+  - Bench: "station assault" now wants every ARMED section destroyed, unarmed sections never targeted, and the
+    station to hit back at all (was "> 500 damage to attackers"; most of that came while the station fired nothing).
+    "PD kills fighters": its test fighter now carries a harmless gun and has no carrier, so it stays on the gunboat
+    (unarmed, it flew home and left PD reach at the 1.2 fixture scale with 1 hull left; the PD logic was fine).
+
 - **2026-10-13 — Ship system, vent and overload looks rebuilt to match vanilla's 2D ones (user: "don't resemble their
   original 2D visuals"). Looks only. Bench 100/100; jar rebuilt; awaiting in-game test.**
   - Went through each vanilla system's data file and stats script and rebuilt its look from vanilla's own building

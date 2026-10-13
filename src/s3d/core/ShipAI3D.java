@@ -1169,6 +1169,7 @@ public final class ShipAI3D {
 		Vec3 axisNow = gunAxisWorld(s, tH);
 		for (Ship3D o : sim.ships) {
 			if (o.destroyed || o.owner == s.owner || o.fighter || o.invulnerable) continue; // ships fight ships; PD handles fighters
+			if (o.unarmedPart()) continue; // spurs and armour: only a station's guns and bays are worth shooting
 			if (order != null && !allowedTarget(order, o)) continue;
 			// Distance from us, plus half the distance from our fleet, so a fleet tends to engage together.
 			Vec3 home = sim.mobileCentre(s.owner);
@@ -1296,6 +1297,7 @@ public final class ShipAI3D {
 		float bestScore = Float.MAX_VALUE;
 		for (Ship3D o : sim.ships) {
 			if (o.destroyed || o.owner == s.owner || o.invulnerable || o.pos.distance(anchor) > s.wingRange) continue;
+			if (o.unarmedPart() && o != ordered) continue;
 			float score = o.pos.distance(s.pos);
 			if (o.fighter) score *= striker ? 3f : 0.4f;
 			if (o == ordered) score *= 0.5f;

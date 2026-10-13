@@ -2151,6 +2151,10 @@ public final class CombatBench {
 		raider.pos.set(400f * fk(t), 150f * fk(t), -300f * fk(t)); // off the line to the enemy ship
 		raider.hullMax = raider.hull = 300f;
 		raider.weapons.clear();
+		// It stays on the gunboat (a harmless gun, no carrier to go back to): this is about the gunboat's
+		// PD, and a fighter heading home leaves PD reach sooner the longer ranges are.
+		raider.weapons.add(new WeaponMount("R", gun("ENERGY", 1f, 0f, 300f, 900f), new Vec3(0, 2, -5), new Vec3(0, 0, -1), 20f, false));
+		raider.carrier = null;
 		sim.addShip(raider);
 		int mainAtFighter = 0, frames = 0, pdShots = 0;
 
@@ -3177,9 +3181,10 @@ public final class CombatBench {
 
 	/**
 	 * Station assault: four attackers against an orbital station. The core never takes damage and is
-	 * never targeted; modules fire back, take the damage and die; modules stay rigidly in place as
-	 * the station turns; nobody touches the structure (real hull shapes, not bounding spheres: at
-	 * station scale those are far bigger than the hulls); the station doesn't get pushed.
+	 * never targeted, nor are the unarmed sections (structural spurs); the armed modules fire back,
+	 * take the damage and die; modules stay rigidly in place as the station turns; nobody touches the
+	 * structure (real hull shapes, not bounding spheres: at station scale those are far bigger than
+	 * the hulls); the station doesn't get pushed.
 	 */
 	static void stationAssault(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
 		if (!hulls.containsKey("station1")) {
@@ -3211,8 +3216,10 @@ public final class CombatBench {
 		Vec3 fwd0 = core.rot.forward(new Vec3());
 		s3d.core.PilotInput in = screen();
 		float maxDrift = 0f, minGap = Float.MAX_VALUE;
-		int coreTargeted = 0, frames = 0, stationShots = 0, overloads = 0, contactFrames = 0;
+		int coreTargeted = 0, unarmedTargeted = 0, frames = 0, stationShots = 0, overloads = 0, contactFrames = 0;
 		float modulesDeadAt = -1f, peakFlux = 0f;
+		int armedModules = 0;
+		for (int i = 1; i < st.size(); i++) if (!st.get(i).unarmedPart()) armedModules++;
 		java.util.Map<Ship3D, Boolean> wasOver = new java.util.HashMap<>();
 		for (float time = 0; time < 300f && modulesDeadAt < 0f; time += DT) {
 			sim.update(in, DT, DT);
@@ -3227,30 +3234,33 @@ public final class CombatBench {
 			for (Ship3D a : attackers) {
 				if (a.destroyed) continue;
 				if (a.ai.target == core) coreTargeted++;
+				if (a.ai.target != null && a.ai.target.unarmedPart()) unarmedTargeted++;
 				for (Ship3D p : st) {
 					minGap = Math.min(minGap, p.surfaceDistance(a.pos) - a.radius);
 					if (a.pos.distance(p.pos) < a.radius + p.radius && touching(a, p)) contactFrames++;
 				}
 			}
 			boolean allDead = true;
-			for (int i = 1; i < st.size(); i++) if (!st.get(i).destroyed) allDead = false;
+			for (int i = 1; i < st.size(); i++) if (!st.get(i).destroyed && !st.get(i).unarmedPart()) allDead = false;
 			if (allDead) modulesDeadAt = time;
 		}
 		float turned = (float) Math.toDegrees(Math.acos(Math.max(-1f, Math.min(1f, fwd0.dot(core.rot.forward(new Vec3()))))));
 		int lost = 0, modulesDead = 0;
 		for (Ship3D a : attackers) if (a.destroyed) lost++;
-		for (int i = 1; i < st.size(); i++) if (st.get(i).destroyed) modulesDead++;
+		for (int i = 1; i < st.size(); i++) if (st.get(i).destroyed && !st.get(i).unarmedPart()) modulesDead++;
 		float attackerDamage = 0f;
 		for (Ship3D a : attackers) attackerDamage += damageTaken(a);
-		boolean ok = core.hull == core.hullMax && !core.destroyed && coreTargeted == 0 && maxDrift < 0.5f
+		// The station only has to hit back: at 4 deg/s (user, 2026-10-13) its sections sweep past the attackers
+		// and land far less than at 1 deg/s, and most of the old ">500" came from attackers hurting each other.
+		boolean ok = core.hull == core.hullMax && !core.destroyed && coreTargeted == 0 && unarmedTargeted == 0 && maxDrift < 0.5f
 				// At vanilla ranges (rangeMult 1) attackers fight close beside the sections, and a slow hull sliding
 				// sideways can graze the irregular section next to its target: a few frames, not a ram.
-				&& core.pos.distance(corePos0) < 0.01f && modulesDead == st.size() - 1 && attackerDamage > 500f
+				&& core.pos.distance(corePos0) < 0.01f && armedModules > 0 && modulesDead == armedModules && stationShots > 0 && attackerDamage > 0f
 				&& contactFrames <= (t.weaponRangeMult < 1.5f ? 15 : 0);
-		check("station assault", ok, String.format("%d modules, all destroyed at %.0fs (%d/%d), core hull %.0f/%.0f, core targeted %d frames, "
+		check("station assault", ok, String.format("%d armed modules of %d, all destroyed at %.0fs (%d/%d), core hull %.0f/%.0f, core targeted %d frames, unarmed targeted %d frames, "
 				+ "module drift %.2f, core moved %.2f, turned %.0f deg, attackers lost %d, damage to attackers %.0f (station shots %d, attacker peak flux %.0f%%, %d overloads), "
 				+ "hull contact %d frames, closest %.0f from a hull",
-				st.size() - 1, modulesDeadAt, modulesDead, st.size() - 1, core.hull, core.hullMax, coreTargeted, maxDrift,
+				armedModules, st.size() - 1, modulesDeadAt, modulesDead, armedModules, core.hull, core.hullMax, coreTargeted, unarmedTargeted, maxDrift,
 				core.pos.distance(corePos0), turned, lost, attackerDamage, stationShots, peakFlux * 100f, overloads, contactFrames, minGap));
 	}
 

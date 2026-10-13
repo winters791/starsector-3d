@@ -568,14 +568,14 @@ final class BattleSession extends Session3D {
 	}
 
 	/**
-	 * Vanilla should end a Vast Bulk station once its sections are destroyed. If the core is still
-	 * alive a few seconds after the last one died, remove it as destroyed ourselves, so the battle
-	 * can't get stuck on an invulnerable core.
+	 * Vanilla should end a Vast Bulk station once its armed sections are destroyed (spurs and armour
+	 * don't count; nobody targets them). If the core is still alive a few seconds after the last one
+	 * died, remove it as destroyed ourselves, so the battle can't get stuck on an invulnerable core.
 	 */
 	private void checkStationBeaten(ShipAPI ship, Ship3D s) {
 		int modules = 0, alive = 0;
 		for (Ship3D o : sim.ships) {
-			if (o.parent != s) continue;
+			if (o.parent != s || o.unarmedPart()) continue;
 			modules++;
 			if (!o.destroyed) alive++;
 		}
@@ -586,12 +586,14 @@ final class BattleSession extends Session3D {
 		Float since = strippedSince.get(ship);
 		if (since == null) {
 			strippedSince.put(ship, clock);
-			log.info("S3D: every section of station " + s.name + " destroyed; waiting for vanilla to end the station");
+			log.info("S3D: every armed section of station " + s.name + " destroyed; waiting for vanilla to end the station");
 		} else if (clock - since > 6f) {
-			log.warn("S3D: vanilla kept station " + s.name + " alive with no sections left; removing it as destroyed");
+			log.warn("S3D: vanilla kept station " + s.name + " alive with no armed sections left; removing it as destroyed");
 			strippedSince.remove(ship);
 			engine.getFleetManager(ship.getOwner()).removeDeployed(ship, false);
 			engine.removeEntity(ship);
+			for (Ship3D o : sim.ships) // spurs and armour still standing go with the core
+				if (o.parent == s && !o.destroyed && o.hostRef instanceof ShipAPI) engine.removeEntity((ShipAPI) o.hostRef);
 			vanillaKilled(ship, s);
 		}
 	}

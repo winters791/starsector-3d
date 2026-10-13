@@ -182,6 +182,17 @@ public final class Ship3D {
 	public float spinRate;
 	/** Takes no damage (vanilla Vast Bulk, a station's core); shots and ships still stop on it. */
 	public boolean invulnerable;
+	/** Has fighter launch bays (a carrier, or a station's hangar module). */
+	public boolean hasBays;
+
+	/**
+	 * A section with no guns and no bays (station structural spurs, armour, struts; a ship's armour
+	 * modules): nobody picks it as a target, it only soaks up the shots that hit it. Vanilla ends a
+	 * station once its armed sections are gone (user, 2026-10-13: ships kept grinding through spurs).
+	 */
+	public boolean unarmedPart() {
+		return parent != null && weapons.isEmpty() && !hasBays;
+	}
 
 	/** The free ship or station this part belongs to (itself if it isn't a module). */
 	public Ship3D root() {
