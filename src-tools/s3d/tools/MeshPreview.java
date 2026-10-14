@@ -95,6 +95,16 @@ public final class MeshPreview {
 			if (!pbuffer) Display.destroy();
 			return;
 		}
+		if ("tactical".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=tactical ./build.sh preview
+			tacticalScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("controls".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=controls ./build.sh preview
+			controlsScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
 		if ("retro".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=retro ./build.sh preview
 			retroScene(game, hulls, t, renderer, dir);
 			if (!pbuffer) Display.destroy();
@@ -1181,6 +1191,176 @@ public final class MeshPreview {
 	 * the lead; the frame shows the minimap, flux bars and raised shields. Also a close-up of the
 	 * shield that was hit most recently.
 	 */
+	/**
+	 * The tactical view as a command view: tactical_orders.png (two wingmen selected, one holding a
+	 * point up high, one escorting you, the cursor on an enemy), tactical_height.png (dragging a move
+	 * order's height), tactical_ring.png (the ring of other orders, AVOID picked).
+	 */
+	/**
+	 * The controls card over a paused fight at the game's 1920x1200: controls_flight.png (flight face)
+	 * and controls_command.png (the command view's face).
+	 */
+	private static void controlsScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 1920, h = 1200;
+		int[] target = createCaptureTarget(w, h);
+		Sim sim = new Sim(t);
+		sim.arenaHalfX = 6000f;
+		sim.arenaHalfZ = 5000f;
+		String[][] ships = {{"eagle", "eagle_Assault"}, {"wolf", "wolf_Assault"}, {"enforcer", "enforcer_Assault"}, {"lasher", "lasher_Standard"}};
+		Ship3D player = null;
+		for (int i = 0; i < ships.length; i++) {
+			GameData.Hull hull = hulls.get(ships[i][0]);
+			Ship3D s = makeShip(game, hull, t, ships[i][0] + i);
+			s.owner = i < 2 ? 0 : 1;
+			s.name = ships[i][0];
+			sim.addShip(s);
+			s.volume = ShipModel.geometry((ShipModel.Source) s.modelSource, t).volume;
+			arm(game, s, ships[i][0], ships[i][1]);
+			s.flux = CombatBench.flux(hull, t);
+			s.armor = new s3d.core.ArmorShell(400f);
+			s.hullMax = s.hull = 5000f;
+			s.pos.set(-500f + 600f * (i % 2), 120f * i - 150f, s.owner == 0 ? 300f * i : -1500f - 300f * i);
+			if (s.owner == 1) s.rot.setAxisAngle(0, 1, 0, 2.8f);
+			if (i == 0) player = s;
+		}
+		sim.setPlayer(player);
+		sim.target = sim.ships.get(2);
+		PilotInput in = new PilotInput();
+		in.screenW = w;
+		in.screenH = h;
+		in.mouseX = w * 0.5f;
+		in.mouseY = h * 0.5f;
+		float dt = 1f / 60f;
+		for (int i = 0; i < 40; i++) {
+			sim.update(in, dt, dt);
+			in.clearPressed();
+		}
+		sim.paused = true;
+		HudRenderer.Info info = new HudRenderer.Info();
+		info.controls = 1f;
+		renderer.renderScene(sim, w, h, target[0]);
+		renderer.renderHud(sim, in, info, w, h);
+		ImageIO.write(read(w, h), "png", new File(dir, "controls_flight.png"));
+		in.toggleTactical = true;
+		sim.update(in, dt, dt);
+		in.clearPressed();
+		in.toggleTactical = false;
+		for (int i = 0; i < 90; i++) sim.update(in, dt, dt);
+		renderer.renderScene(sim, w, h, target[0]);
+		renderer.renderHud(sim, in, info, w, h);
+		ImageIO.write(read(w, h), "png", new File(dir, "controls_command.png"));
+		System.out.println("wrote controls_flight.png, controls_command.png");
+	}
+
+	private static void tacticalScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 1280, h = 800;
+		int[] target = createCaptureTarget(w, h);
+		Sim sim = new Sim(t);
+		sim.arenaHalfX = 6000f;
+		sim.arenaHalfZ = 5000f;
+		String[][] fleets = {{"eagle:eagle_Assault", "hammerhead:hammerhead_Balanced", "wolf:wolf_Assault", "enforcer:enforcer_Assault"},
+				{"lasher:lasher_Standard", "hammerhead:hammerhead_Elite", "dominator:dominator_Assault", "wolf:wolf_CS"}};
+		Ship3D player = null;
+		List<Ship3D> mine = new ArrayList<>(), theirs = new ArrayList<>();
+		for (int side = 0; side < 2; side++) {
+			for (int i = 0; i < fleets[side].length; i++) {
+				String[] hv = fleets[side][i].split(":");
+				GameData.Hull hull = hulls.get(hv[0]);
+				Ship3D s = makeShip(game, hull, t, hv[0] + side);
+				s.owner = side;
+				s.name = hv[0];
+				sim.addShip(s);
+				s.volume = ShipModel.geometry((ShipModel.Source) s.modelSource, t).volume;
+				arm(game, s, hv[0], hv[1]);
+				s.flux = CombatBench.flux(hull, t);
+				float big = "cruiser".equals(s.sizeClass) ? 3f : "destroyer".equals(s.sizeClass) ? 2f : 1f;
+				s.armor = new s3d.core.ArmorShell(300f * big);
+				s.hullMax = s.hull = 1e6f;
+				s.pos.set(-1200f + 800f * i, (i % 2) * 350f - 150f, side == 0 ? 1600f : -1900f);
+				if (side == 1) s.rot.setAxisAngle(0, 1, 0, (float) Math.PI);
+				s.ai = new s3d.core.ShipAI3D(i + side * 5);
+				s.ai.homeDir.set(0f, 0f, side == 0 ? 1f : -1f);
+				(side == 0 ? mine : theirs).add(s);
+				if (side == 0 && i == 0) player = s;
+			}
+		}
+		player.ai = null;
+		sim.setPlayer(player);
+		PilotInput in = new PilotInput();
+		in.screenW = w;
+		in.screenH = h;
+		in.mouseX = w * 0.5f;
+		in.mouseY = h * 0.5f;
+		float dt = 1f / 60f;
+		for (float time = 0f; time < 1.5f; time += dt) {
+			in.toggleTactical = time == 0f;
+			sim.update(in, dt, dt);
+		}
+		in.toggleTactical = false;
+		in.wheelNotches = 0f;
+		sim.combat.kill(theirs.get(3)); // a burning wreck: left out of the tactical view
+		for (float time = 0f; time < 1.5f; time += dt) sim.update(in, dt, dt);
+		// Orders as the host would have read them back: one holds a point up high, one escorts you.
+		Ship3D holder = mine.get(1), escort = mine.get(2);
+		holder.order = new s3d.core.Order3D(s3d.core.Order3D.Kind.HOLD);
+		holder.order.point.set(holder.pos.x - 1400f, holder.pos.y + 1200f, holder.pos.z - 900f);
+		holder.order.radius = 400f;
+		escort.order = new s3d.core.Order3D(s3d.core.Order3D.Kind.ESCORT);
+		escort.order.ship = player;
+		Ship3D attacker = mine.get(3);
+		attacker.order = new s3d.core.Order3D(s3d.core.Order3D.Kind.ATTACK);
+		attacker.order.ship = theirs.get(2);
+		sim.paused = true;
+		sim.command.selected.add(holder);
+		sim.command.selected.add(attacker);
+		sim.shuttleModelSource = new s3d.render.ShipModel.Source("graphics/ships/shuttle.png", new SpriteImage(ImageIO.read(new File(game, "graphics/ships/shuttle.png"))), 9f, 11f);
+		sim.startTransfer(attacker); // the command shuttle on its way (paused: it stays mid-flight)
+		sim.shuttle.pos.set(player.pos).lerp(attacker.pos, 0.45f).add(new Vec3(0f, 60f, 0f));
+		sim.update(in, dt, dt);
+		float[] sc = new float[3];
+		sim.camera.toScreen(theirs.get(1).pos, w, h, sc);
+		in.mouseX = sc[0];
+		in.mouseY = sc[1];
+		sim.update(in, dt, dt);
+		HudRenderer.Info info = new HudRenderer.Info();
+		info.commandPoints = 4;
+		sim.command.fleetButtons = true; // off here; on / confirming in tactical_ring.png
+		renderer.renderScene(sim, w, h, target[0]);
+		renderer.renderHud(sim, in, info, w, h);
+		ImageIO.write(read(w, h), "png", new File(dir, "tactical_orders.png"));
+
+		// Height drag on empty space
+		in.mouseX = w * 0.62f;
+		in.mouseY = h * 0.35f;
+		in.mouseRight = true;
+		sim.update(in, dt, dt);
+		for (int i = 1; i <= 12; i++) {
+			in.mouseY += 12f;
+			sim.update(in, dt, dt);
+		}
+		renderer.renderScene(sim, w, h, target[0]);
+		renderer.renderHud(sim, in, info, w, h);
+		ImageIO.write(read(w, h), "png", new File(dir, "tactical_height.png"));
+		in.mouseRight = false;
+		sim.update(in, dt, dt);
+
+		// Ring
+		in.mouseX = w * 0.62f;
+		in.mouseY = h * 0.35f;
+		in.mouseRight = true;
+		for (float time = 0f; time < 0.45f; time += dt) sim.update(in, dt, dt);
+		sim.command.fullAssault = true;
+		sim.command.retreatConfirm = 60f;
+		in.mouseRight = false; // held still and let go: the ring stays open
+		sim.update(in, dt, dt);
+		in.mouseX += 60f;
+		sim.update(in, dt, dt);
+		renderer.renderScene(sim, w, h, target[0]);
+		renderer.renderHud(sim, in, info, w, h);
+		ImageIO.write(read(w, h), "png", new File(dir, "tactical_ring.png"));
+		System.out.println("wrote tactical_orders.png, tactical_height.png, tactical_ring.png; orders: " + sim.command.issued);
+	}
+
 	private static void battleScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
 		int w = 1280, h = 800;
 		int[] target = createCaptureTarget(w, h);

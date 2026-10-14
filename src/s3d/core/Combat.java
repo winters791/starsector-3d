@@ -2339,10 +2339,12 @@ public final class Combat {
 				Effect f = new Effect(Effect.Kind.FLASH, at, Math.max(5f, s.radius * (0.06f + rnd.nextFloat() * 0.08f)), 0.45f + rnd.nextFloat() * 0.5f)
 						.color(1f, 0.42f + rnd.nextFloat() * 0.3f, 0.12f);
 				f.vel.set(s.vel).add(new Vec3(rnd.nextFloat() - 0.5f, 0.6f + rnd.nextFloat(), rnd.nextFloat() - 0.5f).scale(s.radius * 0.12f));
+				f.wreck = true;
 				effects.add(f);
 				if (rnd.nextFloat() < 0.08f * heat) {
 					Effect pop = new Effect(Effect.Kind.EXPLOSION, at, Math.max(12f, s.radius * 0.35f), 0.5f).color(1f, 0.6f, 0.25f);
 					pop.vel.set(s.vel);
+					pop.wreck = true;
 					effects.add(pop);
 					sounds.play("hit_hull_heavy", at, 0.5f);
 				}

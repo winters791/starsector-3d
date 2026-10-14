@@ -240,6 +240,8 @@ public final class Ship3D {
 	public boolean retreatOrdered;
 	/** Standing order from vanilla's command map (escort, hold, capture, attack, avoid); null = fight freely. */
 	public Order3D order;
+	/** An ally's ship on your side (its own admiral orders it, you can't). */
+	public boolean ally;
 	/**
 	 * AI: this ship's guns (missiles left out) by vanilla range, longest first, and the dps of all the guns
 	 * reaching at least that far. Built on first use by ShipAI3D.gunsReaching (other ships' pilots ask it
@@ -278,6 +280,14 @@ public final class Ship3D {
 		Ship3D r = this;
 		while (r.parent != null) r = r.parent;
 		return r;
+	}
+
+	/**
+	 * A live ship proper (frigate to capital, or a station's core): not a wreck, fighter, drone,
+	 * swarm, shroud lump or module. The tactical view only marks these.
+	 */
+	public boolean warship() {
+		return !destroyed && !fighter && !drone && carriedBy == null && !noHull && behaviour == null && parent == null && !"fighter".equals(sizeClass);
 	}
 
 	/** Part of a structure that doesn't fly by itself: a module, or an anchored station core. */

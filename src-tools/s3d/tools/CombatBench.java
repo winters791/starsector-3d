@@ -116,6 +116,7 @@ public final class CombatBench {
 		aiHardpointLances(game, hulls, t);
 		aiRetreat(game, hulls, t);
 		aiOrders(game, hulls, t);
+		commandView(game, hulls, t);
 		aiCaution(game, hulls, t);
 		aiOpportunism(game, hulls, t);
 		aiTweaks(game, hulls, t);
@@ -4814,6 +4815,226 @@ public final class CombatBench {
 		d.weapons.clear();
 		d.pos.set(x, 0f, z);
 		return d;
+	}
+
+	/**
+	 * Tactical view (T) as a command view: your ship gets an autopilot that flies and fights (and
+	 * goes when you leave); the camera follows your ship until you pan; clicking a ship of yours
+	 * selects it and a box selects several; right click on an enemy orders the selection to engage
+	 * it; a right drag on empty space gives a move order with a height; holding still opens the ring
+	 * and moving onto an option picks it; a hold order at a height takes the AI pilot up there.
+	 */
+	static void commandView(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		s3d.core.PilotInput in = screen();
+		s3d.core.Sim sim = new s3d.core.Sim(t);
+		Ship3D me = armed(game, hulls, t, "wolf", "me", 0);
+		Ship3D mate = armed(game, hulls, t, "hammerhead", "mate", 0);
+		mate.pos.set(-600f, 0f, 300f);
+		mate.ai = new s3d.core.ShipAI3D(5);
+		Ship3D mate2 = armed(game, hulls, t, "lasher", "mate2", 0);
+		mate2.pos.set(600f, 0f, 300f);
+		mate2.ai = new s3d.core.ShipAI3D(6);
+		Ship3D foe = dummy(game, hulls, t, "hound", "foe", 1, 0f, -2200f);
+		foe.hullMax = foe.hull = 1e6f;
+		for (Ship3D x : new Ship3D[] {me, mate, mate2, foe}) sim.addShip(x);
+		sim.setPlayer(me);
+		StringBuilder sb = new StringBuilder();
+
+		// Autopilot
+		in.toggleTactical = true;
+		sim.update(in, DT, DT);
+		in.toggleTactical = false;
+		boolean piloted = me.ai != null;
+		s3d.math.Vec3 start = new s3d.math.Vec3(me.pos);
+		boolean fought = false;
+		for (float time = 0; time < 25f; time += DT) {
+			sim.update(in, DT, DT);
+			fought |= me.ai != null && me.ai.target == foe;
+		}
+		float moved = me.pos.distance(start);
+		boolean following = sim.command.follow == me && sim.command.focus.distance(me.pos) < 1f && sim.camera.pos.y > me.pos.y + 500f;
+		check("command: autopilot + camera", piloted && fought && moved > 300f && following,
+				String.format("pilot %b, went for the enemy %b, moved %.0f, camera follows from above %b", piloted, fought, moved, following));
+
+		// Freeze the battle for the pointing checks (the view still works while paused).
+		sim.paused = true;
+		mate.pos.set(me.pos.x - 600f, me.pos.y, me.pos.z + 300f);
+		mate2.pos.set(me.pos.x + 600f, me.pos.y, me.pos.z + 300f);
+		foe.pos.set(me.pos.x, me.pos.y, me.pos.z - 1500f);
+		sim.update(in, DT, DT);
+		sim.update(in, DT, DT);
+		float[] sc = new float[3];
+
+		// Click selects; box selects both
+		sim.camera.toScreen(mate.pos, in.screenW, in.screenH, sc);
+		click(sim, in, sc[0], sc[1], true);
+		boolean one = sim.command.selected.size() == 1 && sim.command.selected.get(0) == mate;
+		float[] a = new float[3], b = new float[3];
+		sim.camera.toScreen(mate.pos, in.screenW, in.screenH, a);
+		sim.camera.toScreen(mate2.pos, in.screenW, in.screenH, b);
+		in.mouseX = Math.min(a[0], b[0]) - 40f;
+		in.mouseY = Math.min(a[1], b[1]) - 40f;
+		in.mouseLeft = true;
+		sim.update(in, DT, DT);
+		in.mouseX = Math.max(a[0], b[0]) + 40f;
+		in.mouseY = Math.max(a[1], b[1]) + 40f;
+		sim.update(in, DT, DT);
+		in.mouseLeft = false;
+		sim.update(in, DT, DT);
+		boolean both = sim.command.selected.contains(mate) && sim.command.selected.contains(mate2) && !sim.command.selected.contains(me);
+		check("command: select", one && both, String.format("click picked the hammerhead %b, box picked both (not you) %b", one, both));
+
+		// Right click on the enemy: engage
+		sim.command.issued.clear();
+		sim.camera.toScreen(foe.pos, in.screenW, in.screenH, sc);
+		click(sim, in, sc[0], sc[1], false);
+		s3d.core.CommandView.Command c = sim.command.issued.isEmpty() ? null : sim.command.issued.get(0);
+		boolean engage = c != null && c.kind == s3d.core.CommandView.Kind.ENGAGE && c.ship == foe && c.ships.size() == 2;
+
+		// Right drag up on empty space: move with height
+		sim.command.issued.clear();
+		float gx = in.screenW * 0.5f, gy = in.screenH * 0.3f;
+		s3d.math.Vec3 ground = new s3d.math.Vec3();
+		in.mouseX = gx;
+		in.mouseY = gy;
+		boolean hit = sim.command.groundPoint(in, sim.camera, ground);
+		in.mouseRight = true;
+		sim.update(in, DT, DT);
+		for (int i = 1; i <= 10; i++) {
+			in.mouseY = gy + i * 12f;
+			sim.update(in, DT, DT);
+		}
+		in.mouseRight = false;
+		sim.update(in, DT, DT);
+		c = sim.command.issued.isEmpty() ? null : sim.command.issued.get(0);
+		boolean move = hit && c != null && c.kind == s3d.core.CommandView.Kind.MOVE && c.point.y > sim.command.planeY + 100f
+				&& Math.hypot(c.point.x - ground.x, c.point.z - ground.z) < 50f;
+		float lifted = c != null ? c.point.y - sim.command.planeY : 0f;
+
+		// Hold still, then drag up: still a height (the ring never steals the drag)
+		sim.command.issued.clear();
+		in.mouseX = gx;
+		in.mouseY = gy;
+		in.mouseRight = true;
+		for (float time = 0; time < 0.6f; time += DT) sim.update(in, DT, DT);
+		for (int i = 1; i <= 8; i++) {
+			in.mouseY = gy + i * 12f;
+			sim.update(in, DT, DT);
+		}
+		in.mouseRight = false;
+		sim.update(in, DT, DT);
+		c = sim.command.issued.isEmpty() ? null : sim.command.issued.get(0);
+		boolean lateDrag = c != null && c.kind == s3d.core.CommandView.Kind.MOVE && c.point.y > sim.command.planeY + 100f;
+
+		// The wheel while the right button is down: height too
+		sim.command.issued.clear();
+		in.mouseY = gy;
+		in.mouseRight = true;
+		sim.update(in, DT, DT);
+		in.wheelNotches = 3f;
+		sim.update(in, DT, DT);
+		in.wheelNotches = 0f;
+		in.mouseRight = false;
+		sim.update(in, DT, DT);
+		c = sim.command.issued.isEmpty() ? null : sim.command.issued.get(0);
+		boolean wheelUp = c != null && c.kind == s3d.core.CommandView.Kind.MOVE && c.point.y > sim.command.planeY + 100f;
+
+		// Hold still and let go: the ring stays open; move right, left click: the second option (AVOID)
+		sim.command.issued.clear();
+		in.mouseX = gx;
+		in.mouseY = gy;
+		in.mouseRight = true;
+		for (float time = 0; time < 0.5f; time += DT) sim.update(in, DT, DT);
+		in.mouseRight = false;
+		sim.update(in, DT, DT);
+		boolean ring = sim.command.gesture == s3d.core.CommandView.Gesture.RING && sim.command.ring.size() == 4;
+		in.mouseX = gx + 60f;
+		sim.update(in, DT, DT);
+		click(sim, in, in.mouseX, in.mouseY, true);
+		c = sim.command.issued.isEmpty() ? null : sim.command.issued.get(0);
+		boolean avoid = ring && c != null && c.kind == s3d.core.CommandView.Kind.AVOID && sim.command.gesture == s3d.core.CommandView.Gesture.NONE;
+		check("command: orders", engage && move && lateDrag && wheelUp && avoid, String.format("engage %b, move %b (height +%.0f), hold-then-drag height %b, wheel height %b, ring %b -> %s",
+				engage, move, lifted, lateDrag, wheelUp, ring, c != null ? c.kind : null));
+
+		// Fleet buttons: full assault at once, full retreat on the second click
+		sim.command.issued.clear();
+		sim.command.fleetButtons = true;
+		float[] ra = s3d.core.CommandView.buttonRect(s3d.core.CommandView.BUTTON_ASSAULT, in.screenW, in.screenH);
+		float[] rr = s3d.core.CommandView.buttonRect(s3d.core.CommandView.BUTTON_RETREAT, in.screenW, in.screenH);
+		click(sim, in, (ra[0] + ra[2]) / 2, (ra[1] + ra[3]) / 2, true);
+		boolean assault = sim.command.issued.size() == 1 && sim.command.issued.get(0).kind == s3d.core.CommandView.Kind.FULL_ASSAULT;
+		click(sim, in, (rr[0] + rr[2]) / 2, (rr[1] + rr[3]) / 2, true);
+		boolean askedFirst = sim.command.issued.size() == 1 && sim.command.retreatConfirm > 0f;
+		click(sim, in, (rr[0] + rr[2]) / 2, (rr[1] + rr[3]) / 2, true);
+		boolean retreat = sim.command.issued.size() == 2 && sim.command.issued.get(1).kind == s3d.core.CommandView.Kind.FULL_RETREAT;
+		boolean keptSelection = sim.command.selected.size() == 2; // a button click isn't a click on empty space
+		check("command: fleet buttons", assault && askedFirst && retreat && keptSelection,
+				String.format("assault %b, retreat asks first %b then orders %b, selection kept %b", assault, askedFirst, retreat, keptSelection));
+		sim.command.issued.clear();
+
+		// Transfer of command: hold the right button on one of your ships, TRANSFER on the ring (right
+		// of top); a shuttle flies over, your ship stays on autopilot even outside T, and it arrives.
+		sim.camera.toScreen(mate2.pos, in.screenW, in.screenH, sc);
+		in.mouseX = sc[0];
+		in.mouseY = sc[1];
+		sim.update(in, DT, DT);
+		in.mouseRight = true;
+		for (float time = 0; time < 0.5f; time += DT) sim.update(in, DT, DT);
+		in.mouseRight = false;
+		sim.update(in, DT, DT);
+		boolean offered = sim.command.ring.contains(s3d.core.CommandView.Kind.TRANSFER);
+		int ti = sim.command.ring.indexOf(s3d.core.CommandView.Kind.TRANSFER);
+		double ang = Math.PI / 2 - ti * 2 * Math.PI / Math.max(1, sim.command.ring.size());
+		in.mouseX = sc[0] + (float) Math.cos(ang) * 60f;
+		in.mouseY = sc[1] + (float) Math.sin(ang) * 60f;
+		sim.update(in, DT, DT);
+		click(sim, in, in.mouseX, in.mouseY, true);
+		boolean launched = sim.shuttle != null && sim.shuttle.to == mate2;
+		sim.paused = false;
+		in.toggleTactical = true; // leave T while it flies: still on autopilot
+		sim.update(in, DT, DT);
+		in.toggleTactical = false;
+		boolean stillPiloted = me.ai != null && !sim.camera.tactical;
+		s3d.core.Ship3D arrived = null;
+		for (float time = 0; time < 20f && arrived == null; time += DT) {
+			sim.update(in, DT, DT);
+			if (sim.transferArrived != null) arrived = sim.transferArrived;
+		}
+		sim.transferArrived = null;
+		check("command: transfer", offered && launched && stillPiloted && arrived == mate2,
+				String.format("ring offers it %b, shuttle launched %b, your ship on autopilot outside T %b, arrived at %s", offered, launched, stillPiloted,
+						arrived != null ? arrived.id : "nothing"));
+		in.toggleTactical = true; // back into T for the checks below
+		sim.update(in, DT, DT);
+		in.toggleTactical = false;
+		sim.paused = true;
+
+		// Leaving: the autopilot goes
+		sim.paused = false;
+		in.toggleTactical = true;
+		sim.update(in, DT, DT);
+		in.toggleTactical = false;
+		boolean released = me.ai == null && !sim.camera.tactical;
+
+		// A hold order at a height takes the pilot up there
+		mate.order = order(s3d.core.Order3D.Kind.HOLD, mate.pos.x + 1500f, mate.pos.z + 1500f, 400f);
+		mate.order.point.y = 1800f;
+		mate2.order = order(s3d.core.Order3D.Kind.HOLD, mate2.pos.x, mate2.pos.z + 3000f, 400f);
+		foe.pos.set(30000f, 0f, -30000f);
+		for (float time = 0; time < 60f; time += DT) sim.update(in, DT, DT);
+		boolean up = Math.abs(mate.pos.y - 1800f) < 600f;
+		check("command: leave + height", released && up, String.format("autopilot gone %b, holder at height %.0f (ordered 1800)", released, mate.pos.y));
+	}
+
+	/** One mouse click (left or right) at a screen spot: down for a frame, then up. */
+	private static void click(s3d.core.Sim sim, s3d.core.PilotInput in, float x, float y, boolean left) {
+		in.mouseX = x;
+		in.mouseY = y;
+		if (left) in.mouseLeft = true;
+		else in.mouseRight = true;
+		sim.update(in, DT, DT);
+		in.mouseLeft = in.mouseRight = false;
+		sim.update(in, DT, DT);
 	}
 
 	static s3d.core.Order3D order(s3d.core.Order3D.Kind kind, float x, float z, float radius) {

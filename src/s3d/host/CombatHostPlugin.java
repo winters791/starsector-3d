@@ -4,6 +4,7 @@ import java.util.List;
 
 import org.apache.log4j.Logger;
 
+import com.fs.starfarer.api.GameState;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.combat.BaseEveryFrameCombatPlugin;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
@@ -12,16 +13,15 @@ import com.fs.starfarer.api.input.InputEventAPI;
 
 /**
  * Registered for every battle via data/config/settings.json. Decides whether this battle is
- * played in 3D (the sandbox mission, and real campaign battles unless battle.enabled is off) and
- * forwards the frame to the session. Any exception hands the battle back to vanilla 2D for the
+ * played in 3D (campaign battles, missions and the refit / main menu simulator, unless
+ * battle.enabled is off; never the title screen's background battle) and forwards the frame to
+ * the session. Any exception hands the battle back to vanilla 2D for the
  * rest of the fight instead of crashing.
  */
 public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 	private static final Logger log = Global.getLogger(CombatHostPlugin.class);
-	public static final String SANDBOX_MISSION = "s3d_sandbox";
-
 	private CombatEngineAPI engine;
-	private enum Mode { VANILLA, SANDBOX, CAMPAIGN }
+	private enum Mode { VANILLA, BATTLE }
 
 	private Session3D session;
 	private Mode mode = Mode.VANILLA;
@@ -36,20 +36,21 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 		CursorHider.restore(); // never leave a previous battle's hidden cursor behind
 		String mission = engine.isMission() ? engine.getMissionId() : null;
 		boolean campaignSim = engine.isInCampaignSim();
+		boolean titleScreen = Global.getCurrentState() == GameState.TITLE; // the main menu's background fight
+		String kind = mission != null ? "mission" : campaignSim || engine.isSimulation() ? "simulation" : "campaign battle";
 		mode = Mode.VANILLA;
 		battleCfg = null;
 		String why = "";
-		if (SANDBOX_MISSION.equals(mission)) {
-			mode = Mode.SANDBOX;
-		} else if (engine.isInCampaign() && !campaignSim && !engine.isSimulation() && !engine.isMission()) {
+		if (titleScreen) {
+			why = " (title screen)";
+		} else {
 			battleCfg = TuningLoader.load();
-			if (battleCfg.tuning.battleEnabled) mode = Mode.CAMPAIGN;
+			if (battleCfg.tuning.battleEnabled) mode = Mode.BATTLE;
 			else why = " (battle.enabled is off in s3d_tuning.json)";
 		}
-		BattleLog.battleInit(engine, mode == Mode.SANDBOX ? "3D sandbox" : mode == Mode.CAMPAIGN ? "3D campaign battle" : null);
+		BattleLog.battleInit(engine, mode == Mode.BATTLE ? "3D " + kind : null);
 		log.info("S3D: battle start (mission=" + mission + ", campaign=" + engine.isInCampaign() + ", campaignSim=" + campaignSim
-				+ ", simulation=" + engine.isSimulation() + ") -> "
-				+ (mode == Mode.SANDBOX ? "3D sandbox" : mode == Mode.CAMPAIGN ? "3D campaign battle" : "vanilla 2D" + why));
+				+ ", simulation=" + engine.isSimulation() + ") -> " + (mode == Mode.BATTLE ? "3D " + kind : "vanilla 2D" + why));
 		if (mode != Mode.VANILLA) ModDataLoader.reload(); // other mods' data/config/s3d files, re-read so edits show without a restart
 	}
 
@@ -69,20 +70,15 @@ public class CombatHostPlugin extends BaseEveryFrameCombatPlugin {
 		try {
 			BattleLog.tick();
 			if (session == null) {
-				if (mode == Mode.SANDBOX) {
-					if (!SandboxSession.ready(engine)) return;
-					session = new SandboxSession(engine);
-				} else {
-					String unsupported = BattleSession.unsupported(engine, battleCfg.tuning);
-					if (unsupported != null) {
-						log.info("S3D: this battle stays vanilla 2D: " + unsupported);
-						BattleLog.end("stayed vanilla 2D: " + unsupported);
-						mode = Mode.VANILLA;
-						return;
-					}
-					if (!BattleSession.ready(engine)) return;
-					session = new BattleSession(engine, battleCfg);
+				String unsupported = BattleSession.unsupported(engine, battleCfg.tuning);
+				if (unsupported != null) {
+					log.info("S3D: this battle stays vanilla 2D: " + unsupported);
+					BattleLog.end("stayed vanilla 2D: " + unsupported);
+					mode = Mode.VANILLA;
+					return;
 				}
+				if (!BattleSession.ready(engine)) return;
+				session = new BattleSession(engine, battleCfg);
 			}
 			if (session.done()) {
 				BattleLog.end("handed back to vanilla 2D");

@@ -18,13 +18,12 @@ import s3d.math.Vec3;
 
 /**
  * 2D overlay in screen pixels: mouse reticle, nose (boresight) and velocity markers, throttle,
- * target brackets, off-screen arrows, battlefield minimap, attitude ball, hull/armor/flux panels
+ * target brackets, battlefield minimap, attitude ball, hull/armor/flux panels
  * and status text.
  *
  * To keep fleet fights readable, full brackets only go on ships that matter right now (your
  * target, enemies within your gun range, ships that hit you in the last few seconds); others get
- * a small dot, wrecks nothing. Off-screen arrows only point at your target and your attackers;
- * the minimap shows everyone else.
+ * a small dot, wrecks nothing. Nothing is drawn for off-screen ships: the minimap shows them.
  */
 public final class HudRenderer {
 
@@ -38,6 +37,10 @@ public final class HudRenderer {
 		public float toastAlpha;
 		/** Vanilla's status list for your ship (ECM, peak time, CR, skills...), bottom entry first; drawn above your hologram. */
 		public final List<Status> statuses = new ArrayList<>();
+		/** Your side's command points left (tactical view status line), or -1 if there are none to show. */
+		public int commandPoints = -1;
+		/** The controls card's opacity (0 = hidden); its face follows the view (flight / command). */
+		public float controls;
 	}
 
 	/** One entry of vanilla's status list: its icon sprite, title and data lines, debuff, fade. */
@@ -75,11 +78,11 @@ public final class HudRenderer {
 	 * whole-pixel scale (2x from 1800 px tall); null if it couldn't be loaded (the HUD font instead).
 	 */
 	private final BitmapFont vanilla;
+	/** Vanilla's button font (InsigniaLT 17), for the tactical view's fleet buttons; null = the HUD font. */
+	private final BitmapFont buttonFont;
 	private float vanillaScale = 1f;
 	private final Mat4 ortho = new Mat4();
 	private final float[] clip = new float[4];
-	/** Screen positions of this frame's off-screen ship arrows (fleet markers stay clear of them). */
-	private final List<float[]> edgeArrows = new ArrayList<>();
 	/** This frame's icons (weapon groups, statuses), drawn after the bars and before the text. */
 	private final List<IconQuad> icons = new ArrayList<>();
 
@@ -99,10 +102,11 @@ public final class HudRenderer {
 		}
 	}
 
-	HudRenderer(Shader fx, GlyphFont font, BitmapFont vanilla) {
+	HudRenderer(Shader fx, GlyphFont font, BitmapFont vanilla, BitmapFont buttonFont) {
 		this.fx = fx;
 		this.font = font;
 		this.vanilla = vanilla;
+		this.buttonFont = buttonFont;
 	}
 
 	public void render(Sim sim, PilotInput in, Info info, int w, int h) {
@@ -136,25 +140,40 @@ public final class HudRenderer {
 			drawShipPanel(sim, texts, bars); // its own backdrop and lines, under the rest
 			drawStatusList(info.statuses, texts);
 		}
+		boolean commanding = sim.camera.tactical; // tactical view: only ships, objectives and orders
+		if (commanding) { // load the ring's icons now: a texture upload inside glBegin/glEnd silently fails
+			for (s3d.core.CommandView.Kind k : s3d.core.CommandView.Kind.values()) {
+				HudIcons.get(ringIcon(k, 1));
+				if (k == s3d.core.CommandView.Kind.ESCORT) {
+					HudIcons.get(ringIcon(k, 2));
+					HudIcons.get(ringIcon(k, 3));
+				}
+			}
+		}
 		GL11.glBegin(GL11.GL_LINES);
 		if (p != null) {
-			drawTargets(sim, w, h, texts);
-			drawFleetMarkers(sim, w, h, texts);
+			if (!commanding) {
+				drawTargets(sim, w, h, texts);
+				drawFleetMarkers(sim, w, h, texts);
+			}
 			drawObjectives(sim, w, h, texts);
 			if (!sim.spectating) {
 				if (!sim.camera.tactical) {
 					drawFlightMarkers(sim, in, w, h, texts);
 					drawHitMarkers(sim, in, w, h);
 				}
-				drawLead(sim, w, h, texts, bars);
+				if (!sim.camera.tactical) drawLead(sim, w, h, texts, bars);
 			}
-			drawThrottle(sim, w, h, texts);
-			drawAttitude(p, w - 95f, 95f, 60f);
+			if (!commanding) {
+				drawThrottle(sim, w, h, texts);
+				drawAttitude(p, w - 95f, 95f, 60f);
+			}
 			if (mapSize > 0f) drawMinimap(sim, 14f, h - 14f - mapSize, mapSize, w / (float) h, texts);
-			if (!sim.spectating) drawTargetPanel(sim, sim.aimTarget, w, h, texts, bars); // spectating: no target display
-			if (!sim.spectating) drawDamageDirection(sim, w, h);
+			if (!sim.spectating && !sim.camera.tactical) drawTargetPanel(sim, sim.aimTarget, w, h, texts, bars); // spectating / commanding: no target display
+			if (!sim.spectating && !commanding) drawDamageDirection(sim, w, h);
 			drawWarnings(sim, w, h, texts);
-			drawIncoming(sim, w, h, texts);
+			if (!commanding) drawIncoming(sim, w, h, texts);
+			else drawCommand(sim, in, w, h, texts, bars);
 		}
 		GL11.glEnd();
 		if (!bars.isEmpty()) {
@@ -168,8 +187,9 @@ public final class HudRenderer {
 			}
 			GL11.glEnd();
 		}
+		if (p != null && sim.camera.tactical && sim.command.fleetButtons) drawFleetButtons(sim.command, w, h, texts);
 		drawIcons();
-		if (sim.tuning.damageNumbers) drawDamageNumbers(sim, w, h, texts);
+		if (sim.tuning.damageNumbers && !commanding) drawDamageNumbers(sim, w, h, texts);
 
 		// Status line
 		StringBuilder status = new StringBuilder();
@@ -177,7 +197,8 @@ public final class HudRenderer {
 		if (sim.spectating) status.append("SPECTATING   ");
 		if (sim.worldTimeScale < 0.99f) status.append(String.format("TIME x%.1f   ", 1f / sim.worldTimeScale));
 		if (sim.controls.autoLevel != sim.tuning.autoLevelDefault) status.append(sim.controls.autoLevel ? "AUTO-LEVEL   " : "AUTO-LEVEL OFF   ");
-		if (sim.camera.tactical) status.append("TACTICAL   ");
+		// Tactical view: no TACTICAL / CP words (user); only a refused order's flag (NO CP) shows briefly.
+		if (sim.camera.tactical && sim.command.flag != null && sim.command.flagTime > 0f) status.append(sim.command.flag).append("   ");
 		if (in.freeLook) status.append("FREE LOOK   ");
 		if (status.length() > 0) texts.add(new Text(status.toString().trim(), cx, 30f, AMBER, 1f, true));
 
@@ -375,10 +396,7 @@ public final class HudRenderer {
 
 	private void drawTargets(Sim sim, int w, int h, List<Text> texts) {
 		Ship3D p = sim.viewer();
-		float cx = w * 0.5f, cy = h * 0.5f;
 		float focal = (h * 0.5f) / (float) Math.tan(sim.camera.fovYRad * 0.5);
-		// Only the nearest few get names; the rest just get brackets/arrows, so crowds stay readable.
-		edgeArrows.clear();
 		List<Ship3D> others = new ArrayList<>(sim.ships);
 		others.remove(p);
 		others.removeIf(o -> o.destroyed); // wrecks: no markers
@@ -415,91 +433,47 @@ public final class HudRenderer {
 				}
 				continue;
 			}
-			if (!visible && !(isTarget || isAim || attacker)) continue; // the minimap shows the rest
-			if (visible && !relevant) {
+			if (!visible) continue; // the minimap shows it
+			if (!relevant) {
 				color(col, 0.5f);
 				line(c[0] - 2f, c[1], c[0] + 2f, c[1]);
 				line(c[0], c[1] - 2f, c[0], c[1] + 2f);
 				continue;
 			}
-			if (visible) {
-				float rr = Math.max(10f, s.radius * focal / Math.max(1f, camDist));
-				float k = Math.min(rr * 0.35f, 14f);
-				color(col, 0.85f);
-				corner(c[0] - rr, c[1] + rr, k, -k);
-				corner(c[0] + rr, c[1] + rr, -k, -k);
-				corner(c[0] - rr, c[1] - rr, k, k);
-				corner(c[0] + rr, c[1] - rr, -k, k);
-				if (isTarget) {
-					float rr2 = rr + 4f;
-					corner(c[0] - rr2, c[1] + rr2, k, -k);
-					corner(c[0] + rr2, c[1] + rr2, -k, -k);
-					corner(c[0] - rr2, c[1] - rr2, k, k);
-					corner(c[0] + rr2, c[1] - rr2, -k, k);
-				}
-				if (label != null) texts.add(new Text(label, c[0], c[1] - rr - 6f, col, 0.8f, true));
-			} else {
-				// Off-screen arrow on an ellipse around the centre.
-				float dx = c[0] - cx, dy = c[1] - cy;
-				if (c[2] <= 0f) { dx = -dx; dy = -dy; }
-				float len = (float) Math.hypot(dx, dy);
-				if (len < 1e-3f) { dx = 0f; dy = -1f; len = 1f; }
-				dx /= len;
-				dy /= len;
-				float ex = w * 0.44f, ey = h * 0.42f;
-				float t = 1f / (float) Math.sqrt((dx * dx) / (ex * ex) + (dy * dy) / (ey * ey));
-				float ax = clearOfTargetPanel(sim, cx + dx * t, cy + dy * t, w, h), ay = Math.min(cy + dy * t, clearOfMinimap(sim, cx + dx * t, cy + dy * t, h));
-				edgeArrows.add(new float[] {ax, ay});
-				float px = -dy, py = dx;
-				color(col, 0.9f);
-				line(ax + dx * 12f, ay + dy * 12f, ax + px * 8f, ay + py * 8f);
-				line(ax + dx * 12f, ay + dy * 12f, ax - px * 8f, ay - py * 8f);
-				line(ax + px * 8f, ay + py * 8f, ax - px * 8f, ay - py * 8f);
-				texts.add(new Text(formatDist(dist), ax - dx * 18f, ay - dy * 18f + 6f, col, 0.75f, true));
+			float rr = Math.max(10f, s.radius * focal / Math.max(1f, camDist));
+			float k = Math.min(rr * 0.35f, 14f);
+			color(col, 0.85f);
+			corner(c[0] - rr, c[1] + rr, k, -k);
+			corner(c[0] + rr, c[1] + rr, -k, -k);
+			corner(c[0] - rr, c[1] - rr, k, k);
+			corner(c[0] + rr, c[1] - rr, -k, k);
+			if (isTarget) {
+				float rr2 = rr + 4f;
+				corner(c[0] - rr2, c[1] + rr2, k, -k);
+				corner(c[0] + rr2, c[1] + rr2, -k, -k);
+				corner(c[0] - rr2, c[1] - rr2, k, k);
+				corner(c[0] + rr2, c[1] - rr2, -k, k);
 			}
+			if (label != null) texts.add(new Text(label, c[0], c[1] - rr - 6f, col, 0.8f, true));
 		}
 	}
 
-	/**
-	 * Where each fleet is: a faint diamond on each fleet's centre, or an edge chevron with its
-	 * distance when it's off screen ("FLEET" green = yours, "ENEMY" red).
-	 */
+	/** A faint diamond on each fleet's centre when it's on screen (green yours, red the enemy's); off screen the minimap shows it. */
 	private void drawFleetMarkers(Sim sim, int w, int h, List<Text> texts) {
 		Ship3D p = sim.viewer();
-		float cx = w * 0.5f, cy = h * 0.5f;
 		for (int owner = 0; owner < 2; owner++) {
 			Vec3 c = sim.fleetCentre(owner);
 			if (c == null) continue;
 			boolean mine = owner == p.owner;
 			if (mine && c.distance(p.pos) < 900f) continue; // you're with your fleet; no marker needed
-			float[] col = mine ? GREEN : RED;
 			float[] sc = projectRaw(sim, c.x, c.y, c.z, w, h);
-			float dist = c.distance(p.pos);
-			if (sc[2] > 0f && onScreen(sc, w, h, 30f)) {
-				color(col, 0.35f);
-				float k = 7f;
-				line(sc[0], sc[1] + k, sc[0] + k, sc[1]);
-				line(sc[0] + k, sc[1], sc[0], sc[1] - k);
-				line(sc[0], sc[1] - k, sc[0] - k, sc[1]);
-				line(sc[0] - k, sc[1], sc[0], sc[1] + k);
-				continue;
-			}
-			float dx = sc[0] - cx, dy = sc[1] - cy;
-			if (sc[2] <= 0f) { dx = -dx; dy = -dy; }
-			float len = (float) Math.hypot(dx, dy);
-			if (len < 1e-3f) { dx = 0f; dy = -1f; len = 1f; }
-			dx /= len;
-			dy /= len;
-			float ex = w * 0.47f, ey = h * 0.45f;
-			float t = 1f / (float) Math.sqrt((dx * dx) / (ex * ex) + (dy * dy) / (ey * ey));
-			float ax = clearOfTargetPanel(sim, cx + dx * t, cy + dy * t, w, h), ay = Math.min(cy + dy * t, clearOfMinimap(sim, cx + dx * t, cy + dy * t, h)), px = -dy, py = dx;
-			boolean crowded = false;
-			for (float[] a : edgeArrows) if (Math.hypot(a[0] - ax, a[1] - ay) < 60f) crowded = true;
-			if (crowded) continue; // a ship arrow already points that way
-			color(col, 0.75f);
-			line(ax + dx * 10f, ay + dy * 10f, ax + px * 10f - dx * 2f, ay + py * 10f - dy * 2f);
-			line(ax + dx * 10f, ay + dy * 10f, ax - px * 10f - dx * 2f, ay - py * 10f - dy * 2f);
-			texts.add(new Text((mine ? "FLEET " : "ENEMY ") + formatDist(dist), ax - dx * 22f, ay - dy * 22f + 5f, col, 0.75f, true, 0.75f));
+			if (sc[2] <= 0f || !onScreen(sc, w, h, 30f)) continue;
+			color(mine ? GREEN : RED, 0.35f);
+			float k = 7f;
+			line(sc[0], sc[1] + k, sc[0] + k, sc[1]);
+			line(sc[0] + k, sc[1], sc[0], sc[1] - k);
+			line(sc[0], sc[1] - k, sc[0] - k, sc[1]);
+			line(sc[0] - k, sc[1], sc[0], sc[1] + k);
 		}
 	}
 
@@ -522,7 +496,280 @@ public final class HudRenderer {
 				line(sc[0] - 4f, sc[1] - 4f, sc[0] + 4f, sc[1] + 4f);
 				line(sc[0] - 4f, sc[1] + 4f, sc[0] + 4f, sc[1] - 4f);
 			}
-			texts.add(new Text(o.name.toUpperCase() + "  " + formatDist(o.flatDistance(p.pos)), sc[0], sc[1] - 24f, col, 0.75f, true, 0.75f));
+			String label = sim.camera.tactical ? o.name.toUpperCase() : o.name.toUpperCase() + "  " + formatDist(o.flatDistance(p.pos)); // tactical: no distance from your ship
+			texts.add(new Text(label, sc[0], sc[1] - 24f, col, sim.camera.tactical ? 0.55f : 0.75f, true, 0.75f));
+		}
+	}
+
+	// ---- tactical view: selection and orders ------------------------------------------------
+
+	/** Order colours: attack red, escort green, hold / capture cyan, avoid amber, cancel grey, retreat amber. */
+	private static float[] orderColour(s3d.core.CommandView.Kind k) {
+		switch (k) {
+			case ENGAGE: return RED;
+			case ESCORT: return GREEN;
+			case AVOID:
+			case RETREAT: return AMBER;
+			case CLEAR: return GRAY;
+			default: return CYAN;
+		}
+	}
+
+	private static float[] orderColour(s3d.core.Order3D.Kind k) {
+		switch (k) {
+			case ATTACK: return RED;
+			case ESCORT: return GREEN;
+			case AVOID: return AMBER;
+			default: return CYAN;
+		}
+	}
+
+	/**
+	 * The tactical view's own marks: a line from each of your ships with an order to where the order
+	 * sends it (bright for the selected ones), selection rings, the hover ring, the selection box,
+	 * the point and height being dragged, the ring menu, and a fading ring where an order just went.
+	 */
+	private void drawCommand(Sim sim, PilotInput in, int w, int h, List<Text> texts, List<float[]> bars) {
+		s3d.core.CommandView cv = sim.command;
+		Ship3D p = sim.player;
+		float focal = (h * 0.5f) / (float) Math.tan(sim.camera.fovYRad * 0.5);
+		for (Ship3D s : sim.ships) {
+			if (p == null || !s.warship() || s.owner != p.owner) continue;
+			boolean sel = cv.selected.contains(s);
+			float[] c = project(sim, s.pos.x, s.pos.y, s.pos.z, w, h);
+			if (s.order != null) {
+				Vec3 a = s.order.anchor();
+				float[] t = project(sim, a.x, a.y, a.z, w, h);
+				if (c != null && t != null) {
+					float[] col = orderColour(s.order.kind);
+					color(col, sel ? 0.75f : 0.3f);
+					dashed(c[0], c[1], t[0], t[1], 10f);
+					if (s.order.kind == s3d.core.Order3D.Kind.HOLD || s.order.kind == s3d.core.Order3D.Kind.AVOID && s.order.ship == null) {
+						diamond(t[0], t[1], 6f);
+						stalk(sim, a, cv.planeY, w, h, col, sel ? 0.5f : 0.2f);
+					}
+				}
+			}
+			if (s.retreatOrdered && c != null) {
+				color(AMBER, 0.7f);
+				line(c[0] - 5f, c[1] - 9f, c[0], c[1] - 14f);
+				line(c[0] + 5f, c[1] - 9f, c[0], c[1] - 14f);
+			}
+			if (sel && c != null) {
+				float rr = Math.max(12f, s.radius * focal / Math.max(1f, s.pos.distance(sim.camera.pos))) + 6f;
+				color(GREEN, 0.9f);
+				circle(c[0], c[1], rr, 28);
+				circle(c[0], c[1], rr + 3f, 28);
+			}
+		}
+		if (cv.hover != null) {
+			float[] c = project(sim, cv.hover.pos.x, cv.hover.pos.y, cv.hover.pos.z, w, h);
+			if (c != null) {
+				float rr = Math.max(12f, cv.hover.radius * focal / Math.max(1f, cv.hover.pos.distance(sim.camera.pos))) + 10f;
+				color(p != null && cv.hover.owner == p.owner ? (cv.hover.ally ? GRAY : GREEN) : RED, 0.55f);
+				circle(c[0], c[1], rr, 28);
+				texts.add(new Text(cv.hover.name.toUpperCase(), c[0], c[1] - rr - 8f, cv.hover.owner == (p != null ? p.owner : 0) ? GREEN : RED, 0.8f, true, 0.75f));
+			}
+		} else if (cv.hoverObjective != null) {
+			float[] c = project(sim, cv.hoverObjective.pos.x, cv.hoverObjective.pos.y, cv.hoverObjective.pos.z, w, h);
+			if (c != null) {
+				color(CYAN, 0.7f);
+				circle(c[0], c[1], 16f, 20);
+			}
+		}
+		if (cv.boxing) {
+			color(GREEN, 0.7f);
+			line(cv.boxX0, cv.boxY0, cv.boxX1, cv.boxY0);
+			line(cv.boxX1, cv.boxY0, cv.boxX1, cv.boxY1);
+			line(cv.boxX1, cv.boxY1, cv.boxX0, cv.boxY1);
+			line(cv.boxX0, cv.boxY1, cv.boxX0, cv.boxY0);
+		}
+		if (cv.gesture == s3d.core.CommandView.Gesture.PRESSED && cv.groundValid) {
+			// Right button down on empty space: the spot, a short up/down tick (drag to set its height),
+			// and an arc filling round the cursor while held still (let go when full: the ring opens).
+			float[] g = project(sim, cv.ground.x, cv.ground.y, cv.ground.z, w, h);
+			if (g != null) {
+				color(CYAN, 0.7f);
+				ellipse(g[0], g[1], 14f, 6f, 20);
+				line(g[0], g[1] + 8f, g[0], g[1] + 22f);
+				line(g[0] - 4f, g[1] + 18f, g[0], g[1] + 22f);
+				line(g[0] + 4f, g[1] + 18f, g[0], g[1] + 22f);
+			}
+		}
+		float hold = cv.ringHoldFraction();
+		if (hold > 0.05f) {
+			color(CYAN, 0.25f + 0.5f * hold);
+			int seg = Math.max(1, (int) (24 * hold));
+			for (int i = 0; i < seg; i++) {
+				double a0 = Math.PI / 2 - i * 2 * Math.PI / 24, a1 = Math.PI / 2 - (i + 1) * 2 * Math.PI / 24;
+				line(cv.pressX + (float) Math.cos(a0) * 16f, cv.pressY + (float) Math.sin(a0) * 16f,
+						cv.pressX + (float) Math.cos(a1) * 16f, cv.pressY + (float) Math.sin(a1) * 16f);
+			}
+		}
+		if (cv.gesture == s3d.core.CommandView.Gesture.HEIGHT && cv.groundValid) {
+			Vec3 top = new Vec3(cv.ground.x, cv.ground.y + cv.lift, cv.ground.z);
+			float[] g = project(sim, cv.ground.x, cv.ground.y, cv.ground.z, w, h);
+			float[] t = project(sim, top.x, top.y, top.z, w, h);
+			if (g != null) {
+				color(CYAN, 0.5f);
+				ellipse(g[0], g[1], 14f, 6f, 20);
+			}
+			if (g != null && t != null) {
+				color(CYAN, 0.9f);
+				line(g[0], g[1], t[0], t[1]);
+				diamond(t[0], t[1], 8f);
+				texts.add(new Text((cv.lift >= 0f ? "+" : "") + formatDist(cv.lift), t[0] + 14f, t[1] - 4f, CYAN, 0.9f, false, 0.8f));
+			}
+		}
+		if (cv.gesture == s3d.core.CommandView.Gesture.RING) {
+			int n = cv.ring.size();
+			color(CYAN, 0.35f);
+			circle(cv.pressX, cv.pressY, 6f, 12);
+			for (int i = 0; i < n; i++) {
+				double a = Math.PI / 2 - i * 2 * Math.PI / n; // first option on top, then clockwise
+				float x = cv.pressX + (float) Math.cos(a) * s3d.core.CommandView.RING_RADIUS_PX;
+				float y = cv.pressY + (float) Math.sin(a) * s3d.core.CommandView.RING_RADIUS_PX;
+				boolean on = i == cv.ringChoice;
+				s3d.core.CommandView.Kind k = cv.ring.get(i);
+				float[] col = orderColour(k);
+				color(col, on ? 1f : 0.45f);
+				circle(x, y, on ? 26f : 22f, 24);
+				// Vanilla's order icon in the circle; the word only on the one under the mouse.
+				HudIcons.Icon ic = HudIcons.get(ringIcon(k, cv.selected.size()));
+				float r = on ? 19f : 16f;
+				if (ic != null) icon(ic, x - r, y - r, x + r, y + r, col, on ? 1f : 0.75f);
+				else texts.add(new Text(k.name(), x, y - 5f, col, on ? 1f : 0.7f, true, 0.7f));
+				if (on && ic != null) texts.add(new Text(k.name(), x, y - 32f, col, 1f, true, 0.7f));
+			}
+		}
+		if (sim.shuttle != null) { // your command shuttle: a diamond on it, a dashed line to where it's going
+			float[] c = project(sim, sim.shuttle.pos.x, sim.shuttle.pos.y, sim.shuttle.pos.z, w, h);
+			Ship3D to = sim.shuttle.to;
+			float[] t = to != null ? project(sim, to.pos.x, to.pos.y, to.pos.z, w, h) : null;
+			color(CYAN, 0.9f);
+			if (c != null) diamond(c[0], c[1], 6f);
+			if (c != null && t != null) {
+				color(CYAN, 0.5f);
+				dashed(c[0], c[1], t[0], t[1], 6f);
+			}
+		}
+		for (s3d.core.CommandView.Ping ping : cv.pings) {
+			float[] c = project(sim, ping.pos.x, ping.pos.y, ping.pos.z, w, h);
+			if (c == null) continue;
+			float k = ping.age / 1.5f;
+			color(orderColour(ping.kind), 0.9f * (1f - k));
+			circle(c[0], c[1], 10f + 30f * k, 24);
+		}
+	}
+
+	/** Vanilla's command-map button colours: dark navy panel, muted cyan frame, pale blue text. */
+	private static final float[] BTN_FILL = {0.03f, 0.07f, 0.1f};
+	private static final float[] BTN_EDGE = {0.33f, 0.62f, 0.78f};
+	private static final float[] BTN_TEXT = {0.72f, 0.86f, 0.98f};
+	private static final float[] BTN_CONFIRM = {1f, 0.85f, 0.35f};
+
+	/**
+	 * Full assault and full retreat, styled like vanilla's command-map buttons: a dark panel with a
+	 * cyan frame (corners cut on the left), the label in vanilla's button font, and vanilla's own icon
+	 * (icon_search+destroy, icon_full_retreat) in a framed square on the right. Brighter on hover,
+	 * filled while on (full assault) or ordered (full retreat); the first retreat click asks to confirm.
+	 * Own pass (fills under frames), after the line pass.
+	 */
+	private void drawFleetButtons(s3d.core.CommandView cv, int w, int h, List<Text> texts) {
+		GL11.glDisable(GL11.GL_TEXTURE_2D);
+		for (int i = 0; i < 2; i++) {
+			float[] r = s3d.core.CommandView.buttonRect(i, w, h);
+			boolean assault = i == s3d.core.CommandView.BUTTON_ASSAULT;
+			boolean on = assault ? cv.fullAssault : cv.fullRetreat;
+			boolean confirm = !assault && cv.retreatConfirm > 0f && !cv.fullRetreat;
+			boolean hot = cv.buttonHover == i;
+			float x0 = r[0], y0 = r[1], x1 = r[2], y1 = r[3], bh = y1 - y0;
+			float side = bh + 6f, gap = 5f;
+			float ix1 = x1, ix0 = ix1 - side, iy0 = y0 - 3f, iy1 = y1 + 3f; // icon square, a little taller than the bar
+			float lx1 = ix0 - gap, cut = bh * 0.3f;
+			float[] lx = {x0 + cut, lx1, lx1, x0 + cut, x0, x0};
+			float[] ly = {y1, y1, y0, y0, y0 + cut, y1 - cut};
+			float fillA = on ? 0.95f : hot || confirm ? 0.9f : 0.82f;
+			float lift = on ? 0.12f : hot || confirm ? 0.05f : 0f;
+			// fills
+			GL11.glColor4f(BTN_FILL[0] + lift * 0.6f, BTN_FILL[1] + lift * 1.4f, BTN_FILL[2] + lift * 1.8f, fillA);
+			GL11.glBegin(GL11.GL_POLYGON);
+			for (int k = 0; k < lx.length; k++) GL11.glVertex2f(lx[k], ly[k]);
+			GL11.glEnd();
+			GL11.glBegin(GL11.GL_QUADS);
+			GL11.glVertex2f(ix0, iy0);
+			GL11.glVertex2f(ix1, iy0);
+			GL11.glVertex2f(ix1, iy1);
+			GL11.glVertex2f(ix0, iy1);
+			GL11.glEnd();
+			// frames
+			float edgeA = on || hot || confirm ? 1f : 0.7f;
+			float[] edge = confirm ? BTN_CONFIRM : BTN_EDGE;
+			GL11.glBegin(GL11.GL_LINES);
+			color(edge, edgeA);
+			for (int k = 0; k < lx.length; k++) line(lx[k], ly[k], lx[(k + 1) % lx.length], ly[(k + 1) % ly.length]);
+			line(ix0, iy0, ix1, iy0);
+			line(ix1, iy0, ix1, iy1);
+			line(ix1, iy1, ix0, iy1);
+			line(ix0, iy1, ix0, iy0);
+			color(edge, edgeA * 0.55f);
+			float in = 3f;
+			line(ix0 + in, iy0 + in, ix1 - in, iy0 + in);
+			line(ix1 - in, iy0 + in, ix1 - in, iy1 - in);
+			line(ix1 - in, iy1 - in, ix0 + in, iy1 - in);
+			line(ix0 + in, iy1 - in, ix0 + in, iy0 + in);
+			GL11.glEnd();
+			HudIcons.Icon ic = HudIcons.get(assault ? "graphics/warroom/icon_search+destroy.png" : "graphics/warroom/icon_full_retreat.png");
+			if (ic != null) icon(ic, ix0 + 5f, iy0 + 5f, ix1 - 5f, iy1 - 5f, confirm ? BTN_CONFIRM : BTN_TEXT, on || hot ? 1f : 0.85f);
+			String label = assault ? "Full Assault!" : confirm ? "Confirm Retreat?" : "Full Retreat!";
+			float[] tc = confirm ? BTN_CONFIRM : BTN_TEXT;
+			float ta = on || hot || confirm ? 1f : 0.85f, cx = (x0 + cut * 0.5f + lx1) * 0.5f;
+			if (buttonFont != null) texts.add(new Text(label, cx, (y0 + y1) * 0.5f + buttonFont.lineHeight * 0.5f, tc, ta, true, 1f, buttonFont));
+			else texts.add(new Text(label.toUpperCase(), cx, (y0 + y1) * 0.5f + 6f, tc, ta, true, 0.8f));
+		}
+	}
+
+	/** Vanilla's command-map icon for a ring option (graphics/warroom/taskicons). */
+	private static String ringIcon(s3d.core.CommandView.Kind k, int selected) {
+		String dir = "graphics/warroom/taskicons/";
+		switch (k) {
+			case ENGAGE: return dir + "icon_engage.png";
+			case ESCORT: return dir + (selected >= 3 ? "icon_escort_heavy.png" : selected == 2 ? "icon_escort_medium.png" : "icon_escort_light.png");
+			case CAPTURE: return dir + "icon_capture.png";
+			case MOVE: return dir + "icon_rally_task_force.png";
+			case AVOID: return dir + "icon_avoid.png";
+			case CLEAR: return dir + "icon_search_and_destroy.png";
+			case RETREAT: return dir + "icon_retreat.png";
+			case TRANSFER: return dir + "icon_transfer_command.png";
+			default: return null;
+		}
+	}
+
+	/** A faint vertical line from a point down (or up) to the tactical view's ground plane, with a small foot. */
+	private void stalk(Sim sim, Vec3 a, float planeY, int w, int h, float[] col, float alpha) {
+		if (Math.abs(a.y - planeY) < 20f) return;
+		float[] t = project(sim, a.x, a.y, a.z, w, h);
+		float[] g = project(sim, a.x, planeY, a.z, w, h);
+		if (t == null || g == null) return;
+		color(col, alpha);
+		line(t[0], t[1], g[0], g[1]);
+		ellipse(g[0], g[1], 6f, 2.5f, 12);
+	}
+
+	private static void diamond(float x, float y, float k) {
+		line(x, y + k, x + k, y);
+		line(x + k, y, x, y - k);
+		line(x, y - k, x - k, y);
+		line(x - k, y, x, y + k);
+	}
+
+	private static void dashed(float x0, float y0, float x1, float y1, float dash) {
+		float len = (float) Math.hypot(x1 - x0, y1 - y0);
+		if (len < 1f) return;
+		int n = (int) Math.min(200, len / dash);
+		for (int i = 0; i < n; i += 2) {
+			float a = i / (float) n, b = Math.min(1f, (i + 1) / (float) n);
+			line(x0 + (x1 - x0) * a, y0 + (y1 - y0) * a, x0 + (x1 - x0) * b, y0 + (y1 - y0) * b);
 		}
 	}
 
@@ -532,21 +779,6 @@ public final class HudRenderer {
 		line(x + k, y - k, x + k, y + k);
 		line(x + k, y + k, x - k, y + k);
 		line(x - k, y + k, x - k, y - k);
-	}
-
-	/** x for an edge marker at (x, y) that keeps it off the target display (right side), if one is up. */
-	private float clearOfTargetPanel(Sim sim, float x, float y, int w, int h) {
-		Ship3D t = sim.spectating ? null : sim.aimTarget;
-		if (t == null) return x;
-		float px0 = w - 218f - 24f, top = h * 0.5f + 175f, bottom = h * 0.5f + 160f - lineH() * 0.8f * 3.2f - 170f - 70f;
-		return x > px0 && y < top && y > bottom ? px0 : x;
-	}
-
-	/** Highest y an edge marker at (x, y) may use without landing on the minimap (top left). */
-	private float clearOfMinimap(Sim sim, float x, float y, int h) {
-		float size = sim.tuning.minimapSize;
-		if (size <= 0f || x > 14f + size + 30f) return y;
-		return Math.min(y, h - 14f - size - 30f);
 	}
 
 	// ---- weapons HUD ---------------------------------------------------------------------
@@ -1099,10 +1331,6 @@ public final class HudRenderer {
 			texts.add(new Text(thrust <= 0f ? "FLAMED OUT  -  engines down" : String.format("ENGINES  %d of %d down", down, n),
 					w * 0.5f, h * 0.5f - 90f, thrust <= 0f ? RED : AMBER, 0.95f, true));
 		}
-		if (p.destroyed) {
-			boolean sandbox = sim.arenaHalfX <= 0f;
-			texts.add(new Text(sandbox ? "SHIP DESTROYED  -  press N to repair" : "SHIP DESTROYED", w * 0.5f, h * 0.5f + 60f, RED, 1f, true));
-		}
 	}
 
 	/** Enemy missiles nearby: a small red marker on each one. */
@@ -1310,16 +1538,17 @@ public final class HudRenderer {
 			}
 			GL11.glEnd();
 		}
-		if (vanilla != null) {
-			GL11.glBindTexture(GL11.GL_TEXTURE_2D, vanilla.texture);
+		for (BitmapFont bf : new BitmapFont[] {vanilla, buttonFont}) {
+			if (bf == null) continue;
+			GL11.glBindTexture(GL11.GL_TEXTURE_2D, bf.texture);
 			GL11.glBegin(GL11.GL_QUADS);
 			for (Text t : texts) {
-				if (t.bmp != vanilla) continue;
-				float x = t.centred ? t.x - vanilla.width(t.s, t.scale) * 0.5f : t.x;
+				if (t.bmp != bf) continue;
+				float x = t.centred ? t.x - bf.width(t.s, t.scale) * 0.5f : t.x;
 				GL11.glColor4f(0f, 0f, 0f, t.a * 0.7f);
-				vanilla.emit(t.s, x + t.scale, t.y - t.scale, t.scale);
+				bf.emit(t.s, x + t.scale, t.y - t.scale, t.scale);
 				GL11.glColor4f(t.c[0], t.c[1], t.c[2], t.a);
-				vanilla.emit(t.s, x, t.y, t.scale);
+				bf.emit(t.s, x, t.y, t.scale);
 			}
 			GL11.glEnd();
 		}

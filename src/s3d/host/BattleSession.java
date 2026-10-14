@@ -40,6 +40,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import s3d.core.ArmorShell;
+import s3d.core.CommandView;
 import s3d.core.Objective3D;
 import s3d.core.Order3D;
 import s3d.core.Ship3D;
@@ -79,6 +80,11 @@ import s3d.math.Vec3;
  * them, which puts their puppets on them for vanilla's own capture (with a fallback if vanilla
  * doesn't flip one). Their bonuses reach 3D through the puppets: weapon ranges (sensor arrays' ECM)
  * are re-read twice a second, top speed may rise by a nav bonus.
+ *
+ * Orders from the 3D tactical view (T, {@link s3d.core.CommandView}) are written into the same
+ * vanilla task manager as the Tab map's, command points and all, so they come back the same way.
+ * Vanilla's waypoints are flat; the height you gave a point is kept here and put back when the
+ * order is read.
  */
 final class BattleSession extends Session3D {
 	private static final Logger log = Global.getLogger(BattleSession.class);
@@ -109,11 +115,19 @@ final class BattleSession extends Session3D {
 	/** Twins made this frame, placed once their whole structure is in: stations, then free ships. */
 	private final List<Ship3D> newStations = new ArrayList<>(), newShips = new ArrayList<>();
 
-	private final float mapW, mapH, scale, edgeZ;
+	/** 3D units per vanilla map unit: sizes (scale), across (x, battle.widthMult) and along the line between the fleets (z, battle.lengthMult). */
+	private final float mapW, mapH, scale, scaleX, scaleZ, edgeZ;
 	private int deployed, graves, parkedCount, launches, landings, fighterLosses, fightersDismissed;
 	private float fighterLogTimer = 10f, manoeuvreLogTimer = 20f;
-	private boolean handedBack, handBackArmed, noShipsToast;
-	private float clock, armorTimer, ordersTimer, transferTimer = -1f, handBackTimer;
+	private boolean handedBack, handBackArmed;
+	private float clock, armorTimer, ordersTimer, handBackTimer;
+	/**
+	 * The exact 3D points you ordered ships to, by the vanilla waypoint's map spot (see heightKey):
+	 * vanilla's waypoints are flat and kept within +/-6000 map units of the centre (seen in play), so
+	 * the height and the real spot are put back when the order is read.
+	 */
+	private final Map<Long, Vec3> waypointPoints = new java.util.HashMap<>();
+	private boolean commandsFailed;
 
 	/** Null if this battle can be played in 3D, else why not. */
 	static String unsupported(CombatEngineAPI engine, s3d.core.Tuning t) {
@@ -153,8 +167,10 @@ final class BattleSession extends Session3D {
 		mapW = engine.getMapWidth();
 		mapH = engine.getMapHeight();
 		scale = cfg.tuning.battleMapScale;
-		edgeZ = mapH * 0.5f * scale;
-		sim.arenaHalfX = mapW * 0.5f * scale;
+		scaleX = scale * cfg.tuning.battleWidthMult;
+		scaleZ = scale * cfg.tuning.battleLengthMult;
+		edgeZ = mapH * 0.5f * scaleZ;
+		sim.arenaHalfX = mapW * 0.5f * scaleX;
 		sim.arenaHalfZ = edgeZ;
 		BuildPicker.clear();
 		managePuppets(0f);
@@ -255,10 +271,10 @@ final class BattleSession extends Session3D {
 			sim.addShip(s); // applies the class scale; the placement below needs the real radius
 			float side = s.owner == 0 ? 1f : -1f;
 			Vector2f loc = ship.getLocation();
-			float halfW = mapW * 0.5f * scale * 0.9f;
-			float x = Math.max(-halfW, Math.min(halfW, loc.x * scale * cfg.tuning.battleDeploySpread));
+			float halfW = mapW * 0.5f * scaleX * 0.9f;
+			float x = Math.max(-halfW, Math.min(halfW, loc.x * scaleX * cfg.tuning.battleDeploySpread));
 			float y = (((n * 37) % 5) - 2) * 0.5f * cfg.tuning.battleDeployAltitude;
-			float z = side * Math.min(cfg.tuning.battleDeployDistance, edgeZ * 0.85f);
+			float z = side * Math.max(edgeZ * 0.5f, edgeZ - cfg.tuning.battleEdgeMargin - s.radius); // from its own edge
 			s.pos.set(x, y, z);
 			for (int tries = 0; tries < 12 && overlapsAny(s); tries++) {
 				s.pos.x += (tries % 2 == 0 ? 1f : -1f) * (tries + 1) * s.radius * 2.2f;
@@ -295,7 +311,7 @@ final class BattleSession extends Session3D {
 			s.spinRate = spins ? (float) Math.toRadians(cfg.tuning.stationSpinDeg) : 0f;
 			sim.addShip(s);
 			Vector2f loc = ship.getLocation();
-			s.pos.set(Math.max(-sim.arenaHalfX, Math.min(sim.arenaHalfX, loc.x * scale)), 0f, Math.max(-edgeZ, Math.min(edgeZ, -loc.y * scale)));
+			s.pos.set(Math.max(-sim.arenaHalfX, Math.min(sim.arenaHalfX, loc.x * scaleX)), 0f, Math.max(-edgeZ, Math.min(edgeZ, -loc.y * scaleZ)));
 			s.rot.setAxisAngle(0f, 1f, 0f, (float) Math.toRadians(ship.getFacing() - 90f)); // vanilla facing -> 3D nose
 			s.vel.set(0f, 0f, 0f);
 			s.ai = new ShipAI3D(n);
@@ -711,7 +727,7 @@ final class BattleSession extends Session3D {
 
 	private Vector2f to2D(Vec3 pos, Vector2f out) {
 		float hx = mapW * 0.5f - 300f, hy = mapH * 0.5f - 300f;
-		out.set(Math.max(-hx, Math.min(hx, pos.x / scale)), Math.max(-hy, Math.min(hy, -pos.z / scale)));
+		out.set(Math.max(-hx, Math.min(hx, pos.x / scaleX)), Math.max(-hy, Math.min(hy, -pos.z / scaleZ)));
 		return out;
 	}
 
@@ -811,8 +827,7 @@ final class BattleSession extends Session3D {
 			}
 			if (runs + flanks + holds > 0) log.info("S3D: AI manoeuvres so far: " + runs + " gun runs, " + flanks + " flanking moves, " + holds + " holds");
 		}
-		followVanillaPlayerShip();
-		handlePlayerLoss(realDt);
+		followVanillaPlayerShip(); // command never passes by itself: only by your shuttle (tactical view) or vanilla's Tab map
 		if (handBackTimer > 0f) {
 			handBackTimer -= realDt;
 			if (handBackTimer <= 0f) handBackArmed = false;
@@ -911,7 +926,10 @@ final class BattleSession extends Session3D {
 			Vec3 at = null;
 			if (target instanceof AssignmentTargetAPI) {
 				Vector2f loc = ((AssignmentTargetAPI) target).getLocation();
-				if (loc != null) at = new Vec3(loc.x * scale, 0f, -loc.y * scale);
+				if (loc != null) {
+					Vec3 exact = waypointPoints.get(heightKey(loc));
+					at = exact != null ? new Vec3(exact) : new Vec3(loc.x * scaleX, 0f, -loc.y * scaleZ);
+				}
 			}
 			float holdR = cfg.tuning.battleHoldRadius * scale;
 			if (twin != null && twin.fixedPart() && !"AVOID".equals(type)) {
@@ -973,6 +991,147 @@ final class BattleSession extends Session3D {
 		}
 	}
 
+	/** A vanilla waypoint's map spot, to 5 map units, as a key for the height it was given in 3D. */
+	private static long heightKey(Vector2f loc) {
+		return ((long) Math.round(loc.x / 5f) << 32) ^ (Math.round(loc.y / 5f) & 0xffffffffL);
+	}
+
+	// ---- orders from the tactical view ------------------------------------------------------------
+
+	@Override
+	protected void carryOutCommands() {
+		List<CommandView.Command> list = new ArrayList<>(sim.command.issued);
+		sim.command.issued.clear();
+		sim.command.fleetButtons = !handedBack && !commandsFailed;
+		if (handedBack || commandsFailed) return;
+		try { // the fleet buttons show vanilla's own state
+			CombatTaskManagerAPI tm = engine.getFleetManager(0).getTaskManager(false);
+			sim.command.fullAssault = tm != null && tm.isFullAssault();
+			sim.command.fullRetreat = tm != null && tm.isInFullRetreat();
+		} catch (Throwable t) {
+			sim.command.fleetButtons = false;
+		}
+		for (CommandView.Command c : list) {
+			try {
+				carryOut(c);
+			} catch (Throwable t) {
+				commandsFailed = true;
+				sim.command.flag("ORDERS OFF");
+				log.error("S3D: could not give the order " + c + "; tactical view orders are off for this battle (Tab map still works)", t);
+				return;
+			}
+		}
+		if (!list.isEmpty()) ordersTimer = 0f; // read them back next frame, not in half a second
+	}
+
+	@Override
+	protected int commandPoints() {
+		try {
+			CombatTaskManagerAPI tm = engine.getFleetManager(0).getTaskManager(false);
+			return tm != null ? tm.getCommandPointsLeft() : -1;
+		} catch (Throwable t) {
+			return -1;
+		}
+	}
+
+	/** One order from the tactical view as a vanilla assignment (or retreat / search and destroy). */
+	private void carryOut(CommandView.Command c) {
+		CombatFleetManagerAPI fm = engine.getFleetManager(0);
+		CombatTaskManagerAPI tm = fm.getTaskManager(false);
+		if (tm == null) return;
+		List<DeployedFleetMemberAPI> members = new ArrayList<>();
+		for (Ship3D s : c.ships) {
+			DeployedFleetMemberAPI m = s.hostRef instanceof ShipAPI ? fm.getDeployedFleetMember((ShipAPI) s.hostRef) : null;
+			if (m != null) members.add(m);
+		}
+		if (c.kind == CommandView.Kind.FULL_ASSAULT) { // vanilla's fleet-wide modes: no command point
+			tm.setFullAssault(!tm.isFullAssault());
+			log.info("S3D: tactical view: full assault " + (tm.isFullAssault() ? "on" : "off"));
+			return;
+		}
+		if (c.kind == CommandView.Kind.FULL_RETREAT) {
+			if (!tm.isInFullRetreat()) tm.orderFullRetreat();
+			log.info("S3D: tactical view: full retreat ordered");
+			return;
+		}
+		if (!c.ships.isEmpty() && members.isEmpty()) return;
+		int cpBefore = tm.getCommandPointsLeft();
+		if (cpBefore < 1) {
+			sim.command.flag("NO CP");
+			log.info("S3D: tactical view order " + c + " not given: no command points left");
+			return;
+		}
+		if (c.kind == CommandView.Kind.CLEAR || c.kind == CommandView.Kind.RETREAT) {
+			boolean first = true; // one command point for the whole order, as on the Tab map
+			for (DeployedFleetMemberAPI m : members) {
+				if (c.kind == CommandView.Kind.RETREAT) tm.orderRetreat(m, first, false);
+				else tm.orderSearchAndDestroy(m, first);
+				first = false;
+			}
+			log.info("S3D: tactical view order " + c + " (command points " + cpBefore + " -> " + tm.getCommandPointsLeft() + ")");
+			return;
+		}
+		AssignmentTargetAPI target = null;
+		CombatAssignmentType type = null;
+		switch (c.kind) {
+			case ENGAGE:
+			case AVOID:
+			case ESCORT:
+				if (c.ship != null) {
+					ShipAPI puppet = c.ship.root().hostRef instanceof ShipAPI ? (ShipAPI) c.ship.root().hostRef : null;
+					target = puppet != null ? engine.getFleetManager(puppet.getOwner()).getDeployedFleetMember(puppet) : null;
+				} else if (c.kind == CommandView.Kind.AVOID) {
+					target = waypoint(tm, c.point);
+				}
+				type = c.kind == CommandView.Kind.ENGAGE ? CombatAssignmentType.ENGAGE
+						: c.kind == CommandView.Kind.AVOID ? CombatAssignmentType.AVOID
+						: members.size() >= 3 ? CombatAssignmentType.HEAVY_ESCORT
+						: members.size() == 2 ? CombatAssignmentType.MEDIUM_ESCORT : CombatAssignmentType.LIGHT_ESCORT;
+				break;
+			case CAPTURE: {
+				Object o = c.objective != null ? c.objective.hostRef : null;
+				if (o instanceof BattleObjectiveAPI) {
+					BattleObjectiveAPI obj = (BattleObjectiveAPI) o;
+					target = obj;
+					type = obj.getOwner() == 0 ? CombatAssignmentType.CONTROL
+							: obj.getOwner() == 1 ? CombatAssignmentType.ASSAULT : CombatAssignmentType.CAPTURE;
+				}
+				break;
+			}
+			case MOVE:
+				target = waypoint(tm, c.point);
+				type = CombatAssignmentType.RALLY_TASK_FORCE;
+				break;
+			default:
+				break;
+		}
+		if (target == null || type == null) {
+			log.info("S3D: tactical view order " + c + " has no vanilla target; not given");
+			return;
+		}
+		AssignmentInfo info = tm.createAssignment(type, target, true);
+		if (info == null) {
+			sim.command.flag("NO CP");
+			log.info("S3D: vanilla refused " + type + " for " + c + " (command points " + cpBefore + ")");
+			return;
+		}
+		for (DeployedFleetMemberAPI m : members) tm.giveAssignment(m, info, false);
+		log.info("S3D: tactical view order " + c + " -> vanilla " + type + (members.isEmpty() ? " (vanilla picks the ships)" : "")
+				+ " (command points " + cpBefore + " -> " + tm.getCommandPointsLeft() + ")");
+	}
+
+	/** A vanilla waypoint under a 3D point; the exact point is kept for when the order is read back. */
+	private AssignmentTargetAPI waypoint(CombatTaskManagerAPI tm, Vec3 p) {
+		Vector2f loc = to2D(p, new Vector2f());
+		AssignmentTargetAPI w = tm.createWaypoint2(loc, false);
+		if (w == null) return null;
+		Vector2f at = w.getLocation() != null ? w.getLocation() : loc;
+		waypointPoints.put(heightKey(at), new Vec3(p));
+		if (Math.abs(at.x - loc.x) > 5f || Math.abs(at.y - loc.y) > 5f)
+			log.info(String.format("S3D: vanilla put the waypoint at (%.0f, %.0f), asked (%.0f, %.0f); 3D pilots go to the spot you clicked", at.x, at.y, loc.x, loc.y));
+		return w;
+	}
+
 	private static Order3D order(String label, Order3D.Kind kind, Vec3 at, float radius) {
 		Order3D o = new Order3D(kind);
 		o.label = label;
@@ -996,7 +1155,7 @@ final class BattleSession extends Session3D {
 				int owner = side(o.getOwner());
 				if (v == null) {
 					v = new Objective3D(o.getType(), o.getDisplayName() != null ? o.getDisplayName() : o.getType());
-					v.pos.set(o.getLocation().x * scale, 0f, -o.getLocation().y * scale);
+					v.pos.set(o.getLocation().x * scaleX, 0f, -o.getLocation().y * scaleZ);
 					v.radius = cfg.tuning.battleCaptureRadius * scale;
 					v.owner = owner;
 					v.hostRef = o;
@@ -1216,24 +1375,10 @@ final class BattleSession extends Session3D {
 		}
 	}
 
-	/** Your ship died or left: after a short delay, take over your nearest remaining ship. */
-	private void handlePlayerLoss(float realDt) {
-		Ship3D p = sim.player;
-		boolean lost = p == null || p.destroyed || !sim.ships.contains(p);
-		if (!lost) {
-			transferTimer = -1f;
-			return;
-		}
-		if (transferTimer < 0f) transferTimer = cfg.tuning.battleTransferDelay;
-		transferTimer -= realDt;
-		if (transferTimer > 0f) return;
-		Ship3D next = pickNextPlayer(p);
-		if (next != null) {
-			takeControl(next, true);
-			noShipsToast = false;
-		} else {
-			noShipsToast = true; // the alert line says so
-		}
+	@Override
+	protected void transferArrived(Ship3D s) {
+		if (s.destroyed || !sim.ships.contains(s)) return;
+		takeControl(s, true);
 	}
 
 	/** Your nearest live ship (not an ally's), else null. */
@@ -1269,10 +1414,7 @@ final class BattleSession extends Session3D {
 				log.warn("S3D: could not make " + s.name + " vanilla's player ship", t);
 			}
 		}
-		if (announce) {
-			toast("Command transferred to " + s.name + " (" + s.hullName + ")");
-			log.info("S3D: command transferred to " + s.name);
-		}
+		if (announce) log.info("S3D: command transferred to " + s.name); // no toast (no-text HUD)
 	}
 
 	// ---- hand-back -----------------------------------------------------------------------------
@@ -1361,11 +1503,7 @@ final class BattleSession extends Session3D {
 	protected void fillAlerts(List<String> alerts) {
 		Ship3D p = sim.player;
 		if (p == null) return;
-		if (p.destroyed || !sim.ships.contains(p)) {
-			if (transferTimer > 0f) alerts.add(String.format("Taking command of your next ship in %.0f s", transferTimer));
-			else if (noShipsToast) alerts.add("No ships left under your command");
-			return;
-		}
+		if (p.destroyed || !sim.ships.contains(p)) return; // no prompt: you pick your next ship in the tactical view
 		if (p.retreatOrdered) {
 			float toGo = edgeZ - p.pos.z;
 			alerts.add(toGo > 0f ? String.format("RETREAT: fly back past your starting side, %.0f to go", toGo) : "RETREAT: leaving the battle");

@@ -85,19 +85,34 @@ public final class Renderer3D {
 		} catch (Throwable t) {
 			log.warn("S3D: vanilla HUD font unavailable, the ship panel uses the HUD font", t);
 		}
-		hud = new HudRenderer(fxShader, font, victor);
+		BitmapFont insignia = null; // vanilla's button font (the command map's "Full Assault!")
+		try {
+			insignia = BitmapFont.load("graphics/fonts/insignia17LTaa.fnt");
+		} catch (Throwable t) {
+			log.warn("S3D: vanilla button font unavailable, the fleet buttons use the HUD font", t);
+		}
+		hud = new HudRenderer(fxShader, font, victor, insignia);
+		try { // the controls card: vanilla's title, button and body fonts
+			controlsCard = new ControlsCard(fxShader, BitmapFont.load("graphics/fonts/orbitron20aabold.fnt"),
+					BitmapFont.load("graphics/fonts/orbitron12bold.fnt"), BitmapFont.load("graphics/fonts/insignia15LTaa.fnt"));
+		} catch (Throwable t) {
+			log.warn("S3D: vanilla UI fonts unavailable, no controls card", t);
+		}
 		whiteTex = TextureUtil.upload(new int[] {0xFFFFFFFF}, 1, 1, false, 1f);
 		initialized = true;
 		log.info("S3D: renderer initialised");
 	}
 
 	/** HUD overlay, then the holograms the HUD asked for (they need the 3D mesh): your ship's and the target's. */
+	private ControlsCard controlsCard;
+
 	public void renderHud(Sim sim, s3d.core.PilotInput in, HudRenderer.Info info, int w, int h) {
 		hud.render(sim, in, info, w, h);
 		for (HudRenderer.Holo req : new HudRenderer.Holo[] {hud.ownHolo, hud.targetHolo}) {
 			if (req.ship != null) renderHologram(req.ship, sim.tuning, req, sim.time, w, h);
 			req.ship = null;
 		}
+		if (controlsCard != null && info.controls > 0f) controlsCard.render(sim, info.controls, w, h);
 	}
 
 	/** Whole screen black at this opacity, over everything drawn so far (the scene fading in at battle start). */
@@ -385,8 +400,10 @@ public final class Renderer3D {
 		GL11.glEnable(GL11.GL_TEXTURE_2D);
 		Quat q = new Quat(), bank = new Quat();
 		java.util.List<Ship3D> ghosts = null;
+		boolean commanding = cam.tacticalBlend() > 0.5f;
 		for (Ship3D s : sim.ships) {
 			if (s.noHull) continue; // attack / construction swarms: only their swarm is drawn
+			if (s.destroyed && commanding) continue; // tactical view: wrecks are clutter
 			if (s.phaseLevel > 0.01f) {
 				// Phased ships are drawn afterwards, see-through.
 				if (ghosts == null) ghosts = new java.util.ArrayList<>();
@@ -406,6 +423,19 @@ public final class Renderer3D {
 			lastTriangles += m.mesh.indexCount() / 3;
 			lastShips++;
 			drawWeapons(s, t, cam);
+		}
+		if (sim.shuttle != null && sim.shuttleModelSource instanceof ShipModel.Source) { // your command shuttle (vanilla's Shuttle Pod)
+			if (sim.shuttleModel == null) sim.shuttleModel = ShipModel.get((ShipModel.Source) sim.shuttleModelSource, t);
+			ShipModel m = (ShipModel) sim.shuttleModel;
+			Vec3 d = sim.shuttle.dir;
+			Vec3 up = new Vec3(Math.abs(d.y) > 0.95f ? 1f : 0f, Math.abs(d.y) > 0.95f ? 0f : 1f, 0f);
+			q.setLookRotation(d, up);
+			model.fromRotationTranslation(q, sim.shuttle.pos.x, sim.shuttle.pos.y, sim.shuttle.pos.z).scaleLocal(t.scaleFor("frigate"));
+			mvp.mul(cam.viewProj, model);
+			shipShader.set("u_model", model).set("u_mvp", mvp).set("u_tint", m.tint).set("u_hitFlash", 0f).set("u_dead", 0f);
+			bindModel(m);
+			m.mesh.draw(GL11.GL_TRIANGLES);
+			lastTriangles += m.mesh.indexCount() / 3;
 		}
 		if (ghosts != null) {
 			GL11.glEnable(GL11.GL_BLEND);
@@ -1120,9 +1150,9 @@ public final class Renderer3D {
 		Vec3 camR = cam.rot.right(new Vec3()), camU = cam.rot.up(new Vec3());
 		fxShader.set("u_mode", 2);
 		GL11.glBegin(GL11.GL_QUADS);
-		boolean rings = false;
+		boolean rings = false, commanding = cam.tacticalBlend() > 0.5f;
 		for (Effect e : sim.combat.effects) {
-			if (!e.visible()) continue;
+			if (!e.visible() || e.wreck && commanding) continue;
 			rings |= e.kind == Effect.Kind.RING;
 			float age = e.age01();
 			float size, alpha;
@@ -1254,12 +1284,20 @@ public final class Renderer3D {
 	}
 
 	/** Reference grid on the player's plane plus altitude stalks, so depth reads in the overview. */
+	/**
+	 * Tactical view: a grid on the ground plane (the command view's focus height, where right clicks
+	 * land), sized to the zoom, and a drop line from every ship to it with a ring where it meets it,
+	 * so height reads at a glance.
+	 */
 	private void drawTacticalAids(Sim sim, float blend) {
 		Ship3D player = sim.viewer();
 		if (player == null) return;
-		float step = 500f, extent = 6000f;
-		float y0 = player.pos.y;
-		float cx = (float) Math.floor(player.pos.x / step) * step, cz = (float) Math.floor(player.pos.z / step) * step;
+		float extent = Math.max(6000f, sim.camera.tacticalDistance() * 1.6f);
+		float step = 500f;
+		while (extent / step > 16f) step *= 2f;
+		float y0 = sim.command.planeY;
+		Vec3 focus = sim.command.focus;
+		float cx = (float) Math.floor(focus.x / step) * step, cz = (float) Math.floor(focus.z / step) * step;
 		fxShader.set("u_mode", 0);
 		GL11.glBegin(GL11.GL_LINES);
 		for (float k = -extent; k <= extent; k += step) {
@@ -1271,12 +1309,17 @@ public final class Renderer3D {
 			GL11.glVertex3f(cx + extent, y0, cz + k);
 		}
 		for (Ship3D s : sim.ships) {
+			if (!s.warship()) continue; // ships only: no wrecks, fighters, drones, swarms, station parts
 			boolean friend = s.owner == player.owner;
-			float a = 0.6f * blend;
+			float a = 0.35f * blend;
 			GL11.glColor4f((friend ? 0.3f : 0.9f) * a, (friend ? 0.9f : 0.3f) * a, (friend ? 0.6f : 0.3f) * a, 1f);
-			GL11.glVertex3f(s.pos.x, s.pos.y, s.pos.z);
-			GL11.glVertex3f(s.pos.x, y0, s.pos.z);
-			float r = Math.max(30f, s.radius * 0.6f);
+			if (Math.abs(s.pos.y - y0) > 40f) {
+				GL11.glVertex3f(s.pos.x, s.pos.y, s.pos.z);
+				GL11.glVertex3f(s.pos.x, y0, s.pos.z);
+			}
+			a = 0.5f * blend;
+			GL11.glColor4f((friend ? 0.3f : 0.9f) * a, (friend ? 0.9f : 0.3f) * a, (friend ? 0.6f : 0.3f) * a, 1f);
+			float r = Math.max(25f, s.radius * 0.35f);
 			for (int i = 0; i < 16; i++) {
 				double a0 = i * Math.PI / 8, a1 = (i + 1) * Math.PI / 8;
 				GL11.glVertex3f(s.pos.x + (float) Math.cos(a0) * r, y0, s.pos.z + (float) Math.sin(a0) * r);

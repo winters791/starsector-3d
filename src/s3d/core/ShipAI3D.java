@@ -1669,9 +1669,11 @@ public final class ShipAI3D {
 			if (ox > 0f) pull.x -= Math.signum(s.pos.x) * Math.min(2f, ox / 500f);
 			if (oz > 0f) pull.z -= Math.signum(s.pos.z) * Math.min(2f, oz / 500f);
 		}
-		float centreY = sim.fightAltitude();
-		float oy = Math.abs(s.pos.y - centreY) - t.aiAltitudeBand;
-		if (oy > 0f) pull.y -= Math.signum(s.pos.y - centreY) * Math.min(2f, oy / 400f);
+		if (!sent) { // an order's point has its own height (tactical view): no pull back to the fight's altitude
+			float centreY = sim.fightAltitude();
+			float oy = Math.abs(s.pos.y - centreY) - t.aiAltitudeBand;
+			if (oy > 0f) pull.y -= Math.signum(s.pos.y - centreY) * Math.min(2f, oy / 400f);
+		}
 		if (pull.lengthSq() > 0f) want.add(pull).normalize();
 	}
 
