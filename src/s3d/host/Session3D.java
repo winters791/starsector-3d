@@ -55,6 +55,12 @@ abstract class Session3D {
 	private static final int[] NUMPAD = {Keyboard.KEY_NUMPAD1, Keyboard.KEY_NUMPAD2, Keyboard.KEY_NUMPAD3, Keyboard.KEY_NUMPAD4,
 			Keyboard.KEY_NUMPAD5, Keyboard.KEY_NUMPAD6, Keyboard.KEY_NUMPAD7};
 	private int groupLogBudget = 30;
+	/** Pause = a tap of Cmd (Mac) or Ctrl (Windows/Linux) on its own: down, nothing else pressed, up. */
+	private boolean pauseTapDown, pauseTapSpoiled;
+	private long pauseTapAt;
+	/** Keys already down when Cmd/Ctrl went down (macOS can leave a key "held" after a Cmd shortcut); those don't spoil the tap. */
+	private final boolean[] heldAtTap = new boolean[Keyboard.KEYBOARD_SIZE], buttonsAtTap = new boolean[3];
+	private static final boolean MAC = String.valueOf(System.getProperty("os.name")).toLowerCase().startsWith("mac");
 	private boolean lastVanillaUi, loggedFirstFrame, shipInfoHidden, shipInfoFailed;
 	private float statRefreshTimer;
 	/** Seconds the 3D scene has stayed up since vanilla called the battle over (see OUTRO_SECONDS). */
@@ -88,6 +94,7 @@ abstract class Session3D {
 			log.warn("S3D: armor settings unavailable, using 0.85 / 0.05", t);
 		}
 		SkillStats.readRules(sim.combat.skills);
+		sim.shuttleModelSource = ShipBridge.hullSprite("graphics/ships/shuttle.png"); // vanilla's Shuttle Pod, the command shuttle
 		engine.getViewport().setExternalControl(true);
 	}
 
@@ -101,6 +108,27 @@ abstract class Session3D {
 
 	/** Session-specific keys; return true if handled. */
 	protected abstract boolean onSessionKey(int key);
+
+	/**
+	 * The command shuttle reached this ship: it's yours now. Default: your old ship gets an AI pilot,
+	 * the new one loses its own.
+	 */
+	protected void transferArrived(Ship3D s) {
+		Ship3D old = sim.player;
+		if (old != null && old != s && !old.destroyed && old.ai == null) old.ai = new s3d.core.ShipAI3D(98);
+		s.ai = null;
+		sim.setPlayer(s);
+	}
+
+	/** Your side's command points left, or -1 if this session has none (the tactical view shows them). */
+	protected int commandPoints() {
+		return -1;
+	}
+
+	/** Orders given in the tactical view (sim.command.issued); the default (no fleet) drops them. */
+	protected void carryOutCommands() {
+		sim.command.issued.clear();
+	}
 
 	/** Keys vanilla must still receive while the 3D view is up (Esc always does). */
 	protected boolean passThrough(int key) {
@@ -157,6 +185,7 @@ abstract class Session3D {
 						+ ", vanillaUi=" + vanillaUi + ", overlay=" + overlay + ")");
 			}
 			if (e.isConsumed()) continue;
+			if (e.isKeyboardEvent() && e.isKeyDownEvent() && !e.isRepeat() && !pauseModifier(e.getEventValue())) pauseTapSpoiled = true; // a shortcut, not a tap
 			if (e.isKeyboardEvent()) {
 				int key = e.getEventValue();
 				if (key == Keyboard.KEY_ESCAPE || vanillaUi || passThrough(key)) continue;
@@ -164,7 +193,7 @@ abstract class Session3D {
 				if (overlay || key == cfg.key("toggleOverlay")) e.consume();
 			} else if (e.isMouseEvent() && overlay && !vanillaUi) {
 				if (e.isMouseScrollEvent()) input.wheelNotches += Math.signum(e.getEventValue());
-				if (e.isRMBDownEvent()) input.toggleShield = true; // vanilla's shield button
+				if (e.isRMBDownEvent() && !sim.camera.tactical) input.toggleShield = true; // vanilla's shield button (tactical view: orders)
 				if (!e.isMouseMoveEvent()) e.consume();
 			}
 		}
@@ -181,7 +210,7 @@ abstract class Session3D {
 		if (key == cfg.key("allStop")) input.allStop = true;
 		else if (key == cfg.key("autoLevel")) input.toggleAutoLevel = true; // the status line shows AUTO-LEVEL
 		else if (key == cfg.key("tactical")) input.toggleTactical = true;
-		else if (key == cfg.key("pause")) togglePause();
+		else if (key != Keyboard.KEY_NONE && key == cfg.key("pause")) togglePause(); // an optional extra key; the Cmd/Ctrl tap always works
 		else if (key == cfg.key("perfHud")) showPerf = !showPerf;
 		else if (cfg.isKey("toggleHud", key)) showHud = !showHud;
 		else if (key == cfg.key("reloadTuning")) reloadTuning();
@@ -216,7 +245,11 @@ abstract class Session3D {
 		input.rollLeft = held("rollLeft");
 		input.rollRight = held("rollRight");
 		input.freeLook = held("freeLook") || Mouse.isButtonDown(2);
-		input.fire = Mouse.isButtonDown(0) && !sim.spectating;
+		input.mouseLeft = Mouse.isButtonDown(0);
+		input.mouseRight = Mouse.isButtonDown(1);
+		input.shift = Keyboard.isKeyDown(Keyboard.KEY_LSHIFT) || Keyboard.isKeyDown(Keyboard.KEY_RSHIFT);
+		input.fire = input.mouseLeft && !sim.spectating && !sim.camera.tactical;
+		pollPauseTap();
 		// Weapon groups 1-7 are polled: vanilla's combat UI can take those key events before we see them.
 		for (int i = 0; i < groupKeyDown.length; i++) {
 			boolean down = Keyboard.isKeyDown(Keyboard.KEY_1 + i) || Keyboard.isKeyDown(NUMPAD[i]);
@@ -304,6 +337,44 @@ abstract class Session3D {
 		input.mouseY = input.screenH * 0.5f;
 	}
 
+	/** Cmd on a Mac, Ctrl elsewhere: the pause key, tapped on its own. */
+	private static boolean pauseModifier(int key) {
+		return MAC ? key == Keyboard.KEY_LMETA || key == Keyboard.KEY_RMETA : key == Keyboard.KEY_LCONTROL || key == Keyboard.KEY_RCONTROL;
+	}
+
+	/**
+	 * Pause on a tap of Cmd (Mac) / Ctrl: pressed and let go within half a second with nothing else
+	 * pressed meanwhile, so Cmd/Ctrl + 1-7 (autofire), Cmd+Tab and the like never pause. Polled, as
+	 * vanilla may take the modifier's own events.
+	 */
+	private void pollPauseTap() {
+		boolean down = MAC ? Keyboard.isKeyDown(Keyboard.KEY_LMETA) || Keyboard.isKeyDown(Keyboard.KEY_RMETA)
+				: Keyboard.isKeyDown(Keyboard.KEY_LCONTROL) || Keyboard.isKeyDown(Keyboard.KEY_RCONTROL);
+		long now = System.nanoTime();
+		if (down && !pauseTapDown) {
+			pauseTapDown = true;
+			pauseTapSpoiled = false;
+			pauseTapAt = now;
+			for (int k = 1; k < heldAtTap.length; k++) heldAtTap[k] = Keyboard.isKeyDown(k);
+			for (int b = 0; b < 3; b++) buttonsAtTap[b] = Mouse.isButtonDown(b); // pausing mid-burst still works
+		}
+		if (down && (otherInputDown(heldAtTap, buttonsAtTap) || !Display.isActive())) pauseTapSpoiled = true;
+		if (!down && pauseTapDown) {
+			pauseTapDown = false;
+			if (!pauseTapSpoiled && now - pauseTapAt < 500_000_000L && Display.isActive()) togglePause();
+		}
+	}
+
+	/** A mouse button or a key besides Cmd/Ctrl that wasn't already down at the press, held right now. */
+	private static boolean otherInputDown(boolean[] already, boolean[] buttons) {
+		for (int b = 0; b < 3; b++) if (Mouse.isButtonDown(b) && !buttons[b]) return true;
+		for (int k = 1; k < Keyboard.KEYBOARD_SIZE; k++) {
+			if (k == Keyboard.KEY_LMETA || k == Keyboard.KEY_RMETA || k == Keyboard.KEY_LCONTROL || k == Keyboard.KEY_RCONTROL) continue;
+			if (Keyboard.isKeyDown(k) && !already[k]) return true;
+		}
+		return false;
+	}
+
 	/** Ctrl (vanilla's autofire modifier) or Cmd held. */
 	private static boolean autofireModifier() {
 		return Keyboard.isKeyDown(Keyboard.KEY_LCONTROL) || Keyboard.isKeyDown(Keyboard.KEY_RCONTROL)
@@ -376,6 +447,7 @@ abstract class Session3D {
 			CursorHider.restore();
 			showVanillaShipInfo(!outro);
 			input.clearPressed();
+			pauseTapDown = false; // a tap needs the 3D view up from press to release
 			if (outro || overlay && !yieldToVanilla() && runWhileVanillaUi()) {
 				handsOff();
 				float dt = engine.isPaused() ? 0f : amount;
@@ -395,6 +467,14 @@ abstract class Session3D {
 		int autofireToggled = input.toggleAutofire;
 		sim.update(input, dt, realDt);
 		input.clearPressed();
+		if (sim.transferArrived != null) {
+			Ship3D to = sim.transferArrived;
+			sim.transferArrived = null;
+			if (sim.command.follow == sim.player) sim.command.follow = to; // the tactical view keeps following you
+			log.info("S3D: command shuttle reached " + to.name);
+			transferArrived(to);
+		}
+		carryOutCommands();
 		if (requested >= 0) logGroup(requested, before);
 		if (autofireToggled >= 0) logAutofire(autofireToggled);
 		afterSim(dt, realDt);
@@ -419,7 +499,7 @@ abstract class Session3D {
 			CursorHider.restore();
 			return;
 		}
-		if (outro) CursorHider.restore(); // vanilla's end-of-battle prompts take the mouse
+		if (outro || sim.camera.tactical) CursorHider.restore(); // vanilla's end-of-battle prompts / pointing at ships
 		else if (cfg.tuning.hideGameCursor) CursorHider.hide();
 		else CursorHider.restore();
 		long t0 = System.nanoTime();
@@ -469,6 +549,7 @@ abstract class Session3D {
 		hud.toast = toast;
 		hud.toastAlpha = Math.max(0f, Math.min(1f, toastTime));
 		VanillaStatus.read(engine, hud.statuses);
+		hud.commandPoints = sim.camera.tactical ? commandPoints() : -1;
 	}
 
 	/** Display name(s) for an action's key(s), e.g. "F10 / \ / G". */

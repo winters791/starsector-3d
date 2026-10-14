@@ -7,7 +7,8 @@ import s3d.math.Vec3;
 /**
  * Third-person camera. The chase pose is anchored to the ship's actual position every frame
  * (so there's no positional jitter) and only the orientation lags, which is what makes turns
- * readable. Free-look orbits around the ship; tactical view pulls far back and looks down.
+ * readable. Free-look orbits around the ship; tactical view pulls far back and looks down at
+ * the command view's focus (see {@link CommandView}), from its heading.
  */
 public final class ChaseCamera {
 
@@ -22,6 +23,9 @@ public final class ChaseCamera {
 
 	public boolean tactical;
 	public float zoomChase = 1f, zoomTactical = 1f;
+	/** The command view's rig (focus, heading, orbit pitch), set by Sim; null = look at the ship from its heading. */
+	CommandView rig;
+	private float lastTacDist = 2600f;
 
 	private final Quat chaseRot = new Quat();
 	private final Quat tacRot = new Quat();
@@ -128,19 +132,24 @@ public final class ChaseCamera {
 		float up = camR * t.camUpRadii * zoomChase;
 		Vec3 chasePos = chaseView.rotate(0f, up, back, new Vec3()).add(s.pos);
 
-		// ---- tactical pose: heading-only (ignores roll/pitch), looking down at the ship ----
+		// ---- tactical pose: looking down at the command view's focus from its heading ----
+		// (without a rig: heading-only, ignoring roll/pitch, looking down at the ship)
 		Vec3 f = s.rot.forward(new Vec3());
 		f.y = 0f;
 		if (f.lengthSq() > 1e-4f) {
 			f.normalize();
 			tacHeading.lerp(f, alpha(dt, 0.6f)).normalize();
 		}
-		Quat tacTarget = new Quat().setLookRotation(tacHeading, new Vec3(0, 1, 0))
-				.mulLocal(new Quat().setAxisAngle(0, 1, 0, orbitYaw))
-				.mulLocal(new Quat().setAxisAngle(1, 0, 0, -(float) Math.toRadians(t.camTacticalPitchDeg) + orbitPitch * 0.5f));
+		Vec3 heading = rig != null ? rig.heading(new Vec3()) : tacHeading;
+		float pitch = rig != null ? rig.pitchOffset : orbitPitch * 0.5f;
+		Quat tacTarget = new Quat().setLookRotation(heading, new Vec3(0, 1, 0))
+				.mulLocal(new Quat().setAxisAngle(0, 1, 0, rig != null ? 0f : orbitYaw))
+				.mulLocal(new Quat().setAxisAngle(1, 0, 0, -(float) Math.toRadians(t.camTacticalPitchDeg) + pitch));
 		tacRot.set(tacTarget);
 		float tacDist = Math.max(t.camTacticalDist, s.radius * 25f) * zoomTactical;
-		Vec3 tacPos = tacRot.rotate(0f, 0f, tacDist, new Vec3()).add(s.pos);
+		lastTacDist = tacDist;
+		if (rig != null && rig.follow != null) rig.focus.set(rig.follow.pos); // where it is this frame (it moved after the rig's update)
+		Vec3 tacPos = tacRot.rotate(0f, 0f, tacDist, new Vec3()).add(rig != null ? rig.focus : s.pos);
 
 		// ---- blend ----
 		blend = FlightModel.smooth(blend, tactical ? 1f : 0f, t.camTransition, dt);
@@ -160,7 +169,7 @@ public final class ChaseCamera {
 
 		this.aspect = aspect;
 		fovYRad = (float) Math.toRadians(t.camFovDeg);
-		near = Math.max(1f, s.radius * 0.05f);
+		near = Math.max(1f, s.radius * 0.05f * (1f - b) + b * 10f);
 		proj.perspective(fovYRad, aspect, near, far);
 		view.view(rot, pos);
 		viewProj.mul(proj, view);
@@ -176,10 +185,40 @@ public final class ChaseCamera {
 	public void zoom(float wheelNotches, Tuning t) {
 		float k = (float) Math.pow(0.9, wheelNotches);
 		if (tactical) {
-			zoomTactical = FlightModel.clamp(zoomTactical * k, 0.3f, 4f);
+			zoomTactical = FlightModel.clamp(zoomTactical * k, 0.2f, 8f);
 		} else {
 			zoomChase = FlightModel.clamp(zoomChase * k, t.camZoomMin, t.camZoomMax);
 		}
+	}
+
+	/** Camera distance of the tactical view (world units), as of the last update. */
+	public float tacticalDistance() {
+		return lastTacDist;
+	}
+
+	/** Screen pixels (origin bottom-left) of a world point; false if it's behind the camera. out = {x, y, depth}. */
+	public boolean toScreen(Vec3 p, float w, float h, float[] out) {
+		float[] clip = new float[4];
+		viewProj.transform(p.x, p.y, p.z, clip);
+		if (clip[3] <= 1e-4f) return false;
+		out[0] = (clip[0] / clip[3] * 0.5f + 0.5f) * w;
+		out[1] = (clip[1] / clip[3] * 0.5f + 0.5f) * h;
+		out[2] = clip[3];
+		return true;
+	}
+
+	/** How big a ship's bounding sphere looks on screen, in pixels. */
+	public float screenRadius(Ship3D s, float screenH) {
+		return s.radius * focalPx(screenH) / Math.max(1f, s.pos.distance(pos));
+	}
+
+	/** World units per screen pixel at the distance of a point (for dragging heights). */
+	public float worldPerPixel(Vec3 at, float screenH) {
+		return Math.max(1f, at.distance(pos)) / focalPx(screenH);
+	}
+
+	private float focalPx(float screenH) {
+		return (screenH * 0.5f) / (float) Math.tan(fovYRad * 0.5);
 	}
 
 	/** 0 = chase view, 1 = tactical view (smoothed). */

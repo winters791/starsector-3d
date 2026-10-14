@@ -8,6 +8,8 @@ public final class PilotInput {
 	public boolean rollLeft, rollRight;
 	public boolean freeLook;
 	public boolean fire;
+	/** Mouse buttons and Shift as held (the tactical view's selection and orders). */
+	public boolean mouseLeft, mouseRight, shift;
 
 	// Pressed this frame
 	public boolean allStop, toggleAutoLevel, toggleTactical, togglePause;

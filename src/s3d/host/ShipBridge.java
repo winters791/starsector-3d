@@ -131,6 +131,7 @@ final class ShipBridge {
 		s.radius = s.baseRadius;
 		s.sizeClass = sizeClass(ship);
 		s.hostRef = ship;
+		s.ally = ship.isAlly();
 
 		s.params = readFlightParams(ship);
 		s.baseParams = new FlightParams(s.params.maxSpeed, s.params.accel, s.params.decel, s.params.maxTurnRateDeg, s.params.turnAccelDeg);
@@ -758,6 +759,17 @@ final class ShipBridge {
 		java.util.List<String> layers = new java.util.ArrayList<>(3);
 		for (String p : new String[] {under, base, gun}) if (p != null && !p.isEmpty()) layers.add(p);
 		return layers.toArray(new String[0]);
+	}
+
+	/** A hull sprite centred, for things the 3D side draws without a vanilla ship (the command shuttle); null if missing. */
+	static ShipModel.Source hullSprite(String path) {
+		try {
+			SpriteImage img = loadSprite(path);
+			return new ShipModel.Source(path, img, img.w * 0.5f, img.h * 0.5f);
+		} catch (Throwable t) {
+			log.warn("S3D: no sprite " + path + " (" + t + ")");
+			return null;
+		}
 	}
 
 	/** Turret sprites pivot on their centre; hardpoint sprites on a point a quarter up from the back. */

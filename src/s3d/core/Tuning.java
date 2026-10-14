@@ -304,18 +304,25 @@ public final class Tuning implements Cloneable {
 	/** 3D units per vanilla map unit when mapping positions and map edges between 2D and 3D. */
 	public float battleMapScale = 0.5f;
 	/**
-	 * How far from the centre line each side enters (3D units; at most 85% of the way to its map edge).
-	 * User (2026-10-12): about 30 s of runway before the fighting. Measured with bench fleets: 2700
-	 * (5400 apart) gives first shots after 22-37 s, frigates to capitals; it was 0.4 of the half-map
-	 * (1800 on an 18000 map), first shots after 10-20 s.
+	 * The 3D battlefield is this many times longer along the line between the fleets (z) than vanilla's
+	 * map at mapScale; across (x) it stays at mapScale. User (2026-10-14): twice as long.
 	 */
-	public float battleDeployDistance = 2700f;
+	public float battleLengthMult = 2f;
+	/**
+	 * Ships enter at their own edge, this far inside it (3D units) plus their radius. User (2026-10-14):
+	 * start from the edges (was deployDistance 2700 from the centre line).
+	 */
+	public float battleEdgeMargin = 300f;
 	/** Squeezes vanilla's sideways deployment spread (1 = vanilla's spread at mapScale). */
 	public float battleDeploySpread = 0.5f;
 	/** Spread of entry altitudes (+/- units) so fleets don't arrive on one flat plane. */
 	public float battleDeployAltitude = 250f;
-	/** Seconds after your ship is destroyed before command passes to your next ship. */
-	public float battleTransferDelay = 3f;
+	/**
+	 * Command shuttle speed (3D units/s) when you transfer command to another ship (tactical view
+	 * ring). At least 1.5x the target's own speed, so it always catches up. Command never passes to
+	 * another ship by itself (user, 2026-10-14), not even when yours is destroyed.
+	 */
+	public float battleShuttleSpeed = 700f;
 	/** Station battles (and ships with modules) in 3D; false = those battles stay vanilla 2D. */
 	public boolean battleStations = true;
 	/**
@@ -407,7 +414,7 @@ public final class Tuning implements Cloneable {
 		keys.put("autoLevel", "L");
 		keys.put("freeLook", "LMENU");
 		keys.put("tactical", "T");
-		keys.put("pause", "P");
+		// Pause is a tap of Cmd (Mac) / Ctrl (elsewhere); "pause" here can add a key, none by default.
 		keys.put("prevHull", "LBRACKET");
 		keys.put("nextHull", "RBRACKET");
 		keys.put("reloadTuning", "K");
@@ -416,7 +423,7 @@ public final class Tuning implements Cloneable {
 		keys.put("target", "R");
 		keys.put("resetTargets", "N");
 		keys.put("incomingFire", "B");
-		keys.put("toggleHud", "F10,BACKSLASH,G");
+		keys.put("toggleHud", "F11"); // vanilla's Toggle UI default
 		keys.put("handBack", "F9");
 		keys.put("vent", "V");
 		keys.put("wings", "Z");
@@ -629,10 +636,11 @@ public final class Tuning implements Cloneable {
 		if (bt != null) {
 			t.battleEnabled = bt.optBoolean("enabled", t.battleEnabled);
 			t.battleMapScale = num(bt, "mapScale", t.battleMapScale);
-			t.battleDeployDistance = num(bt, "deployDistance", t.battleDeployDistance);
+			t.battleLengthMult = num(bt, "lengthMult", t.battleLengthMult);
+			t.battleEdgeMargin = num(bt, "edgeMargin", t.battleEdgeMargin);
 			t.battleDeploySpread = num(bt, "deploySpread", t.battleDeploySpread);
 			t.battleDeployAltitude = num(bt, "deployAltitude", t.battleDeployAltitude);
-			t.battleTransferDelay = num(bt, "transferDelay", t.battleTransferDelay);
+			t.battleShuttleSpeed = num(bt, "shuttleSpeed", t.battleShuttleSpeed);
 			t.battleStations = bt.optBoolean("stations", t.battleStations);
 			t.stationSpinDeg = num(bt, "stationSpinDeg", t.stationSpinDeg);
 			t.battleCaptureRadius = num(bt, "captureRadius", t.battleCaptureRadius);

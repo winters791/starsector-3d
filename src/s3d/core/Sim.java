@@ -14,6 +14,8 @@ public final class Sim {
 	public final List<Objective3D> objectives = new ArrayList<>();
 	public Ship3D player;
 	public final ChaseCamera camera = new ChaseCamera();
+	/** Tactical view (T): free camera, ship selection and orders; your ship flies itself meanwhile. */
+	public final CommandView command = new CommandView();
 	public final ShipControls controls = new ShipControls();
 	public final Combat combat = new Combat();
 	/** Vent clouds and overload arcs (looks only, own random numbers). */
@@ -89,7 +91,64 @@ public final class Sim {
 	 */
 	public boolean spectating;
 	public Ship3D viewShip;
-	private Ship3D spectatorPilot;
+	/** The AI pilot flying your ship while you spectate or command (T), or null. */
+	private ShipAI3D autopilot;
+	private Ship3D autopiloted;
+
+	/** Your ship flies itself: you're spectating, in the tactical view giving orders, or your command shuttle is under way. */
+	public boolean autopilot() {
+		return spectating || camera.tactical || shuttle != null;
+	}
+
+	// ---- transfer of command (vanilla's command shuttle, tactical view ring) ----
+
+	/** The command shuttle carrying you to another of your ships. */
+	public static final class Shuttle {
+		public final Vec3 pos = new Vec3(), dir = new Vec3(0f, 0f, -1f);
+		/** Where it's going; null after that ship was lost (it waits for a new one). */
+		public Ship3D to;
+	}
+
+	/** Your command shuttle while it flies (null otherwise). You can't steer it; your old ship flies itself. */
+	public Shuttle shuttle;
+	/** The shuttle reached this ship: the host hands it to you and clears this. */
+	public Ship3D transferArrived;
+	/** The shuttle's look: a sprite source from the host; the renderer keeps the built mesh in shuttleModel. */
+	public Object shuttleModelSource, shuttleModel;
+
+	/**
+	 * Transfer command to one of your ships: a shuttle leaves your ship (or its wreck, or from where
+	 * a shuttle already is) and flies to it; you take over when it arrives.
+	 */
+	public void startTransfer(Ship3D to) {
+		if (to == null || player == null || to == player || !to.warship() || to.ally || to.fixedPart() || to.owner != player.owner || !ships.contains(to)) return;
+		if (shuttle == null) {
+			shuttle = new Shuttle();
+			shuttle.pos.set(player.pos);
+			Vec3 d = new Vec3(to.pos).sub(player.pos);
+			if (d.lengthSq() > 1f) shuttle.dir.set(d).normalize();
+		}
+		shuttle.to = to;
+	}
+
+	private void stepShuttle(float dt) {
+		Shuttle sh = shuttle;
+		if (sh == null || dt <= 0f) return;
+		Ship3D t = sh.to;
+		if (t != null && (!t.warship() || !ships.contains(t))) sh.to = t = null; // lost on the way: wait for another
+		if (t == null) return;
+		float speed = Math.max(tuning.battleShuttleSpeed, t.speed() * 1.5f);
+		Vec3 d = new Vec3(t.pos).sub(sh.pos);
+		float dist = d.length();
+		if (dist <= t.radius * 0.8f + speed * dt) {
+			transferArrived = t;
+			shuttle = null;
+			return;
+		}
+		d.scale(1f / dist);
+		sh.dir.lerp(d, Math.min(1f, dt * 4f)).normalize();
+		sh.pos.addScaled(sh.dir, speed * dt);
+	}
 
 	/** Ship the camera and HUD are about: the watched ship while spectating, else yours. */
 	public Ship3D viewer() {
@@ -111,21 +170,42 @@ public final class Sim {
 			viewShip = player;
 			target = autoTarget = aimTarget = null;
 			hasLead = assistLocked = false;
-			ensureSpectatorPilot();
 		} else {
-			if (spectatorPilot != null && spectatorPilot == player) player.ai = null;
-			spectatorPilot = null;
 			viewShip = null;
-			if (player != null) camera.glideTo(player, 0.6f);
+			if (player != null && !camera.tactical) camera.glideTo(player, 0.6f);
 		}
+		updateAutopilot();
 	}
 
-	/** While spectating your ship needs a pilot (also after command passes to another ship). */
-	private void ensureSpectatorPilot() {
-		if (player == null || player.destroyed || player.ai != null) return;
-		player.ai = new ShipAI3D(97);
-		player.ai.homeDir.set(0f, 0f, player.owner == 0 ? 1f : -1f);
-		spectatorPilot = player;
+	/**
+	 * While you spectate or command your ship needs a pilot (also after command passes to another
+	 * ship); when you take the stick back, the pilot goes.
+	 */
+	private void updateAutopilot() {
+		if (autopiloted != null && (autopiloted != player || !autopilot())) {
+			if (autopiloted.ai == autopilot) autopiloted.ai = null; // only the one we put there (not after a transfer)
+			autopiloted = null;
+			autopilot = null;
+		}
+		if (!autopilot() || player == null || player.destroyed || player.ai != null) return;
+		autopilot = new ShipAI3D(97);
+		autopilot.homeDir.set(0f, 0f, player.owner == 0 ? 1f : -1f);
+		player.ai = autopilot;
+		autopiloted = player;
+	}
+
+	/** Tactical view on or off (T). */
+	private void setTactical(boolean on) {
+		if (on == camera.tactical) return;
+		camera.tactical = on;
+		if (on) {
+			command.enter(viewer());
+			target = autoTarget = aimTarget = null; // the autopilot picks its own
+			hasLead = assistLocked = false;
+		} else {
+			command.deactivate();
+		}
+		updateAutopilot();
 	}
 
 	/** Next / previous ship on your side (not fighters) for the spectator camera. */
@@ -158,6 +238,7 @@ public final class Sim {
 	public Sim(Tuning tuning) {
 		this.tuning = tuning;
 		controls.autoLevel = tuning.autoLevelDefault;
+		camera.rig = command;
 	}
 
 	/** Wall time of each phase of the last update, for benchmarks; null (the default) = not measured. */
@@ -233,13 +314,14 @@ public final class Sim {
 		if (in.togglePause) paused = !paused;
 		if (in.toggleAutoLevel) controls.autoLevel = !controls.autoLevel;
 		if (in.toggleSpectate) setSpectating(!spectating);
+		if (in.toggleTactical) setTactical(!camera.tactical); // spectating too: starts over the watched ship
+		updateAutopilot();
 		if (spectating) {
-			ensureSpectatorPilot();
 			if (viewShip == null || !ships.contains(viewShip)) cycleView(1);
 			if (in.cycleView != 0) cycleView(in.cycleView);
 		}
-		if (in.toggleTactical) camera.tactical = !camera.tactical; // spectating too: tactical view of the watched ship
-		if (in.wheelNotches != 0f) camera.zoom(in.wheelNotches, tuning);
+		if (camera.tactical) command.update(this, in, camera, realDt, in.shift);
+		if (in.wheelNotches != 0f && !(camera.tactical && command.wheel(in.wheelNotches, camera))) camera.zoom(in.wheelNotches, tuning); // tactical, right button down: the order's height
 		if (in.resetTargets) resetTargets();
 		if (in.toggleIncoming) incomingFire = !incomingFire;
 		combat.world = ships;
@@ -273,7 +355,7 @@ public final class Sim {
 		// Your phase cloak / temporal shell slows the rest of the battle instead of speeding you up (as in
 		// vanilla): world time runs at 1/timeMult and your ship at normal speed. AI ships with the same
 		// systems simply run faster than the world.
-		worldTimeScale = player != null && !player.destroyed && !spectating && player.timeMult > 1f ? 1f / player.timeMult : 1f;
+		worldTimeScale = player != null && !player.destroyed && !autopilot() && player.timeMult > 1f ? 1f / player.timeMult : 1f;
 		simDt *= worldTimeScale;
 		stepFlux(in, simDt);
 		fx.step(this, simDt);
@@ -282,9 +364,9 @@ public final class Sim {
 			profile.worstShipNs = 0L;
 			profile.worstShip = null;
 		}
-		if (player != null && !player.destroyed && !spectating) FlightModel.step(player, controls, tuning, simDt * player.timeMult);
+		if (player != null && !player.destroyed && !autopilot()) FlightModel.step(player, controls, tuning, simDt * player.timeMult);
 		for (Ship3D s : ships) {
-			if (s == player && !s.destroyed && !spectating) continue;
+			if (s == player && !s.destroyed && !autopilot()) continue;
 			if (s.destroyed) {
 				// Wreck: keeps drifting, tumbles slowly.
 				s.pos.addScaled(s.vel, simDt);
@@ -303,6 +385,7 @@ public final class Sim {
 			}
 		}
 		placeFixedParts(simDt);
+		stepShuttle(simDt);
 		time += simDt;
 		lap = lap(3, lap);
 		if (tuning.collisions) resolveCollisions(simDt);
@@ -312,21 +395,25 @@ public final class Sim {
 		if (spectating && viewer() != null) {
 			float lookX = (in.mouseX - in.screenW * 0.5f) / (in.screenW * 0.5f);
 			float lookY = (in.mouseY - in.screenH * 0.5f) / (in.screenH * 0.5f);
-			camera.update(viewer(), tuning, Math.min(realDt, 0.1f), in.freeLook, lookX, lookY, in.screenW / in.screenH);
+			camera.update(viewer(), tuning, Math.min(realDt, 0.1f), in.freeLook && !camera.tactical, lookX, lookY, in.screenW / in.screenH);
 		} else if (player != null) {
 			float lookX = (in.mouseX - in.screenW * 0.5f) / (in.screenW * 0.5f);
 			float lookY = (in.mouseY - in.screenH * 0.5f) / (in.screenH * 0.5f);
-			camera.update(player, tuning, Math.min(realDt, 0.1f), in.freeLook, lookX, lookY, in.screenW / in.screenH);
-
-			if (in.selectTarget) target = pickTarget(in);
-			if (in.selectGroup >= 0 && in.selectGroup < player.groups.size()) player.selectedGroup = in.selectGroup;
-			if (in.toggleAutofire >= 0 && in.toggleAutofire < player.groups.size()) {
-				WeaponGroup3D g = player.groups.get(in.toggleAutofire);
-				g.autofire = !g.autofire;
+			camera.update(player, tuning, Math.min(realDt, 0.1f), in.freeLook && !camera.tactical, lookX, lookY, in.screenW / in.screenH);
+			if (camera.tactical) {
+				// Commanding: the autopilot flies and fights; your keys move the camera (CommandView).
+				if (in.selectGroup >= 0 && in.selectGroup < player.groups.size()) player.selectedGroup = in.selectGroup;
+			} else {
+				if (in.selectTarget) target = pickTarget(in);
+				if (in.selectGroup >= 0 && in.selectGroup < player.groups.size()) player.selectedGroup = in.selectGroup;
+				if (in.toggleAutofire >= 0 && in.toggleAutofire < player.groups.size()) {
+					WeaponGroup3D g = player.groups.get(in.toggleAutofire);
+					g.autofire = !g.autofire;
+				}
+				if (target != null && (target.destroyed || !ships.contains(target))) target = null;
+				updateAiming(in);
+				if (!player.destroyed) stepPlayerWeapons(in.fire, simDt * player.timeMult);
 			}
-			if (target != null && (target.destroyed || !ships.contains(target))) target = null;
-			updateAiming(in);
-			if (!player.destroyed) stepPlayerWeapons(in.fire && !camera.tactical, simDt * player.timeMult);
 		}
 		if (incomingFire) stepIncomingFire(simDt);
 		lap = lap(5, lap);
@@ -352,7 +439,7 @@ public final class Sim {
 	 * have run, so the clock is last frame's.
 	 */
 	private void stepSystems(PilotInput in, float dt) {
-		if (player != null && !player.destroyed && !spectating) {
+		if (player != null && !player.destroyed && !autopilot()) {
 			if (in.useSystem && player.system != null) player.system.activate(player);
 			if (in.toggleShield && player.cloak != null) {
 				player.cloak.activate(player);
@@ -401,7 +488,7 @@ public final class Sim {
 	 * free-looking, wherever the camera looks).
 	 */
 	private void stepFlux(PilotInput in, float dt) {
-		if (player != null && player.flux != null && !player.destroyed) {
+		if (player != null && player.flux != null && !player.destroyed && !autopilot()) {
 			if (in.toggleShield && player.flux.hasShield() && !player.flux.disabled()) {
 				combat.sounds.play(player.flux.shieldOn ? "shield_lower" : "shield_raise", player.pos, 0.8f);
 			}
@@ -422,10 +509,11 @@ public final class Sim {
 			}
 			Vec3 desired = null;
 			if (f.type == ShieldFlux.Type.OMNI) {
-				if (s == player && in.freeLook) {
+				boolean flown = s == player && !autopilot(); // your hands on it (not spectating or commanding)
+				if (flown && in.freeLook) {
 					camera.rot.forward(want);
 				} else if (threat(s, want) <= 0f) {
-					Ship3D t = s == player ? aimTarget : s.ai != null ? s.ai.target : null;
+					Ship3D t = flown ? aimTarget : s.ai != null ? s.ai.target : null;
 					if (t != null) want.set(t.pos).sub(s.pos);
 					else s.rot.forward(want);
 				}

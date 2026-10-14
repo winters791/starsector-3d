@@ -23,6 +23,8 @@ public final class Effect {
 	public float grow = 1f;
 	public String sound;
 	public float soundVolume = 1f;
+	/** A burning wreck's flame or pop (left out of the tactical view, like the wreck). */
+	public boolean wreck;
 
 	public Effect(Kind kind, Vec3 at, float size, float life) {
 		this.kind = kind;
