@@ -115,8 +115,8 @@ final class BattleSession extends Session3D {
 	/** Twins made this frame, placed once their whole structure is in: stations, then free ships. */
 	private final List<Ship3D> newStations = new ArrayList<>(), newShips = new ArrayList<>();
 
-	/** 3D units per vanilla map unit: across (x) and along the line between the fleets (z, battle.lengthMult times longer). */
-	private final float mapW, mapH, scale, scaleZ, edgeZ;
+	/** 3D units per vanilla map unit: sizes (scale), across (x, battle.widthMult) and along the line between the fleets (z, battle.lengthMult). */
+	private final float mapW, mapH, scale, scaleX, scaleZ, edgeZ;
 	private int deployed, graves, parkedCount, launches, landings, fighterLosses, fightersDismissed;
 	private float fighterLogTimer = 10f, manoeuvreLogTimer = 20f;
 	private boolean handedBack, handBackArmed;
@@ -167,9 +167,10 @@ final class BattleSession extends Session3D {
 		mapW = engine.getMapWidth();
 		mapH = engine.getMapHeight();
 		scale = cfg.tuning.battleMapScale;
+		scaleX = scale * cfg.tuning.battleWidthMult;
 		scaleZ = scale * cfg.tuning.battleLengthMult;
 		edgeZ = mapH * 0.5f * scaleZ;
-		sim.arenaHalfX = mapW * 0.5f * scale;
+		sim.arenaHalfX = mapW * 0.5f * scaleX;
 		sim.arenaHalfZ = edgeZ;
 		BuildPicker.clear();
 		managePuppets(0f);
@@ -270,8 +271,8 @@ final class BattleSession extends Session3D {
 			sim.addShip(s); // applies the class scale; the placement below needs the real radius
 			float side = s.owner == 0 ? 1f : -1f;
 			Vector2f loc = ship.getLocation();
-			float halfW = mapW * 0.5f * scale * 0.9f;
-			float x = Math.max(-halfW, Math.min(halfW, loc.x * scale * cfg.tuning.battleDeploySpread));
+			float halfW = mapW * 0.5f * scaleX * 0.9f;
+			float x = Math.max(-halfW, Math.min(halfW, loc.x * scaleX * cfg.tuning.battleDeploySpread));
 			float y = (((n * 37) % 5) - 2) * 0.5f * cfg.tuning.battleDeployAltitude;
 			float z = side * Math.max(edgeZ * 0.5f, edgeZ - cfg.tuning.battleEdgeMargin - s.radius); // from its own edge
 			s.pos.set(x, y, z);
@@ -310,7 +311,7 @@ final class BattleSession extends Session3D {
 			s.spinRate = spins ? (float) Math.toRadians(cfg.tuning.stationSpinDeg) : 0f;
 			sim.addShip(s);
 			Vector2f loc = ship.getLocation();
-			s.pos.set(Math.max(-sim.arenaHalfX, Math.min(sim.arenaHalfX, loc.x * scale)), 0f, Math.max(-edgeZ, Math.min(edgeZ, -loc.y * scaleZ)));
+			s.pos.set(Math.max(-sim.arenaHalfX, Math.min(sim.arenaHalfX, loc.x * scaleX)), 0f, Math.max(-edgeZ, Math.min(edgeZ, -loc.y * scaleZ)));
 			s.rot.setAxisAngle(0f, 1f, 0f, (float) Math.toRadians(ship.getFacing() - 90f)); // vanilla facing -> 3D nose
 			s.vel.set(0f, 0f, 0f);
 			s.ai = new ShipAI3D(n);
@@ -726,7 +727,7 @@ final class BattleSession extends Session3D {
 
 	private Vector2f to2D(Vec3 pos, Vector2f out) {
 		float hx = mapW * 0.5f - 300f, hy = mapH * 0.5f - 300f;
-		out.set(Math.max(-hx, Math.min(hx, pos.x / scale)), Math.max(-hy, Math.min(hy, -pos.z / scaleZ)));
+		out.set(Math.max(-hx, Math.min(hx, pos.x / scaleX)), Math.max(-hy, Math.min(hy, -pos.z / scaleZ)));
 		return out;
 	}
 
@@ -927,7 +928,7 @@ final class BattleSession extends Session3D {
 				Vector2f loc = ((AssignmentTargetAPI) target).getLocation();
 				if (loc != null) {
 					Vec3 exact = waypointPoints.get(heightKey(loc));
-					at = exact != null ? new Vec3(exact) : new Vec3(loc.x * scale, 0f, -loc.y * scaleZ);
+					at = exact != null ? new Vec3(exact) : new Vec3(loc.x * scaleX, 0f, -loc.y * scaleZ);
 				}
 			}
 			float holdR = cfg.tuning.battleHoldRadius * scale;
@@ -1154,7 +1155,7 @@ final class BattleSession extends Session3D {
 				int owner = side(o.getOwner());
 				if (v == null) {
 					v = new Objective3D(o.getType(), o.getDisplayName() != null ? o.getDisplayName() : o.getType());
-					v.pos.set(o.getLocation().x * scale, 0f, -o.getLocation().y * scaleZ);
+					v.pos.set(o.getLocation().x * scaleX, 0f, -o.getLocation().y * scaleZ);
 					v.radius = cfg.tuning.battleCaptureRadius * scale;
 					v.owner = owner;
 					v.hostRef = o;

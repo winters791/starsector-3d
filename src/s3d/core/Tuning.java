@@ -305,9 +305,11 @@ public final class Tuning implements Cloneable {
 	public float battleMapScale = 0.5f;
 	/**
 	 * The 3D battlefield is this many times longer along the line between the fleets (z) than vanilla's
-	 * map at mapScale; across (x) it stays at mapScale. User (2026-10-14): twice as long.
+	 * map at mapScale. User (2026-10-14): twice as long, later cut by a quarter to 1.5.
 	 */
-	public float battleLengthMult = 2f;
+	public float battleLengthMult = 1.5f;
+	/** The 3D battlefield is this many times wider across (x) than vanilla's map at mapScale. User (2026-10-14): 25% wider. */
+	public float battleWidthMult = 1.25f;
 	/**
 	 * Ships enter at their own edge, this far inside it (3D units) plus their radius. User (2026-10-14):
 	 * start from the edges (was deployDistance 2700 from the centre line).
@@ -637,6 +639,7 @@ public final class Tuning implements Cloneable {
 			t.battleEnabled = bt.optBoolean("enabled", t.battleEnabled);
 			t.battleMapScale = num(bt, "mapScale", t.battleMapScale);
 			t.battleLengthMult = num(bt, "lengthMult", t.battleLengthMult);
+			t.battleWidthMult = num(bt, "widthMult", t.battleWidthMult);
 			t.battleEdgeMargin = num(bt, "edgeMargin", t.battleEdgeMargin);
 			t.battleDeploySpread = num(bt, "deploySpread", t.battleDeploySpread);
 			t.battleDeployAltitude = num(bt, "deployAltitude", t.battleDeployAltitude);

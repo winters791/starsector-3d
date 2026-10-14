@@ -206,7 +206,8 @@
 	"battle":{
 		"enabled":true,
 		"mapScale":0.5,
-		"lengthMult":2,
+		"lengthMult":1.5,
+		"widthMult":1.25,
 		"edgeMargin":300,
 		"deploySpread":0.5,
 		"deployAltitude":250,
