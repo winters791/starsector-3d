@@ -8,3 +8,6 @@ jars/
 # Python bytecode (src-art scripts)
 __pycache__/
 *.pyc
+
+# Local working notes
+/NOTES.md
