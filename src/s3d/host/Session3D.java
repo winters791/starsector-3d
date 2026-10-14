@@ -27,7 +27,7 @@ import s3d.render.Renderer3D;
 import s3d.render.ShipModel;
 
 /**
- * What every 3D battle has in common, whether it's the sandbox mission or a real campaign battle:
+ * What every 3D battle has in common, campaign battle, mission or simulator:
  * the 3D sim, player input, rendering over the hidden vanilla battle, the HUD, the perf readout,
  * yielding to vanilla menus, and tuning reloads. Subclasses decide which ships exist and what
  * happens to the vanilla puppets.
