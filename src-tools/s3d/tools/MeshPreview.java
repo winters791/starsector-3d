@@ -100,6 +100,11 @@ public final class MeshPreview {
 			if (!pbuffer) Display.destroy();
 			return;
 		}
+		if ("controls".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=controls ./build.sh preview
+			controlsScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
 		if ("retro".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=retro ./build.sh preview
 			retroScene(game, hulls, t, renderer, dir);
 			if (!pbuffer) Display.destroy();
@@ -1191,6 +1196,62 @@ public final class MeshPreview {
 	 * point up high, one escorting you, the cursor on an enemy), tactical_height.png (dragging a move
 	 * order's height), tactical_ring.png (the ring of other orders, AVOID picked).
 	 */
+	/**
+	 * The controls card over a paused fight at the game's 1920x1200: controls_flight.png (flight face)
+	 * and controls_command.png (the command view's face).
+	 */
+	private static void controlsScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 1920, h = 1200;
+		int[] target = createCaptureTarget(w, h);
+		Sim sim = new Sim(t);
+		sim.arenaHalfX = 6000f;
+		sim.arenaHalfZ = 5000f;
+		String[][] ships = {{"eagle", "eagle_Assault"}, {"wolf", "wolf_Assault"}, {"enforcer", "enforcer_Assault"}, {"lasher", "lasher_Standard"}};
+		Ship3D player = null;
+		for (int i = 0; i < ships.length; i++) {
+			GameData.Hull hull = hulls.get(ships[i][0]);
+			Ship3D s = makeShip(game, hull, t, ships[i][0] + i);
+			s.owner = i < 2 ? 0 : 1;
+			s.name = ships[i][0];
+			sim.addShip(s);
+			s.volume = ShipModel.geometry((ShipModel.Source) s.modelSource, t).volume;
+			arm(game, s, ships[i][0], ships[i][1]);
+			s.flux = CombatBench.flux(hull, t);
+			s.armor = new s3d.core.ArmorShell(400f);
+			s.hullMax = s.hull = 5000f;
+			s.pos.set(-500f + 600f * (i % 2), 120f * i - 150f, s.owner == 0 ? 300f * i : -1500f - 300f * i);
+			if (s.owner == 1) s.rot.setAxisAngle(0, 1, 0, 2.8f);
+			if (i == 0) player = s;
+		}
+		sim.setPlayer(player);
+		sim.target = sim.ships.get(2);
+		PilotInput in = new PilotInput();
+		in.screenW = w;
+		in.screenH = h;
+		in.mouseX = w * 0.5f;
+		in.mouseY = h * 0.5f;
+		float dt = 1f / 60f;
+		for (int i = 0; i < 40; i++) {
+			sim.update(in, dt, dt);
+			in.clearPressed();
+		}
+		sim.paused = true;
+		HudRenderer.Info info = new HudRenderer.Info();
+		info.controls = 1f;
+		renderer.renderScene(sim, w, h, target[0]);
+		renderer.renderHud(sim, in, info, w, h);
+		ImageIO.write(read(w, h), "png", new File(dir, "controls_flight.png"));
+		in.toggleTactical = true;
+		sim.update(in, dt, dt);
+		in.clearPressed();
+		in.toggleTactical = false;
+		for (int i = 0; i < 90; i++) sim.update(in, dt, dt);
+		renderer.renderScene(sim, w, h, target[0]);
+		renderer.renderHud(sim, in, info, w, h);
+		ImageIO.write(read(w, h), "png", new File(dir, "controls_command.png"));
+		System.out.println("wrote controls_flight.png, controls_command.png");
+	}
+
 	private static void tacticalScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
 		int w = 1280, h = 800;
 		int[] target = createCaptureTarget(w, h);

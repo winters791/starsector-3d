@@ -92,18 +92,27 @@ public final class Renderer3D {
 			log.warn("S3D: vanilla button font unavailable, the fleet buttons use the HUD font", t);
 		}
 		hud = new HudRenderer(fxShader, font, victor, insignia);
+		try { // the controls card: vanilla's title, button and body fonts
+			controlsCard = new ControlsCard(fxShader, BitmapFont.load("graphics/fonts/orbitron20aabold.fnt"),
+					BitmapFont.load("graphics/fonts/orbitron12bold.fnt"), BitmapFont.load("graphics/fonts/insignia15LTaa.fnt"));
+		} catch (Throwable t) {
+			log.warn("S3D: vanilla UI fonts unavailable, no controls card", t);
+		}
 		whiteTex = TextureUtil.upload(new int[] {0xFFFFFFFF}, 1, 1, false, 1f);
 		initialized = true;
 		log.info("S3D: renderer initialised");
 	}
 
 	/** HUD overlay, then the holograms the HUD asked for (they need the 3D mesh): your ship's and the target's. */
+	private ControlsCard controlsCard;
+
 	public void renderHud(Sim sim, s3d.core.PilotInput in, HudRenderer.Info info, int w, int h) {
 		hud.render(sim, in, info, w, h);
 		for (HudRenderer.Holo req : new HudRenderer.Holo[] {hud.ownHolo, hud.targetHolo}) {
 			if (req.ship != null) renderHologram(req.ship, sim.tuning, req, sim.time, w, h);
 			req.ship = null;
 		}
+		if (controlsCard != null && info.controls > 0f) controlsCard.render(sim, info.controls, w, h);
 	}
 
 	/** Whole screen black at this opacity, over everything drawn so far (the scene fading in at battle start). */

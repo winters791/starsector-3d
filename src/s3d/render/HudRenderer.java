@@ -39,6 +39,8 @@ public final class HudRenderer {
 		public final List<Status> statuses = new ArrayList<>();
 		/** Your side's command points left (tactical view status line), or -1 if there are none to show. */
 		public int commandPoints = -1;
+		/** The controls card's opacity (0 = hidden); its face follows the view (flight / command). */
+		public float controls;
 	}
 
 	/** One entry of vanilla's status list: its icon sprite, title and data lines, debuff, fade. */
