@@ -63,6 +63,8 @@ public final class Ship3D {
 	public HullVolume volume;
 	public boolean destroyed;
 	public float armorTakenMult = 1f, hullTakenMult = 1f;
+	/** Skill and hullmod combat modifiers (damage dealt and taken, armor rules, gunnery), kept live by the host. */
+	public final CombatStats stats = new CombatStats();
 	/** Brief glow after being hit (render only). */
 	public float hitFlash;
 	/** Sandbox-only scripted motion (dumb target); null for piloted ships. */
@@ -328,6 +330,8 @@ public final class Ship3D {
 		resetSystemEffects();
 		clock = 1f;
 		repairRateMult = 1f;
+		stats.regenDone = 0f;
+		stats.sinceDamageControl = Float.MAX_VALUE;
 		if (fragments != null) fragments.count = fragments.size;
 	}
 

@@ -368,6 +368,7 @@ public final class Sim {
 		for (Ship3D s : ships) {
 			if (s.destroyed) continue;
 			float sdt = dt * s.clock;
+			s.stats.step(s, sdt, combat.skills); // Damage Control's wait, Combat Endurance's regrowth
 			if (s.system != null) {
 				s.system.step(s, this, sdt);
 				systemSounds(s, s.system);
@@ -790,6 +791,7 @@ public final class Sim {
 		Vec3 lead = aimLead;
 		if (m.spec.pd) {
 			float best = Float.MAX_VALUE;
+			Missile3D bestMs = null;
 			for (Missile3D ms : combat.missiles) {
 				if (ms.owner == self.owner || ms.flamedOut()) continue;
 				if (!Combat.intercept(mw, self.vel, ms.pos, ms.vel, speed, lead)) continue;
@@ -797,10 +799,14 @@ public final class Sim {
 				float d = ms.pos.distance(mw);
 				if (d < best) {
 					best = d;
+					bestMs = ms;
 					aimOut.set(lead);
 				}
 			}
-			if (best < Float.MAX_VALUE) return true;
+			if (bestMs != null) {
+				underLead(self, m, bestMs.pos, aimOut);
+				return true;
+			}
 		}
 		// PD goes for fighters next (and only fighters if PD-only); ships' other guns prefer ships and
 		// only turn on fighters when no ship is in reach. Fighters' own guns shoot whatever is closest.
@@ -824,7 +830,20 @@ public final class Sim {
 				}
 			}
 		}
+		if (targetOut[0] != null) underLead(self, m, targetOut[0].pos, aimOut);
 		return targetOut[0] != null;
+	}
+
+	/**
+	 * Vanilla's autofire leads by the true lead over a factor: 2 with no target-leading skill (half
+	 * the lead), 1 with Gunnery Implants, and weapons with their own leading bonus or PD with Integrated
+	 * Point Defense AI in between or exact (CombatStats.leadFactor). Pulls aim back toward where the
+	 * target is now by that much.
+	 */
+	private void underLead(Ship3D self, WeaponMount m, Vec3 targetPos, Vec3 aim) {
+		float f = self.stats.leadFactor(m.spec, tuning.unskilledLeadFactor);
+		if (f <= 1.0001f) return;
+		aim.sub(targetPos).scale(1f / f).add(targetPos);
 	}
 
 	/** How much nearer than it is an enemy counts when picking among shots (lower = better shot). */

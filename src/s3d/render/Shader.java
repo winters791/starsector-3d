@@ -79,6 +79,11 @@ public final class Shader {
 		return this;
 	}
 
+	public Shader set(String u, float x, float y) {
+		GL20.glUniform2f(loc(u), x, y);
+		return this;
+	}
+
 	public Shader set(String u, float x, float y, float z) {
 		GL20.glUniform3f(loc(u), x, y, z);
 		return this;

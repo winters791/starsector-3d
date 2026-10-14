@@ -811,7 +811,7 @@ public final class HudRenderer {
 		float rowH = lh * 2f + 4f, headH = lh * 1.4f;
 		float ruleY = m + rows * rowH + headH;
 		float slant0 = m + holoW + 12f; // divider x at the bottom edge
-		float ruleX = slant0 + PANEL_SLANT * ruleY, right = ruleX + 400f;
+		float ruleX = slant0 + PANEL_SLANT * ruleY, right = ruleX + Math.max(400f, adv * 56f); // room for vanilla's wider letters
 
 		// Status lines, top to bottom: extras, FLUX, HULL, SYSTEM, PHASE.
 		int wingsUp = 0;
@@ -823,6 +823,9 @@ public final class HudRenderer {
 		int lines = 1 + (p.flux != null && p.flux.maxFlux > 0f ? 1 : 0) + (p.system != null ? 1 : 0) + (p.cloak != null ? 1 : 0)
 				+ (wings ? 1 : 0) + (p.fragments != null ? 1 : 0) + (slowed > 0f ? 1 : 0);
 		float step = lh * 1.15f, top = ruleY + 5f + lines * step;
+
+		// Weapon icons upload a texture on first use, which GL ignores between glBegin and glEnd: load them now.
+		for (s3d.core.WeaponGroup3D g : p.groups) for (WeaponMount wm : g.mounts) HudIcons.get(wm.spec.iconSprites);
 
 		// Backdrop: darker at the bottom edge, fading upward (the hologram is additive and needs it).
 		GL11.glBegin(GL11.GL_QUADS);
@@ -1204,7 +1207,7 @@ public final class HudRenderer {
 	}
 
 	private float panelAdvance() {
-		return vanilla != null ? vanilla.width("X", vanillaScale) : textW("x") * 0.8f;
+		return vanilla != null ? vanilla.width("XX", vanillaScale) - vanilla.width("X", vanillaScale) : textW("x") * 0.8f; // one letter's step, spacing included
 	}
 
 	/** Text in your ship panel or the status list: vanilla's HUD font if it loaded. */

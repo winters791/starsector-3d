@@ -255,6 +255,8 @@ final class ShipBridge {
 		s.hasBays = bays != null && !bays.isEmpty();
 		if (bays != null && !bays.isEmpty() && bays.get(0).getWeaponSlot() != null) launchPoint(s, bays.get(0).getWeaponSlot(), s.landingLocal);
 
+		SkillStats.attach(ship, s); // officer skills and hullmods: damage dealt and taken, armor rules, gunnery
+
 		if (ship.isFighter() && !LOGGED_FIGHTERS.add(ship.getHullSpec().getHullId())) return s;
 		log.info(String.format("S3D: mirrored %s [%s %s] owner=%d radius=%.0f sprite=%s %dx%d centre=(%.1f, %.1f from top) engines=%d travelDrive=%s | %s",
 				s.name, ship.getHullSpec().getHullId(), s.sizeClass, s.owner, s.baseRadius, spritePath, img.w, img.h, cx, cyTop,
@@ -262,6 +264,20 @@ final class ShipBridge {
 				+ String.format("%n  hull %.0f, armor %.0f, %s%s%s, weapons:", s.hullMax, s.armor.rating, describe(s.flux),
 						describe("system", s.system), describe("phase cloak", s.cloak)) + wlog);
 		return s;
+	}
+
+	/** Hull shield efficiency (flux per point of shield damage) before skills and hullmods. */
+	private static float shieldEfficiency(ShipAPI ship, ShieldAPI sh) {
+		ShipHullSpecAPI.ShieldSpecAPI spec = ship.getHullSpec().getShieldSpec();
+		return spec != null && spec.getFluxPerDamageAbsorbed() > 0f ? spec.getFluxPerDamageAbsorbed() : sh.getFluxPerPointOfDamage();
+	}
+
+	/** Live shield flux per damage: hull efficiency x shield absorption and shield damage-taken multipliers (skills, hullmods). */
+	static float shieldFluxPerDamage(ShipAPI ship) {
+		ShieldAPI sh = ship.getShield();
+		if (sh == null) return 1f;
+		MutableShipStatsAPI st = ship.getMutableStats();
+		return shieldEfficiency(ship, sh) * st.getShieldAbsorptionMult().getModifiedValue() * st.getShieldDamageTakenMult().getModifiedValue();
 	}
 
 	/**
@@ -304,9 +320,8 @@ final class ShipBridge {
 			float fwd = (float) (rx * Math.cos(a) + ry * Math.sin(a)), left = (float) (-rx * Math.sin(a) + ry * Math.cos(a));
 			f.centre.set(-left, 0f, -fwd);
 		}
-		ShipHullSpecAPI.ShieldSpecAPI spec = ship.getHullSpec().getShieldSpec();
-		float base = spec != null && spec.getFluxPerDamageAbsorbed() > 0f ? spec.getFluxPerDamageAbsorbed() : sh.getFluxPerPointOfDamage();
-		f.fluxPerDamage = base * st.getShieldAbsorptionMult().getModifiedValue() * st.getShieldDamageTakenMult().getModifiedValue();
+		float base = shieldEfficiency(ship, sh);
+		f.fluxPerDamage = shieldFluxPerDamage(ship);
 		float upkeep = sh.getUpkeep();
 		f.upkeep = upkeep <= 2f ? upkeep * ship.getHullSpec().getFluxDissipation() * st.getShieldUpkeepMult().getModifiedValue() : upkeep;
 		f.unfoldTime = Math.max(0.1f, Math.min(3f, sh.getUnfoldTime()));
@@ -786,10 +801,12 @@ final class ShipBridge {
 			ws.ammoPerSecond = w.getAmmoPerSecond();
 		}
 		WeaponSpecAPI spec = w.getSpec();
+		if (spec != null) ws.autofireAccBonus = spec.getAutofireAccBonus();
 		if (spec != null && spec.getAIHints() != null) {
 			ws.pd = spec.getAIHints().contains(WeaponAPI.AIHints.PD) || spec.getAIHints().contains(WeaponAPI.AIHints.PD_ONLY)
 					|| spec.getAIHints().contains(WeaponAPI.AIHints.PD_ALSO);
 			ws.pdOnly = spec.getAIHints().contains(WeaponAPI.AIHints.PD_ONLY);
+			ws.strike = spec.getAIHints().contains(WeaponAPI.AIHints.STRIKE);
 		}
 		ws.supported = true;
 		if (w.getEffectPlugin() != null) effect(ws, w.getEffectPlugin().getClass().getName(), ship, t); // every-frame script

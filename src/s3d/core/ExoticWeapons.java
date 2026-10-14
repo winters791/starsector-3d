@@ -387,7 +387,7 @@ public final class ExoticWeapons {
 		float dmg = w.damage * o.damageMult;
 		if (best instanceof Missile3D) {
 			Missile3D ms = (Missile3D) best;
-			ms.hp -= dmg;
+			ms.hp -= dmg * Combat.vsMissiles(o.source);
 			arc.end.set(ms.pos);
 		} else if (best instanceof Ship3D) {
 			hitWithArc(o.source, (Ship3D) best, o.pos, dmg, w, arc.end);
@@ -510,7 +510,7 @@ public final class ExoticWeapons {
 		else if (c.segmentHit(target, at, target.pos, new Vec3(), hullLocal) < 0f) return;
 		for (int i = 0; i < n; i++) {
 			if (shieldHit && c.rand() >= pierce) continue;
-			c.empHit(target, hullLocal, w.emp, at, Float.MAX_VALUE / 4f);
+			c.empHit(attacker, target, hullLocal, w.emp, at, Float.MAX_VALUE / 4f);
 		}
 	}
 

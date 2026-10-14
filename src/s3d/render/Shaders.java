@@ -10,6 +10,7 @@ final class Shaders {
 			#version 120
 			uniform mat4 u_mvp;
 			uniform mat4 u_model;
+			uniform vec2 u_snap; // retro wobble: snap grid in NDC steps per unit (0 = off)
 			attribute vec3 a_pos;
 			attribute vec3 a_nrm;
 			attribute vec2 a_uv;
@@ -29,7 +30,50 @@ final class Shaders {
 				v_tan = m3 * vec3(1.0, 0.0, 0.0);
 				v_uv = a_uv;
 				v_side = a_side;
-				gl_Position = u_mvp * vec4(a_pos, 1.0);
+				vec4 p = u_mvp * vec4(a_pos, 1.0);
+				if (u_snap.x > 0.0 && p.w > 0.0) p.xy = floor(p.xy / p.w * u_snap + 0.5) / u_snap * p.w;
+				gl_Position = p;
+			}
+			""";
+
+	// ---- retro filter composite: low-res colour, nearest-sampled, quantised with a 4x4 ordered dither ----
+	static final String RETRO_VS = """
+			#version 120
+			varying vec2 v_uv;
+			void main() {
+				v_uv = gl_MultiTexCoord0.xy;
+				gl_Position = gl_Vertex;
+			}
+			""";
+
+	/** u_useDepth 1: ship pass (transparent where no ship, writes the ships' depth); 0: whole scene. */
+	static final String RETRO_FS = """
+			#version 120
+			uniform sampler2D u_color;
+			uniform sampler2D u_depth;
+			uniform vec2 u_size;
+			uniform float u_levels;
+			uniform float u_dither;
+			uniform float u_useDepth;
+			varying vec2 v_uv;
+			float bayer2(vec2 p) {
+				return mod(2.0 * p.x + 3.0 * p.y, 4.0);
+			}
+			void main() {
+				vec2 px = min(floor(v_uv * u_size), u_size - 1.0);
+				vec2 uv = (px + 0.5) / u_size;
+				vec4 c = texture2D(u_color, uv);
+				if (u_useDepth > 0.5) {
+					if (c.a < 0.004) discard;
+					gl_FragDepth = texture2D(u_depth, uv).r;
+				} else {
+					gl_FragDepth = gl_FragCoord.z;
+				}
+				if (u_levels > 0.0) {
+					float b = (4.0 * bayer2(mod(px, 2.0)) + bayer2(mod(floor(px * 0.5), 2.0)) + 0.5) / 16.0;
+					c.rgb = floor(c.rgb * u_levels + 0.5 + (b - 0.5) * u_dither) / u_levels;
+				}
+				gl_FragColor = c;
 			}
 			""";
 
@@ -378,14 +422,16 @@ final class Shaders {
 	static final String STAR_VS = """
 			#version 120
 			uniform mat4 u_vpRot;
+			uniform float u_pointScale; // < 1 when the scene renders at low resolution (retro filter)
 			attribute vec3 a_dir;
 			attribute vec4 a_col;
 			varying vec3 v_col;
 			void main() {
-				v_col = a_col.rgb;
+				float size = a_col.a * u_pointScale;
+				v_col = a_col.rgb * min(1.0, size * size); // sub-pixel stars dim instead of growing
 				vec4 p = u_vpRot * vec4(a_dir, 1.0);
 				gl_Position = p.xyww;
-				gl_PointSize = a_col.a;
+				gl_PointSize = max(size, 1.0);
 			}
 			""";
 
