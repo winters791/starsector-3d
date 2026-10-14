@@ -11,6 +11,9 @@ public final class WeaponSpec3D {
 	public Kind kind = Kind.PROJECTILE;
 	/** Point defence: autofire goes after missiles first; pdOnly never shoots ships. */
 	public boolean pd, pdOnly;
+	/** Vanilla STRIKE hint (PD leading bonuses skip it) and the weapon's own autofire leading bonus (weapon data). */
+	public boolean strike;
+	public float autofireAccBonus;
 	/** "BALLISTIC", "ENERGY", "MISSILE", ... (for the HUD and future rules). */
 	public String type;
 	public String size;

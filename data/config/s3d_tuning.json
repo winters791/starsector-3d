@@ -8,6 +8,7 @@
 		"rollRateMult":1.6,
 		"rollRateMinDeg":12.5,
 		"turnAccelMult":2.0,
+		"maneuverMult":1.15,
 		"speedMult":0.8625,
 		"accelMult":0.5,
 		"decelMult":0.5,
@@ -63,9 +64,17 @@
 		"engineFlameScale":1.0,
 		"shieldBrightness":0.45
 	},
+	"retro":{
+		"filter":"off",
+		"pixelSize":2,
+		"colorBits":5,
+		"dither":1.0,
+		"wobble":1
+	},
 	"weapons":{
+		"unskilledLeadFactor":2,
 		"rangeMult":1.2,
-		"armorReductionMult":0.7,
+		"armorReductionMult":0.9,
 		"reticleRadiusPx":11,
 		"leadCircleScale":1.1,
 		"autoTargetDeg":25,
@@ -218,9 +227,10 @@
 		"altitudeBand":700,
 		"weave":0.6,
 		"passChance":0.5,
-		"flankChance":0.6,
+		"flankChance":0.7,
 		"caution":1.0,
-		"opportunism":1.0
+		"opportunism":0.9,
+		"aggression":0.7
 	},
 	"keys":{
 		"throttleUp":"W",

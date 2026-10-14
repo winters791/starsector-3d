@@ -95,6 +95,11 @@ public final class MeshPreview {
 			if (!pbuffer) Display.destroy();
 			return;
 		}
+		if ("retro".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=retro ./build.sh preview
+			retroScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
 
 		for (String id : ids) {
 			GameData.Hull h = hulls.get(id);
@@ -506,7 +511,9 @@ public final class MeshPreview {
 					new Vec3((float) -Math.sin(a), 0f, (float) -Math.cos(a)), slot.arc, hp);
 			m.ammo = ws.maxAmmo;
 			String sprite = wj.optString(hp ? "hardpointSprite" : "turretSprite", null);
-			if (sprite != null) {
+			if (sprite != null && !new File(game, sprite).isFile()) {
+				System.out.println("  (no sprite file " + sprite + " for " + wid + ")");
+			} else if (sprite != null) {
 				SpriteImage img = new SpriteImage(ImageIO.read(new File(game, sprite)));
 				m.modelSource = new ShipModel.Source(sprite, img, img.w * 0.5f, hp ? img.h * 0.75f : img.h * 0.5f, true);
 			}
@@ -1257,6 +1264,108 @@ public final class MeshPreview {
 			ImageIO.write(read(w, h), "png", new File(dir, "shield.png"));
 		}
 		System.out.println("wrote battle.png" + (best != null ? ", shield.png (" + best.id + ")" : "") + ":" + st);
+	}
+
+	/**
+	 * The retro filter's variants on one frozen battle frame, at the game's 1920x1200: an Onslaught
+	 * close up and a wider view past your Eagle. retro_<view>_<variant>.png full size, plus
+	 * retro_sheet.png (all variants, half size) and retro_zoom.png (1:1 crops, 2x nearest).
+	 */
+	private static void retroScene(File game, Map<String, GameData.Hull> hulls, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int w = 1920, h = 1200;
+		int[] target = createCaptureTarget(w, h);
+		Sim sim = new Sim(t);
+		sim.arenaHalfX = 5000f;
+		sim.arenaHalfZ = 4500f;
+		String[][] fleets = {{"eagle:eagle_Assault", "hammerhead:hammerhead_Balanced", "wolf:wolf_Assault"},
+				{"onslaught:onslaught_Standard", "lasher:lasher_Standard", "enforcer:enforcer_Assault"}};
+		Ship3D player = null, onslaught = null;
+		for (int side = 0; side < 2; side++) {
+			for (int i = 0; i < fleets[side].length; i++) {
+				String[] hv = fleets[side][i].split(":");
+				GameData.Hull hull = hulls.get(hv[0]);
+				Ship3D s = makeShip(game, hull, t, hv[0] + side);
+				s.owner = side;
+				sim.addShip(s);
+				s.volume = ShipModel.geometry((ShipModel.Source) s.modelSource, t).volume;
+				arm(game, s, hv[0], hv[1]);
+				for (s3d.core.WeaponMount m : s.weapons) m.spec.fluxPerShot = m.spec.damage * 0.8f;
+				s.flux = CombatBench.flux(hull, t);
+				s.armor = new s3d.core.ArmorShell(1500f);
+				s.hullMax = s.hull = 1e6f; // nobody dies: the frame should be full of ships
+				s.pos.set(-700f + 700f * i, (i % 2) * 120f, side == 0 ? 900f : -900f);
+				if (side == 1) s.rot.setAxisAngle(0, 1, 0, (float) Math.PI);
+				if (side == 0 && i == 0) {
+					player = s;
+				} else {
+					s.ai = new s3d.core.ShipAI3D(i + side * 5);
+					s.ai.homeDir.set(0f, 0f, side == 0 ? 1f : -1f);
+				}
+				if (hv[0].equals("onslaught")) onslaught = s;
+			}
+		}
+		sim.setPlayer(player);
+		PilotInput in = new PilotInput();
+		in.screenW = w;
+		in.screenH = h;
+		in.mouseX = w * 0.5f;
+		in.mouseY = h * 0.5f;
+		for (float time = 0f; time < 9f; time += 1f / 60f) {
+			in.throttleUp = time < 1f;
+			in.fire = sim.hasLead;
+			sim.update(in, 1f / 60f, 1f / 60f);
+			in.clearPressed();
+		}
+		float or = onslaught.radius;
+		Vec3 oFwd = onslaught.rot.forward(new Vec3()), oRight = onslaught.rot.right(new Vec3());
+		Vec3 closeEye = new Vec3(onslaught.pos).addScaled(oFwd, or * 0.9f).addScaled(oRight, or * 0.75f).add(new Vec3(0f, or * 0.45f, 0f));
+		Vec3 pFwd = player.rot.forward(new Vec3());
+		Vec3 wideEye = new Vec3(player.pos).addScaled(pFwd, -player.radius * 4f).add(new Vec3(0f, player.radius * 1.6f, 0f));
+		Vec3 wideAt = new Vec3(player.pos).addScaled(pFwd, player.radius * 6f);
+		String[] views = {"close", "wide"};
+		Vec3[][] cams = {{closeEye, new Vec3(onslaught.pos).addScaled(oFwd, or * 0.2f)}, {wideEye, wideAt}};
+		// variant: filter, pixelSize, colorBits, wobble
+		Object[][] variants = {{"off", 3, 5, 0f}, {"ships", 3, 5, 0f}, {"scene", 3, 5, 0f}, {"ships", 2, 5, 0f}, {"ships", 4, 4, 0f}, {"ships", 3, 5, 1f}};
+		String[] names = {"off", "ships", "scene", "ships_px2", "ships_px4_4bit", "ships_wobble"};
+		String saved = t.retroFilter;
+		int savedPx = t.retroPixelSize, savedBits = t.retroColorBits;
+		float savedWobble = t.retroWobble;
+		int sw = w / 2, sh = h / 2;
+		BufferedImage sheet = new BufferedImage(sw * views.length, sh * variants.length, BufferedImage.TYPE_INT_RGB);
+		BufferedImage zoom = new BufferedImage(480 * 2 * variants.length, 300 * 2, BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = sheet.createGraphics(), zg = zoom.createGraphics();
+		g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+		zg.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+		for (int v = 0; v < views.length; v++) {
+			lookAt(sim.camera, cams[v][0], cams[v][1], t, w / (float) h);
+			for (int k = 0; k < variants.length; k++) {
+				t.retroFilter = (String) variants[k][0];
+				t.retroPixelSize = (Integer) variants[k][1];
+				t.retroColorBits = (Integer) variants[k][2];
+				t.retroWobble = (Float) variants[k][3];
+				renderer.renderScene(sim, w, h, target[0]);
+				BufferedImage img = read(w, h);
+				ImageIO.write(img, "png", new File(dir, "retro_" + views[v] + "_" + names[k] + ".png"));
+				g.drawImage(img, v * sw, k * sh, sw, sh, null);
+				g.setColor(java.awt.Color.WHITE);
+				g.drawString(views[v] + "  " + names[k], v * sw + 8, k * sh + sh - 10);
+				if (v == 0) {
+					BufferedImage crop = img.getSubimage(w / 2 - 240, h / 2 - 150, 480, 300);
+					zg.drawImage(crop, k * 960, 0, 960, 600, null);
+					zg.setColor(java.awt.Color.WHITE);
+					zg.drawString(names[k], k * 960 + 8, 590);
+				}
+			}
+		}
+		g.dispose();
+		zg.dispose();
+		t.retroFilter = saved;
+		t.retroPixelSize = savedPx;
+		t.retroColorBits = savedBits;
+		t.retroWobble = savedWobble;
+		ImageIO.write(sheet, "png", new File(dir, "retro_sheet.png"));
+		ImageIO.write(zoom, "png", new File(dir, "retro_zoom.png"));
+		System.out.println("wrote retro_sheet.png, retro_zoom.png and retro_<view>_<variant>.png");
 	}
 
 	/** A Heron's wing (bombers + fighters) striking an Enforcer, seen from your Wolf flying escort. */

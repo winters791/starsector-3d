@@ -38,7 +38,9 @@ import s3d.math.Vec3;
 public final class Renderer3D {
 	private static final Logger log = Global.getLogger(Renderer3D.class);
 
-	private Shader shipShader, fxShader, skyShader, starShader, shieldShader, holoShader, auraShader;
+	private Shader shipShader, fxShader, skyShader, starShader, shieldShader, holoShader, auraShader, retroShader;
+	/** The retro filter's low-res ship pass (render.retro, scope "ships"). */
+	private final RetroTarget retro = new RetroTarget();
 	/** Threat fragment swarms and Shrouded shrouds round their ships. */
 	private final CloudRenderer clouds = new CloudRenderer();
 	/** Jitter copies get fresh random offsets every frame, as vanilla's do. */
@@ -71,6 +73,7 @@ public final class Renderer3D {
 		shieldShader = Shader.build("shield", Shaders.SHIELD_VS, Shaders.SHIELD_FS);
 		holoShader = Shader.build("holo", Shaders.HOLO_VS, Shaders.HOLO_FS, "a_pos", "a_nrm");
 		auraShader = Shader.build("aura", Shaders.AURA_VS, Shaders.AURA_FS, "a_pos", "a_nrm", "a_uv");
+		retroShader = Shader.build("retro", Shaders.RETRO_VS, Shaders.RETRO_FS);
 		try {
 			font = GlyphFont.create(13);
 		} catch (Throwable t) {
@@ -169,7 +172,12 @@ public final class Renderer3D {
 	public void renderScene(Sim sim, int screenW, int screenH, int outputFbo) {
 		Tuning t = sim.tuning;
 		ChaseCamera cam = sim.camera;
-		if (!target.ensure(screenW, screenH, t.msaaSamples)) throw new IllegalStateException("scene render target unavailable");
+		String retroMode = t.retroPixelSize > 1 || t.retroColorBits < 8 ? t.retroMode() : "off";
+		boolean retroScene = retroMode.equals("scene");
+		int px = Math.max(1, t.retroPixelSize), sceneW = retroScene ? Math.max(1, screenW / px) : screenW, sceneH = retroScene ? Math.max(1, screenH / px) : screenH;
+		boolean retroShips = retroMode.equals("ships") && retro.ensure(Math.max(1, screenW / px), Math.max(1, screenH / px));
+		// The whole-scene filter renders the scene target small, without MSAA (hard pixel edges are the look).
+		if (!target.ensure(sceneW, sceneH, retroScene ? 0 : t.msaaSamples)) throw new IllegalStateException("scene render target unavailable");
 		ensureStars(t.starCount);
 		ensureDust(t.dustCount, t.dustRange);
 		lastTriangles = 0;
@@ -189,7 +197,7 @@ public final class Renderer3D {
 
 		GL11.glEnable(GL11.GL_BLEND);
 		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
-		drawStars(cam);
+		drawStars(cam, sceneW / (float) screenW);
 
 		GL11.glDisable(GL11.GL_BLEND);
 		GL11.glEnable(GL11.GL_DEPTH_TEST);
@@ -198,7 +206,17 @@ public final class Renderer3D {
 		GL11.glEnable(GL11.GL_CULL_FACE);
 		GL11.glCullFace(GL11.GL_BACK);
 		GL11.glFrontFace(GL11.GL_CCW);
-		drawShips(sim);
+		// PS1 wobble: vertices snap to a grid of retroWobble retro pixels (NDC spans 2 units).
+		float wobble = retroShips || retroScene ? t.retroWobble : 0f;
+		float snapX = wobble > 0f ? screenW / (float) px / (2f * wobble) : 0f, snapY = wobble > 0f ? screenH / (float) px / (2f * wobble) : 0f;
+		if (retroShips) {
+			retro.begin();
+			drawShips(sim, snapX, snapY);
+			target.begin();
+			compositeRetroShips(t);
+		} else {
+			drawShips(sim, snapX, snapY);
+		}
 		drawMissileBodies(sim);
 
 		GL11.glDisable(GL11.GL_CULL_FACE);
@@ -235,15 +253,60 @@ public final class Renderer3D {
 		GL11.glDisable(GL11.GL_CULL_FACE);
 		GL11.glEnable(GL11.GL_TEXTURE_2D);
 		GL11.glBindTexture(GL11.GL_TEXTURE_2D, target.texture());
-		fxShader.use().set("u_vp", identity).set("u_mode", 4).set("u_tex", 0);
+		int filter = retroScene ? GL11.GL_NEAREST : GL11.GL_LINEAR;
+		GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, filter);
+		GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, filter);
+		if (retroScene) {
+			retroUniforms(t, target.width(), target.height()).set("u_depth", 0).set("u_useDepth", 0f);
+		} else {
+			fxShader.use().set("u_vp", identity).set("u_mode", 4).set("u_tex", 0);
+		}
+		fullScreenQuad();
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex);
+		GL20.glUseProgram(0);
+	}
+
+	/**
+	 * Retro filter, ships scope: the low-res ship pass onto the scene target, pixel-blocky and
+	 * dithered, writing the ships' depth so effects drawn next still go behind/in front of hulls.
+	 * Premultiplied blend, so phased (see-through) ships stay see-through.
+	 */
+	private void compositeRetroShips(Tuning t) {
+		GL11.glDisable(GL11.GL_CULL_FACE);
+		GL11.glEnable(GL11.GL_BLEND);
+		GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA);
+		GL11.glDepthFunc(GL11.GL_ALWAYS);
+		GL11.glDepthMask(true);
+		GL13.glActiveTexture(GL13.GL_TEXTURE1);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, retro.depthTexture());
+		GL13.glActiveTexture(GL13.GL_TEXTURE0);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, retro.colorTexture());
+		retroUniforms(t, retro.width(), retro.height()).set("u_depth", 1).set("u_useDepth", 1f);
+		fullScreenQuad();
+		GL20.glUseProgram(0);
+		GL13.glActiveTexture(GL13.GL_TEXTURE1);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+		GL13.glActiveTexture(GL13.GL_TEXTURE0);
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+		GL11.glDepthFunc(GL11.GL_LEQUAL);
+		GL11.glDisable(GL11.GL_BLEND);
+		GL11.glEnable(GL11.GL_CULL_FACE);
+	}
+
+	/** The retro composite shader, bound, for a source of w x h retro pixels. */
+	private Shader retroUniforms(Tuning t, int w, int h) {
+		int bits = Math.min(8, Math.max(1, t.retroColorBits));
+		return retroShader.use().set("u_color", 0).set("u_size", (float) w, (float) h)
+				.set("u_levels", bits >= 8 ? 0f : (float) ((1 << bits) - 1)).set("u_dither", t.retroDither);
+	}
+
+	private static void fullScreenQuad() {
 		GL11.glBegin(GL11.GL_QUADS);
 		GL11.glTexCoord2f(0, 0); GL11.glVertex2f(-1, -1);
 		GL11.glTexCoord2f(1, 0); GL11.glVertex2f(1, -1);
 		GL11.glTexCoord2f(1, 1); GL11.glVertex2f(1, 1);
 		GL11.glTexCoord2f(0, 1); GL11.glVertex2f(-1, 1);
 		GL11.glEnd();
-		GL11.glBindTexture(GL11.GL_TEXTURE_2D, whiteTex);
-		GL20.glUseProgram(0);
 	}
 
 	// ------------------------------------------------------------------------------------------
@@ -290,10 +353,11 @@ public final class Renderer3D {
 		starsBuiltFor = count;
 	}
 
-	private void drawStars(ChaseCamera cam) {
+	/** pointScale: target pixels per screen pixel, so stars keep their on-screen size in a low-res scene. */
+	private void drawStars(ChaseCamera cam, float pointScale) {
 		vpRot.view(cam.rot, new Vec3());
 		vpRot.mul(cam.proj, vpRot);
-		starShader.use().set("u_vpRot", vpRot);
+		starShader.use().set("u_vpRot", vpRot).set("u_pointScale", pointScale);
 		GL11.glEnable(GL20.GL_VERTEX_PROGRAM_POINT_SIZE);
 		GL11.glEnable(GL20.GL_POINT_SPRITE);
 		stars.draw(GL11.GL_POINTS);
@@ -301,12 +365,14 @@ public final class Renderer3D {
 		GL11.glDisable(GL20.GL_VERTEX_PROGRAM_POINT_SIZE);
 	}
 
-	private void drawShips(Sim sim) {
+	/** snapX/snapY: the retro wobble grid (half its size in cells, per NDC unit), 0 = no wobble. */
+	private void drawShips(Sim sim, float snapX, float snapY) {
 		Tuning t = sim.tuning;
 		ChaseCamera cam = sim.camera;
 		Vec3 sun = new Vec3(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize();
 		Vec3 fill = new Vec3(t.fillDir[0], t.fillDir[1], t.fillDir[2]).normalize();
 		shipShader.use()
+				.set("u_snap", snapX, snapY)
 				.set("u_tex", 0)
 				.set("u_nrm", 1)
 				.set("u_bump", t.bumpStrength)
@@ -773,7 +839,7 @@ public final class Renderer3D {
 		if (sim.combat.missiles.isEmpty()) return;
 		Vec3 sun = new Vec3(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize();
 		Vec3 fill = new Vec3(t.fillDir[0], t.fillDir[1], t.fillDir[2]).normalize();
-		shipShader.use().set("u_tex", 0).set("u_nrm", 1).set("u_bump", t.bumpStrength)
+		shipShader.use().set("u_snap", 0f, 0f).set("u_tex", 0).set("u_nrm", 1).set("u_bump", t.bumpStrength)
 				.set("u_lightDir", sun.x, sun.y, sun.z).set("u_lightColor", t.sunColor)
 				.set("u_ambient", t.ambient).set("u_fillDir", fill.x, fill.y, fill.z).set("u_fillColor", t.fillColor)
 				.set("u_camPos", cam.pos.x, cam.pos.y, cam.pos.z).set("u_hitFlash", 0f).set("u_dead", 0f);

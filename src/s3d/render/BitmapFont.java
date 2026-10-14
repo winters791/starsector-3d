@@ -21,6 +21,9 @@ public final class BitmapFont {
 		int x, y, w, h, xoff, yoff, adv;
 	}
 
+	/** Extra pixels between letters: vanilla draws its HUD text one pixel apart (the glyphs' own advance leaves none). */
+	private static final int TRACKING = 1;
+
 	public final int texture;
 	public final float lineHeight;
 	private final int pageW, pageH;
@@ -130,7 +133,7 @@ public final class BitmapFont {
 		for (int k = 0; k < s.length(); k++) {
 			Glyph g = glyph(s.charAt(k));
 			if (g == null) continue;
-			pen += g.adv + (k + 1 < s.length() ? kern(s.charAt(k), s.charAt(k + 1)) : 0);
+			pen += g.adv + (k + 1 < s.length() ? kern(s.charAt(k), s.charAt(k + 1)) + TRACKING : 0);
 		}
 		return pen * scale;
 	}
@@ -155,7 +158,7 @@ public final class BitmapFont {
 				GL11.glTexCoord2f(u1, v0); GL11.glVertex2f(x1, y1);
 				GL11.glTexCoord2f(u0, v0); GL11.glVertex2f(x0, y1);
 			}
-			pen += (g.adv + (k + 1 < s.length() ? kern(ch, s.charAt(k + 1)) : 0)) * scale;
+			pen += (g.adv + (k + 1 < s.length() ? kern(ch, s.charAt(k + 1)) + TRACKING : 0)) * scale;
 		}
 	}
 }

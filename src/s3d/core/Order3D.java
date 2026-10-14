@@ -31,6 +31,12 @@ public final class Order3D {
 	public float radius;
 	/** Vanilla's name for it (log and HUD). */
 	public String label;
+	/**
+	 * Given by a fleet's AI admiral (the enemy's, or an ally's), not by the player. The AI pilot treats these
+	 * as where to fight rather than as a leash: a wider ground to guard, escorts screening ahead of their ship,
+	 * and an objective that's already taken frees the ship to fight. The player's own orders are followed as given.
+	 */
+	public boolean admiral;
 
 	public Order3D(Kind kind) {
 		this.kind = kind;

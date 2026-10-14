@@ -39,14 +39,15 @@ public final class FlightParams {
 	public FlightParams derive(Tuning t) {
 		float base = Math.max(0.5f, maxTurnRateDeg);
 		float ref = Math.max(1f, t.turnCurveRef);
-		float turnDeg = ref * (float) Math.pow(base / ref, t.turnCurveExp) * t.turnRateMult;
+		float man = t.maneuverMult; // flat manoeuvrability bonus: turning and acceleration, not top speed
+		float turnDeg = ref * (float) Math.pow(base / ref, t.turnCurveExp) * t.turnRateMult * man;
 		// Keep the hull's spin-up time (rate / accel), then let tuning make it snappier.
 		float spinUp = base / Math.max(0.5f, turnAccelDeg);
-		float turnAccDeg = turnDeg / spinUp * t.turnAccelMult;
+		float turnAccDeg = turnDeg / spinUp * t.turnAccelMult; // turnDeg carries the bonus already: spin-up time stays the hull's
 
 		pitchRate = rad(turnDeg * t.pitchRateMult);
 		yawRate = rad(turnDeg * t.yawRateMult);
-		rollRate = rad(Math.max(turnDeg * t.rollRateMult, t.rollRateMinDeg));
+		rollRate = rad(Math.max(turnDeg * t.rollRateMult, t.rollRateMinDeg * man));
 		pitchAccel = rad(turnAccDeg * t.pitchRateMult);
 		yawAccel = rad(turnAccDeg * t.yawRateMult);
 		rollAccel = rollRate / spinUp * t.turnAccelMult;
@@ -54,10 +55,10 @@ public final class FlightParams {
 		fwdSpeed = maxSpeed * t.speedMult;
 		revSpeed = fwdSpeed * t.reverseSpeedMult;
 		strafeSpeed = fwdSpeed * t.strafeSpeedMult;
-		fwdAccel = Math.max(1f, accel * t.accelMult);
-		fwdDecel = Math.max(1f, decel * t.decelMult);
-		strafeAccel = Math.max(1f, accel * t.accelMult * t.strafeAccelMult);
-		lateralDecel = Math.max(1f, decel * t.decelMult * t.lateralDampMult);
+		fwdAccel = Math.max(1f, accel * t.accelMult * man);
+		fwdDecel = Math.max(1f, decel * t.decelMult * man);
+		strafeAccel = Math.max(1f, accel * t.accelMult * t.strafeAccelMult * man);
+		lateralDecel = Math.max(1f, decel * t.decelMult * t.lateralDampMult * man);
 		verticalSpeed = strafeSpeed * t.verticalMult;
 		verticalAccel = strafeAccel * t.verticalMult;
 		verticalDecel = lateralDecel * t.verticalMult;

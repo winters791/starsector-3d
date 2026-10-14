@@ -104,6 +104,7 @@ public final class CombatBench {
 		systemsBatch3(game, hulls, t);
 		systemsBatch4(game, hulls, t);
 		modData(game, hulls, t);
+		skillStats(game, hulls, t);
 		collisionRules(game, hulls, t);
 		soundEvents(game, hulls, t);
 		weightRules(game, hulls, t);
@@ -117,6 +118,7 @@ public final class CombatBench {
 		aiOrders(game, hulls, t);
 		aiCaution(game, hulls, t);
 		aiOpportunism(game, hulls, t);
+		aiTweaks(game, hulls, t);
 		aiLoad(game, t);
 		System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILURE(S)");
 	}
@@ -718,7 +720,8 @@ public final class CombatBench {
 	/** An AI Enforcer (omni shield) under fire from behind turns its shield and blocks most of it. */
 	static void aiShieldUse(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
 		s3d.core.Sim sim = new s3d.core.Sim(t);
-		Ship3D enforcer = ship(game, hulls.get("enforcer"), t, "enforcer", 1, 900, 1e9f);
+		// A real hull (not 1e9): with AI Tweaks' vent-safety estimate a ship that can't be hurt vents straight through the fire.
+		Ship3D enforcer = ship(game, hulls.get("enforcer"), t, "enforcer", 1, 900, 4000f);
 		enforcer.ai = new s3d.core.ShipAI3D(2);
 		sim.addShip(enforcer);
 		Ship3D shooter = ship(game, hulls.get("lasher"), t, "lasher", 0, 300, 1e9f);
@@ -3586,6 +3589,7 @@ public final class CombatBench {
 			Ship3D sar = armed(game, hulls, t, "manticore", "manticore", 0);
 			sar.weapons.clear();
 			sar.ai = new s3d.core.ShipAI3D(4);
+			sar.order = order(s3d.core.Order3D.Kind.HOLD, 0f, 0f, 200f); // stays put: the check is the system, not the flight path
 			if (k == 1) {
 				sar.system = system("canister_flak", 0f, 0f, 0f, 3f, 2, 0.05f);
 				WeaponSpec3D can = launcher(false);
@@ -4327,7 +4331,8 @@ public final class CombatBench {
 		boolean ok = core.hull == core.hullMax && !core.destroyed && coreTargeted == 0 && unarmedTargeted == 0 && maxDrift < 0.5f
 				// At vanilla ranges (rangeMult 1) attackers fight close beside the sections, and a slow hull sliding
 				// sideways can graze the irregular section next to its target: a few frames, not a ram.
-				&& core.pos.distance(corePos0) < 0.01f && armedModules > 0 && modulesDead == armedModules && stationShots > 0 && attackerDamage > 0f
+				// (Since 2026-10-14, AI Tweaks-style focus fire and positioning: attackers may well take no damage at all.)
+				&& core.pos.distance(corePos0) < 0.01f && armedModules > 0 && modulesDead == armedModules && stationShots > 0
 				&& contactFrames <= (t.weaponRangeMult < 1.5f ? 15 : 0);
 		check("station assault", ok, String.format("%d armed modules of %d, all destroyed at %.0fs (%d/%d), core hull %.0f/%.0f, core targeted %d frames, unarmed targeted %d frames, "
 				+ "module drift %.2f, core moved %.2f, turned %.0f deg, attackers lost %d, damage to attackers %.0f (station shots %d, attacker peak flux %.0f%%, %d overloads), "
@@ -4588,6 +4593,9 @@ public final class CombatBench {
 				Ship3D enf = armed(game, hulls, t, "enforcer", "enforcer", 1);
 				setRange(enf, 600f);
 				enf.hullMax = enf.hull = 1e9f;
+				// This tests where the pilot keeps its ship, not gunnery: both lead their shots fully (Gunnery Implants),
+				// since vanilla's half lead without the skill costs a kiting ship most of its hits at 800.
+				wolf.stats.autofireAccuracy = enf.stats.autofireAccuracy = 1f;
 				enf.ai = new s3d.core.ShipAI3D(4);
 				enf.ai.caution = 0f;
 				enf.ai.opportunism = 0f;
@@ -4595,11 +4603,11 @@ public final class CombatBench {
 				sim.addShip(enf);
 				s3d.core.PilotInput in = screen();
 				int frames = 0, inReach = 0;
-				for (float time = 0; time < 120f && !wolf.destroyed; time += DT) {
-					sim.update(in, DT, DT);
+				for (float time = 0; time < 120f; time += DT) {
+					if (!wolf.destroyed) sim.update(in, DT, DT);
 					if (time < 20f) continue;
 					frames++;
-					if (wolf.pos.distance(enf.pos) < gunReach(enf, t)) inReach++;
+					if (wolf.destroyed || wolf.pos.distance(enf.pos) < gunReach(enf, t)) inReach++; // dead: it went into its reach
 				}
 				kiteIn[k] = 100f * inReach / Math.max(1, frames);
 				kiteTaken[k] = damageTaken(wolf);
@@ -4663,6 +4671,7 @@ public final class CombatBench {
 			gun.ai = new s3d.core.ShipAI3D(6);
 			gun.ai.caution = 0f;
 			gun.ai.opportunism = opp;
+			gun.ai.aggression = 0f; // aggression alone fires on to 93% flux: this is about opportunism
 			gun.flux.ventRateMult = 0f; // can't vent (part 2 holds its flux high)
 			sim.addShip(gun);
 			Ship3D a = armed(game, hulls, t, "enforcer", "a", 1);
@@ -4953,7 +4962,365 @@ public final class CombatBench {
 		check("AI orders", ok, sb.toString());
 	}
 
+	/**
+	 * The AI after AI Tweaks (user, 2026-10-14: "more aggressive, ships should never be idle", AI Tweaks the gold
+	 * standard): (1) in a 8v8 brawl and a 12v12 with the enemy admiral's escort and capture orders, ships are
+	 * hardly ever idle (no shot at an enemy for 3 s, not closing, not backing off) and never for long; (2) a ship
+	 * taking a beating on its shield backs off and vents once out of reach; (3) the fighting range is set by the
+	 * shortest primary gun (PD and missiles left out); (4) the flat manoeuvrability bonus scales turning and
+	 * acceleration but not top speed.
+	 */
+	static void aiTweaks(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		{
+			AiArena.Result brawl = AiArena.run(game, hulls, t, "brawl", 0, 240f);
+			AiArena.Result admiral = AiArena.run(game, hulls, t, "admiral", 0, 240f);
+			float bIdle = 100f * brawl.idleFrames / Math.max(1, brawl.shipFrames), aIdle = 100f * admiral.idleFrames / Math.max(1, admiral.shipFrames);
+			check("AI hardly ever idle", bIdle < 8f && aIdle < 8f && brawl.worstIdle < 30f && admiral.worstIdle < 30f && brawl.firstKill > 0f,
+					String.format("idle %.1f%% of ship-time in a brawl (longest %.0f s, %s), %.1f%% under admiral orders (longest %.0f s, %s); first kill at %.0f s",
+							bIdle, brawl.worstIdle, brawl.worstIdleShip, aIdle, admiral.worstIdle, admiral.worstIdleShip, brawl.firstKill));
+		}
+		{ // (2) back off and vent
+			s3d.core.Sim sim = new s3d.core.Sim(t);
+			Ship3D e = armed(game, hulls, t, "eagle", "eagle", 0);
+			e.ai = new s3d.core.ShipAI3D(9);
+			sim.addShip(e);
+			Ship3D foe = armed(game, hulls, t, "enforcer", "foe", 1);
+			foe.hullMax = foe.hull = 1e9f;
+			foe.pos.set(0f, 0f, -900f);
+			foe.rot.setAxisAngle(0, 1, 0, (float) Math.PI);
+			foe.ai = new s3d.core.ShipAI3D(10);
+			sim.addShip(foe);
+			s3d.core.PilotInput in = screen();
+			sim.update(in, DT, DT);
+			e.flux.flux = e.flux.hardFlux = e.flux.maxFlux * 0.8f; // a beating on the shield
+			boolean backedOff = false, vented = false;
+			float ventedAt = -1f, ventDist = 0f;
+			for (float time = 0; time < 40f && !vented; time += DT) {
+				sim.update(in, DT, DT);
+				if (e.ai.activity == s3d.core.ShipAI3D.Activity.COOL_OFF || e.ai.activity == s3d.core.ShipAI3D.Activity.DISENGAGE) backedOff = true;
+				if (e.flux.venting) {
+					vented = true;
+					ventedAt = time;
+					ventDist = e.pos.distance(foe.pos);
+				}
+			}
+			check("AI backs off and vents safely", backedOff && vented && ventDist > gunReach(foe, t) - 100f,
+					String.format("at 80%% hard flux: backed off %b, vented %b after %.1f s, %.0f from the enemy (its guns reach %.0f)",
+							backedOff, vented, ventedAt, ventDist, gunReach(foe, t)));
+		}
+		{ // (3) the shortest primary gun sets the range
+			Ship3D s = armed(game, hulls, t, "eagle", "eagle", 0);
+			float shortest = Float.MAX_VALUE;
+			for (WeaponMount m : s.weapons) shortest = Math.min(shortest, m.spec.range * t.weaponRangeMult);
+			WeaponSpec3D pd = gun("FRAGMENTATION", 0.25f, 10f, 200f, 900f);
+			pd.pd = true;
+			s.weapons.add(new WeaponMount("PD", pd, new Vec3(0f, 5f, 0f), new Vec3(0f, 0f, -1f), 360f, false));
+			s.ai = new s3d.core.ShipAI3D(1);
+			s.ai.profile(s, t);
+			check("AI range: shortest primary gun", s.ai.minRange >= shortest - 1f && s.ai.minRange < shortest + s.radius && s.ai.maxRange >= s.ai.minRange,
+					String.format("Eagle: shortest gun %.0f, primary guns reach %.0f-%.0f from the centre (a 200-range PD gun left out)", shortest, s.ai.minRange, s.ai.maxRange));
+		}
+		{ // (4) manoeuvrability
+			GameData.Hull h = hulls.get("eagle");
+			float k = t.maneuverMult;
+			t.maneuverMult = 1f;
+			FlightParams a = new FlightParams(h.speed, h.accel, h.decel, h.turn, h.turnAccel).derive(t);
+			t.maneuverMult = k;
+			FlightParams b = new FlightParams(h.speed, h.accel, h.decel, h.turn, h.turnAccel).derive(t);
+			boolean ok = Math.abs(b.yawRate / a.yawRate - k) < 1e-3f && Math.abs(b.yawAccel / a.yawAccel - k) < 1e-3f && Math.abs(b.fwdAccel / a.fwdAccel - k) < 1e-3f
+					&& Math.abs(b.fwdDecel / a.fwdDecel - k) < 1e-3f && Math.abs(b.strafeAccel / a.strafeAccel - k) < 1e-3f && b.fwdSpeed == a.fwdSpeed && b.strafeSpeed == a.strafeSpeed;
+			check("manoeuvrability bonus", ok && k > 1.1f, String.format("x%.2f: yaw %.1f -> %.1f deg/s, turn accel x%.3f, accel x%.3f, decel x%.3f, strafe accel x%.3f, top speed %.0f -> %.0f",
+					k, Math.toDegrees(a.yawRate), Math.toDegrees(b.yawRate), b.yawAccel / a.yawAccel, b.fwdAccel / a.fwdAccel, b.fwdDecel / a.fwdDecel, b.strafeAccel / a.strafeAccel,
+					a.fwdSpeed, b.fwdSpeed));
+		}
+	}
+
 	/** Fires continuously at aim for the given seconds; returns the number of hits on target. */
+	// ---- officer skills and hullmods -------------------------------------------------------------
+
+	/**
+	 * Officer skills and hullmods in 3D (CombatStats, which the host keeps live from vanilla's stats;
+	 * the skills vanilla runs as damage listeners rebuilt with its rules): each check fires the same
+	 * shots with and without the stat and compares what the target took.
+	 */
+	static void skillStats(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		float k = t.weaponRangeMult;
+		// Target Analysis: damage by the target's hull size (no armor, so hull lost = damage dealt).
+		{
+			String[] ids = {"lasher", "onslaught"};
+			float[] ratio = new float[2];
+			for (int i = 0; i < 2; i++) {
+				float[] lost = new float[2];
+				for (int v = 0; v < 2; v++) {
+					Ship3D sh = statShooter(game, hulls, t);
+					if (v == 1) {
+						sh.stats.toFrigates = 1.05f;
+						sh.stats.toCapitals = 1.2f;
+					}
+					Ship3D tg = statTarget(game, hulls, t, ids[i], 0f, 500f);
+					lost[v] = shots(t, sh, gun("ENERGY", 1f, 100f, 1000f, 1500f), tg, 4);
+				}
+				ratio[i] = lost[1] / lost[0];
+			}
+			check("skill: damage by hull size", near(ratio[0], 1.05f) && near(ratio[1], 1.2f),
+					String.format("vs frigate x%.3f, vs capital x%.3f (Target Analysis 1.05 / 1.20)", ratio[0], ratio[1]));
+		}
+		// Point Defense: vs fighters and vs missiles.
+		{
+			float[] lost = new float[2], missileHp = new float[2];
+			for (int v = 0; v < 2; v++) {
+				Ship3D sh = statShooter(game, hulls, t);
+				if (v == 1) sh.stats.toFighters = sh.stats.toMissiles = 1.5f;
+				Ship3D tg = statTarget(game, hulls, t, "lasher", 0f, 500f);
+				tg.fighter = true;
+				lost[v] = shots(t, sh, gun("ENERGY", 1f, 100f, 1000f, 1500f), tg, 3);
+				Combat c = new Combat();
+				c.tuning = t;
+				Ship3D launcherShip = statTarget(game, hulls, t, "hammerhead", 0f, 3000f);
+				c.world = java.util.List.of(sh, launcherShip);
+				s3d.core.Missile3D ms = c.spawnMissile(launcherShip, launcher(false), new Vec3(0f, 0f, -400f), new Vec3(0f, 0f, 1f), 0f, null);
+				WeaponMount m = new WeaponMount("PD", gun("ENERGY", 1f, 20f, 1000f, 1500f), new Vec3(0, 5, 0), new Vec3(0, 0, -1), 360f, false);
+				sh.weapons.clear();
+				sh.weapons.add(m);
+				for (float time = 0; time < 0.5f; time += DT) { // the missile is left where it is: projectiles only
+					c.stepMount(sh, m, ms.pos, time < 0.01f, null, DT, t);
+					c.stepProjectiles(c.world, DT);
+				}
+				missileHp[v] = 100f - ms.hp;
+			}
+			check("skill: damage vs fighters, missiles", near(lost[1] / lost[0], 1.5f) && near(missileHp[1] / missileHp[0], 1.5f),
+					String.format("fighter x%.2f, missile x%.2f (Point Defense 1.5; missile took %.0f -> %.0f)", lost[1] / lost[0], missileHp[1] / missileHp[0], missileHp[0], missileHp[1]));
+		}
+		// Armor rules on one hit: attacker hit strength, target effective armor, most reduction, kinetic armor damage.
+		{
+			// HE 500 x2 vs 1000 armor: hit strength 1000 = armor, half of it stopped (x0.7 in 3D); kinetic 100 x0.5 is capped.
+			float base = armorHit(game, hulls, t, "HIGH_EXPLOSIVE", 2f, 500f, null, null);
+			float strong = armorHit(game, hulls, t, "HIGH_EXPLOSIVE", 2f, 500f, a -> a.hitStrengthPercent = 100f, null);
+			float thick = armorHit(game, hulls, t, "HIGH_EXPLOSIVE", 2f, 500f, null, d -> d.effArmorPercent = 50f);
+			float kinBase = armorHit(game, hulls, t, "KINETIC", 0.5f, 100f, null, null);
+			float capped = armorHit(game, hulls, t, "KINETIC", 0.5f, 100f, null, d -> d.maxArmorReduction = 0.9f);
+			float kinHalf = armorHit(game, hulls, t, "KINETIC", 0.5f, 100f, null, d -> d.kineticArmorTaken = 0.5f);
+			float r = t.armorReductionMult;
+			float expStrong = (1f - r / 3f) / (1f - r * 0.5f), expThick = (1f - r * 0.6f) / (1f - r * 0.5f), expCap = (1f - 0.9f * r) / (1f - 0.85f * r);
+			check("skill: armor rules", near(strong / base, expStrong) && near(thick / base, expThick) && near(capped / kinBase, expCap) && near(kinHalf / kinBase, 0.5f),
+					String.format("hit strength +100%% x%.3f (exp %.3f), eff. armor +50%% x%.3f (exp %.3f), cap 90%% x%.3f (exp %.3f), kinetic taken 0.5 x%.3f",
+							strong / base, expStrong, thick / base, expThick, capped / kinBase, expCap, kinHalf / kinBase));
+		}
+		// Damage to shields (Field Modulation) and shield damage taken by delivery; to hull (Damage Control) and hull taken by delivery.
+		{
+			float[] flux = new float[3], lost = new float[3];
+			for (int v = 0; v < 3; v++) {
+				Ship3D sh = statShooter(game, hulls, t);
+				sh.pos.set(0f, 0f, -600f);
+				Ship3D tg = ship(game, hulls.get("wolf"), t, "wolf", 1, 0, 1e6f);
+				tg.flux.shieldOn = true;
+				tg.flux.unfold = 1f;
+				tg.flux.maxFlux = 1e6f;
+				if (v == 1) sh.stats.toShields = 1.05f;
+				if (v == 2) tg.stats.projectileShieldTaken = 0.5f;
+				shotsFrom(t, sh, gun("KINETIC", 0.5f, 50f, 1000f, 1500f), tg, 3, new Vec3(0, 0, 1));
+				flux[v] = tg.flux.flux;
+				Ship3D sh2 = statShooter(game, hulls, t);
+				Ship3D tg2 = statTarget(game, hulls, t, "lasher", 0f, 500f);
+				if (v == 1) sh2.stats.toHull = 1.15f;
+				if (v == 2) tg2.stats.projectileTaken = 0.5f;
+				lost[v] = shots(t, sh2, gun("ENERGY", 1f, 100f, 1000f, 1500f), tg2, 3);
+			}
+			check("skill: shield and hull damage", flux[0] > 0f && near(flux[1] / flux[0], 1.05f) && near(flux[2] / flux[0], 0.5f) && near(lost[1] / lost[0], 1.15f) && near(lost[2] / lost[0], 0.5f),
+					String.format("to shields x%.3f, shield taken (shots) x%.3f; to hull x%.3f, hull taken (shots) x%.3f", flux[1] / flux[0], flux[2] / flux[0], lost[1] / lost[0], lost[2] / lost[0]));
+		}
+		// EMP to weapons (Impact Mitigation: weapon damage taken x0.5).
+		{
+			float[] lost = new float[2];
+			for (int v = 0; v < 2; v++) {
+				Combat c = new Combat();
+				c.tuning = t;
+				Ship3D sh = statShooter(game, hulls, t);
+				Ship3D tg = statTarget(game, hulls, t, "lasher", 0f, 500f);
+				WeaponMount tm = new WeaponMount("T", gun("ENERGY", 1f, 10f, 500f, 1000f), new Vec3(0, 0, 0), new Vec3(0, 0, 1), 360f, false);
+				tg.weapons.add(tm);
+				if (v == 1) tg.stats.weaponTaken = 0.5f;
+				c.strikeArc(sh, new Vec3(0f, 0f, -100f), tg, 0f, 60f, new float[] {1f, 1f, 1f}, 3f, 0f, "x");
+				lost[v] = tm.maxHp - tm.hp;
+			}
+			check("skill: EMP to weapons taken", lost[0] > 0f && near(lost[1] / lost[0], 0.5f), String.format("weapon lost %.0f -> %.0f hp to the same arc", lost[0], lost[1]));
+		}
+		// Damage Control (elite): once per 2 s, hull damage over 500 from one hit cut by 60%; any hull/armor hit spends it.
+		{
+			Combat c = new Combat();
+			c.tuning = t;
+			Ship3D sh = statShooter(game, hulls, t);
+			Ship3D tg = statTarget(game, hulls, t, "lasher", 0f, 500f);
+			tg.stats.damageControl = true;
+			float[] got = new float[5];
+			float[] hits = {1000f, 1000f, 300f, 1000f, 1000f};
+			float[] waitBefore = {0f, 0f, 2.1f, 0f, 2.1f};
+			for (int i = 0; i < hits.length; i++) {
+				for (float w = 0f; w < waitBefore[i]; w += 0.1f) tg.stats.step(tg, 0.1f, c.skills);
+				float before = tg.hull;
+				c.strikeArc(sh, new Vec3(0f, 0f, -100f), tg, hits[i], 0f, new float[] {1f, 1f, 1f}, 3f, 0f, "x");
+				got[i] = before - tg.hull;
+			}
+			check("skill: Damage Control elite", near(got[0], 700f) && near(got[1], 1000f) && near(got[2], 300f) && near(got[3], 1000f) && near(got[4], 700f),
+					String.format("hull lost %.0f, %.0f at once, %.0f (spends it), %.0f, %.0f after 2 s (exp 700 1000 300 1000 700)", got[0], got[1], got[2], got[3], got[4]));
+		}
+		// Combat Endurance (elite): 0.5%/s of max hull, at most max(2000, half the max hull) per battle.
+		{
+			s3d.core.SkillRules r = new s3d.core.SkillRules();
+			Ship3D s = new Ship3D("regen");
+			s.hullMax = 1e5f;
+			s.hull = 5e4f;
+			s.stats.regen = true;
+			for (int i = 0; i < 100; i++) s.stats.step(s, 0.1f, r);
+			float tenSeconds = s.hull - 5e4f;
+			s.hull = 0.1f * s.hullMax;
+			for (int i = 0; i < 3000; i++) s.stats.step(s, 0.1f, r);
+			check("skill: Combat Endurance regen", near(tenSeconds, 5000f) && near(s.stats.regenDone, 5e4f),
+					String.format("+%.0f hull in 10 s (exp 5000), %.0f in all (limit 50000)", tenSeconds, s.stats.regenDone));
+		}
+		// Energy Weapon Mastery: at half flux +15% close in, half that at vanilla 800, none from 1000; ballistic none.
+		{
+			float[] dist = {500f, 800f * k, 1300f * k};
+			float[] ratio = new float[4];
+			for (int i = 0; i < 4; i++) {
+				float[] lost = new float[2];
+				for (int v = 0; v < 2; v++) {
+					Ship3D sh = statShooter(game, hulls, t);
+					sh.flux = new s3d.core.ShieldFlux();
+					sh.flux.maxFlux = 1000f;
+					sh.flux.flux = 500f;
+					sh.stats.energyMastery = v == 1;
+					sh.stats.energyFluxMagnitude = 0.3f;
+					Ship3D tg = statTarget(game, hulls, t, "lasher", 0f, i < 3 ? dist[i] : 500f);
+					WeaponSpec3D g = gun("ENERGY", 1f, 100f, 2000f, 2000f);
+					if (i == 3) g.type = "BALLISTIC";
+					else g.type = "ENERGY";
+					lost[v] = shots(t, sh, g, tg, 2);
+				}
+				ratio[i] = lost[1] / lost[0];
+			}
+			check("skill: Energy Weapon Mastery", near(ratio[0], 1.15f) && ratio[1] > 1.03f && ratio[1] < 1.12f && near(ratio[2], 1f) && near(ratio[3], 1f),
+					String.format("x%.3f close (exp 1.15), x%.3f at vanilla 800, x%.3f at 1300, ballistic x%.3f", ratio[0], ratio[1], ratio[2], ratio[3]));
+		}
+		// Ranged Specialization: nothing to vanilla 800, +30% from 1600; between, in proportion.
+		{
+			float[] dist = {600f, 1200f * k, 1700f * k};
+			float[] ratio = new float[3];
+			for (int i = 0; i < 3; i++) {
+				float[] lost = new float[2];
+				for (int v = 0; v < 2; v++) {
+					Ship3D sh = statShooter(game, hulls, t);
+					sh.stats.rangedSpec = v == 1;
+					Ship3D tg = statTarget(game, hulls, t, "lasher", 0f, dist[i]);
+					lost[v] = shots(t, sh, gun("KINETIC", 1f, 100f, 2400f, 3000f), tg, 2);
+				}
+				ratio[i] = lost[1] / lost[0];
+			}
+			check("skill: Ranged Specialization", near(ratio[0], 1f) && ratio[1] > 1.08f && ratio[1] < 1.22f && near(ratio[2], 1.3f),
+					String.format("x%.3f close, x%.3f at vanilla 1200 (exp ~1.15), x%.3f at 1700 (exp 1.30)", ratio[0], ratio[1], ratio[2]));
+		}
+		// Gunnery Implants: recoil (spread per shot and its cap) x0.75; small weapons' own multiplier on top.
+		{
+			float[] after2 = new float[3], after6 = new float[3];
+			for (int v = 0; v < 3; v++) {
+				Ship3D sh = statShooter(game, hulls, t);
+				if (v >= 1) sh.stats.recoilMaxMult = sh.stats.recoilPerShotMult = 0.75f;
+				if (v == 2) sh.stats.recoilPerShotSmallMult = 0.5f;
+				WeaponSpec3D g = gun("KINETIC", 0.5f, 10f, 1000f, 1500f);
+				g.size = "SMALL";
+				g.maxSpread = 20f;
+				g.spreadBuildup = 5f;
+				g.cooldown = 0.2f;
+				WeaponMount m = new WeaponMount("G", g, new Vec3(0, 5, 0), new Vec3(0, 0, -1), 360f, false);
+				sh.weapons.add(m);
+				Combat c = new Combat();
+				c.tuning = t;
+				c.world = java.util.List.of(sh);
+				for (float time = 0; time < 1.15f; time += DT) {
+					c.stepMount(sh, m, null, true, null, DT, t);
+					if (Math.abs(time - 0.3f) < DT * 0.5f) after2[v] = m.spread;
+				}
+				after6[v] = m.spread;
+			}
+			check("skill: Gunnery Implants recoil", near(after2[0], 10f) && near(after2[1], 7.5f) && near(after2[2], 3.75f) && near(after6[0], 20f) && near(after6[1], 15f),
+					String.format("spread after 2 shots %.2f / %.2f / %.2f (small x0.5), after 6 %.2f / %.2f (cap 20 / 15)", after2[0], after2[1], after2[2], after6[0], after6[1]));
+		}
+		// Autofire leading: no skill aims at half the lead (vanilla); Gunnery Implants, a weapon's own bonus or IPDAI PD aim at all of it.
+		{
+			float[] lead = new float[4];
+			for (int v = 0; v < 4; v++) {
+				s3d.core.Sim sim = new s3d.core.Sim(t);
+				Ship3D sh = statShooter(game, hulls, t);
+				WeaponSpec3D g = gun("KINETIC", 0.5f, 10f, 2000f, 1000f);
+				if (v == 1) sh.stats.autofireAccuracy = 1f;
+				if (v == 2) g.autofireAccBonus = 1f;
+				if (v == 3) {
+					g.pd = true;
+					sh.stats.pdBestLeading = true;
+				}
+				WeaponMount m = new WeaponMount("G", g, new Vec3(0, 5, 0), new Vec3(0, 0, -1), 360f, false);
+				sh.weapons.add(m);
+				Ship3D tg = statTarget(game, hulls, t, "lasher", 0f, 1000f);
+				tg.vel.set(200f, 0f, 0f);
+				sim.addShip(sh);
+				sim.addShip(tg);
+				Vec3 aim = new Vec3();
+				Ship3D[] out = new Ship3D[1];
+				lead[v] = sim.autofireAim(sh, m, tg, aim, out) ? aim.sub(tg.pos).length() : -1f;
+			}
+			check("skill: autofire target leading", lead[1] > 100f && near(lead[1] / lead[0], 2f) && near(lead[2], lead[1]) && near(lead[3], lead[1]),
+					String.format("lead %.0f with no skill, %.0f with Gunnery Implants, %.0f weapon bonus, %.0f IPDAI PD", lead[0], lead[1], lead[2], lead[3]));
+		}
+	}
+
+	static boolean near(float a, float b) {
+		return Math.abs(a - b) <= 0.005f * Math.max(1f, Math.abs(b));
+	}
+
+	/** A Wolf with no flux limits, at the origin facing -z. */
+	static Ship3D statShooter(File game, Map<String, GameData.Hull> hulls, Tuning t) throws Exception {
+		Ship3D s = ship(game, hulls.get("wolf"), t, "wolf", 0, 150, 1e6f);
+		s.flux = null;
+		return s;
+	}
+
+	/** A standing target `dist` ahead (-z), broadside, no flux, with this armor and a deep hull. */
+	static Ship3D statTarget(File game, Map<String, GameData.Hull> hulls, Tuning t, String hull, float armor, float dist) throws Exception {
+		Ship3D s = ship(game, hulls.get(hull), t, hull, 1, armor, 1e6f);
+		s.flux = null;
+		s.pos.set(0f, 0f, -dist);
+		s.rot.setAxisAngle(0, 1, 0, (float) Math.toRadians(90));
+		return s;
+	}
+
+	/** n shots of g from sh (aimed at tg's centre, which stands still) and what tg took (hull + armor). */
+	static float shots(Tuning t, Ship3D sh, WeaponSpec3D g, Ship3D tg, int n) {
+		return shotsFrom(t, sh, g, tg, n, new Vec3(0, 0, -1));
+	}
+
+	static float shotsFrom(Tuning t, Ship3D sh, WeaponSpec3D g, Ship3D tg, int n, Vec3 restDir) {
+		Combat c = new Combat();
+		c.tuning = t;
+		c.world = java.util.List.of(sh, tg);
+		g.cooldown = 0.2f;
+		WeaponMount m = new WeaponMount("G", g, new Vec3(0, 5, 0), restDir, 360f, false);
+		sh.weapons.add(m);
+		float stop = 0.2f * (n - 1) + 0.1f;
+		float flight = sh.pos.distance(tg.pos) / g.projectileSpeed + 0.3f;
+		run(c, sh, m, new Vec3(tg.pos), null, stop + flight, time -> time < stop, t);
+		return damageTaken(tg);
+	}
+
+	/** One shot into a 1000-armor Onslaught (nothing else changed but what the two setters do); armor + hull it lost. */
+	static float armorHit(File game, Map<String, GameData.Hull> hulls, Tuning t, String type, float armorMult, float damage,
+			java.util.function.Consumer<s3d.core.CombatStats> attacker, java.util.function.Consumer<s3d.core.CombatStats> defender) throws Exception {
+		Ship3D sh = statShooter(game, hulls, t);
+		Ship3D tg = statTarget(game, hulls, t, "onslaught", 1000f, 600f);
+		if (attacker != null) attacker.accept(sh.stats);
+		if (defender != null) defender.accept(tg.stats);
+		return shots(t, sh, gun(type, armorMult, damage, 1000f, 1500f), tg, 1);
+	}
+
 	static int run(Combat c, Ship3D shooter, Ship3D target, Vec3 aim, float seconds, Tuning t) {
 		int hits = 0;
 		java.util.List<Ship3D> ships = java.util.List.of(shooter, target);

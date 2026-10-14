@@ -87,6 +87,7 @@ abstract class Session3D {
 		} catch (Throwable t) {
 			log.warn("S3D: armor settings unavailable, using 0.85 / 0.05", t);
 		}
+		SkillStats.readRules(sim.combat.skills);
 		engine.getViewport().setExternalControl(true);
 	}
 
@@ -363,10 +364,12 @@ abstract class Session3D {
 		managePuppets(realDt);
 		if (done()) return;
 		statRefreshTimer -= realDt;
-		if (statRefreshTimer <= 0f) {
+		boolean slowRefresh = statRefreshTimer <= 0f;
+		if (slowRefresh) {
 			statRefreshTimer = 0.5f;
 			refreshFlightParams();
 		}
+		refreshSkillStats(slowRefresh);
 		if (!overlay || vanillaUiActive() || yieldToVanilla()) {
 			boolean outro = inOutro();
 			if (outro) outroTime += realDt;
@@ -523,6 +526,17 @@ abstract class Session3D {
 			if (fresh.sameSource(s.params)) continue;
 			log.info("S3D: flight stats for " + s.name + " updated to " + fresh);
 			s.params = fresh.derive(sim.tuning);
+		}
+	}
+
+	/**
+	 * Skill and hullmod combat stats from the live puppets (SkillStats): every frame, since some follow
+	 * flux (Polarized Armor); fighters, and the search for listener skills, twice a second.
+	 */
+	private void refreshSkillStats(boolean slow) {
+		for (Ship3D s : sim.ships) {
+			if (!(s.hostRef instanceof ShipAPI) || s.destroyed || s.fighter && !slow) continue;
+			SkillStats.refresh((ShipAPI) s.hostRef, s, slow);
 		}
 	}
 

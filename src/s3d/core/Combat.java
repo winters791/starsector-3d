@@ -19,6 +19,8 @@ public final class Combat {
 	public float maxArmorDamageReduction = 0.85f, minArmorFraction = 0.05f;
 	/** Beams: armor hit strength = damage per second times this (vanilla dpsToHitStrengthMult). */
 	public float dpsToHitStrengthMult = 0.5f;
+	/** Numbers of the officer skills rebuilt here (host overrides from vanilla's constants). */
+	public final SkillRules skills = new SkillRules();
 
 	/** Ships beams can hit this frame (set by the sim). */
 	public List<Ship3D> world = new ArrayList<>();
@@ -116,7 +118,7 @@ public final class Combat {
 			if (m.flash > 0f) m.flash -= dt;
 			if (!w.supported) return;
 			if (w.maxAmmo > 0) m.ammo = Math.min(w.maxAmmo, m.ammo + w.ammoPerSecond * dt * (w.kind != WeaponSpec3D.Kind.MISSILE ? s.sysAmmoRegenMult : 1f)); // Incursion Mode: x5 for guns
-			m.spread = Math.max(w.minSpread, m.spread - w.spreadDecay * dt);
+			m.spread = Math.max(w.minSpread * s.stats.recoilMaxMult, m.spread - w.spreadDecay * s.stats.recoilDecayMult * dt); // Gunnery Implants
 			boolean ballistic = "BALLISTIC".equals(w.type);
 			boolean lidarGun = lidarGun(s, m);
 			float rof = (ballistic ? s.sysBallisticRofMult : 1f) * (lidarGun ? s.sysLidarRofMult : 1f);
@@ -338,7 +340,7 @@ public final class Combat {
 		}
 		float kick = shotImpulse(w, w.damage) * tuning.recoilScale;
 		if (kick > 0f) push(s, origin, new Vec3(dir).scale(-1f), kick);
-		m.spread = Math.min(w.maxSpread, m.spread + w.spreadBuildup);
+		m.spread = Math.min(w.maxSpread * s.stats.recoilMaxMult, m.spread + w.spreadBuildup * recoilPerShot(s, w));
 		if (w.maxAmmo > 0) m.ammo -= 1f;
 		m.flash = 0.06f;
 		m.firedThisFrame = true;
@@ -347,6 +349,11 @@ public final class Combat {
 		muzzle.vel.set(s.vel);
 		effects.add(muzzle);
 		sounds.play(w.fireSound, origin, 1f);
+	}
+
+	/** Spread added per shot, as the firing ship's recoil stats scale it (vanilla: small weapons get a second multiplier). */
+	private static float recoilPerShot(Ship3D s, WeaponSpec3D w) {
+		return s.stats.recoilPerShotMult * ("SMALL".equals(w.size) ? s.stats.recoilPerShotSmallMult : 1f);
 	}
 
 	/**
@@ -384,7 +391,7 @@ public final class Combat {
 		float dmg = w.damage * dmgMult;
 		if (best instanceof Missile3D) {
 			Missile3D ms = (Missile3D) best;
-			ms.hp -= dmg;
+			ms.hp -= dmg * vsMissiles(s);
 			arc.end.set(ms.pos);
 			sounds.play(impact, ms.pos, 0.7f);
 		} else if (best instanceof Ship3D) {
@@ -505,6 +512,10 @@ public final class Combat {
 		Missile3D missile = missileOnRay(origin, dir, Math.min(range, shipDist), owner);
 		float dmg = w.dps * m.beamLevel * dt * dmgMult;
 		Object struck = null;
+		float reach = shielded != null && missile == null ? shieldPt.distance(origin) : missile != null ? missile.pos.distance(origin)
+				: ship != null ? hit.distance(origin) : 0f;
+		float rb = rangeBonus(s, w, reach); // Energy Weapon Mastery, Ranged Specialization
+		dmg *= rb;
 		if (missile == null && shielded != null) {
 			struck = shielded;
 			m.beamEnd.set(shieldPt);
@@ -529,12 +540,12 @@ public final class Combat {
 			float tm = new Vec3(missile.pos).sub(origin).dot(dir);
 			m.beamEnd.set(origin).addScaled(dir, tm);
 			m.beamHitting = true;
-			missile.hp -= dmg;
+			missile.hp -= dmg * vsMissiles(s);
 		} else if (ship != null) {
 			struck = ship;
 			m.beamEnd.set(hit);
 			m.beamHitting = true;
-			float hitStrength = w.dps * dpsToHitStrengthMult * w.armorMult;
+			float hitStrength = w.dps * dpsToHitStrengthMult * w.armorMult * rb;
 			float[] dealt = dealDamage(s, ship, dmg, hitStrength, w, local);
 			push(ship, hit, dir, beamImpulse(dmg)); // beams push by damage only (their impact is per shot, they hit every frame)
 			tally(s, ship, hit, dealt[0] + dealt[1], dealt[1] > 0.01f, dealt[0] > 0.01f);
@@ -654,7 +665,7 @@ public final class Combat {
 				Vec3 hit = new Vec3(), hullLocal = new Vec3();
 				if (!shieldHit) hullLocal.set(local);
 				else if (segmentHit(target, at, target.pos, hit, hullLocal) < 0f) return;
-				empHit(target, hullLocal, w.emp, at, Float.MAX_VALUE / 4f);
+				empHit(attacker, target, hullLocal, w.emp, at, Float.MAX_VALUE / 4f);
 			}
 		}
 		if (w.empArcsMax > 0) exotic.onHit(attacker, target, w, at, local, shieldHit); // Voltaic Cannon
@@ -1300,14 +1311,54 @@ public final class Combat {
 	 * the reduction scaled by Tuning.armorReductionMult (0.7: armor stops 30% less than in vanilla).
 	 */
 	public float armorDamageMult(float hitStrength, float armorHere, float armorRating) {
-		float effArmor = Math.max(armorHere, armorRating * minArmorFraction);
-		float through = effArmor > 0f ? Math.max(1f - maxArmorDamageReduction, hitStrength / (hitStrength + effArmor)) : 1f;
+		return armorDamageMult(hitStrength, armorHere, armorRating, minArmorFraction, maxArmorDamageReduction);
+	}
+
+	/**
+	 * Energy Weapon Mastery and Ranged Specialization (vanilla runs them as damage listeners): the
+	 * shooter's multiplier for a projectile or beam hit `dist` (3D units) from where it was fired.
+	 * Missiles get neither. Both are percent bonuses on the same hit, so they add. Distances are
+	 * compared in vanilla units (3D ranges are vanilla's times the weapon range mult).
+	 */
+	float rangeBonus(Ship3D shooter, WeaponSpec3D w, float dist) {
+		if (shooter == null || w.kind == WeaponSpec3D.Kind.MISSILE) return 1f;
+		CombatStats cs = shooter.stats;
+		if (!cs.energyMastery && !cs.rangedSpec) return 1f;
+		float d = dist / Math.max(1e-3f, tuning.weaponRangeMult);
+		float pct = 0f;
+		if (cs.energyMastery && "ENERGY".equals(w.type)) {
+			float mag = cs.energyFluxMult(shooter.flux) - 1f;
+			float f = d <= skills.ewmMinRange ? 1f : d >= skills.ewmMaxRange ? 0f
+					: 1f - (d - skills.ewmMinRange) / Math.max(1f, skills.ewmMaxRange - skills.ewmMinRange);
+			if (mag > 0f) pct += mag * f * 100f;
+		}
+		if (cs.rangedSpec) {
+			float f = Math.max(0f, Math.min(1f, (d - skills.rsMinRange) / Math.max(1f, skills.rsMaxRange - skills.rsMinRange)));
+			float chance = Math.round(skills.rsMaxPercent * f);
+			if (chance > 0f) pct += skills.rsCrits ? (rnd.nextFloat() < chance * 0.01f ? skills.rsCritPercent : 0f) : chance;
+		}
+		return 1f + pct * 0.01f;
+	}
+
+	/** The shooter's damage multiplier against missiles (Point Defense). */
+	static float vsMissiles(Ship3D shooter) {
+		return shooter != null ? shooter.stats.toMissiles : 1f;
+	}
+
+	/** As above with the target's own armor rules (Impact Mitigation, Polarized Armor, Ablative Armor change them). */
+	public float armorDamageMult(float hitStrength, float armorHere, float armorRating, float minFraction, float maxReduction) {
+		float effArmor = Math.max(armorHere, armorRating * minFraction);
+		float through = effArmor > 0f ? Math.max(1f - maxReduction, hitStrength / (hitStrength + effArmor)) : 1f;
 		return 1f - (1f - through) * tuning.armorReductionMult;
 	}
 
 	/**
 	 * Vanilla-style armor/hull damage for one hit at a local (unscaled, just-outside-the-hull) point.
 	 * hitStrength drives armor reduction (shots: damage x armor mult; beams: dps x 0.5 x armor mult).
+	 * Skill and hullmod stats apply as vanilla's damage code does: the attacker's damage vs the target's
+	 * size and hit strength bonus, the target's damage taken by delivery and type, its armor rules
+	 * (effective armor, least armor, most reduction, kinetic armor damage taken), the attacker's damage
+	 * to hull, then the target's Damage Control. Collisions keep the plain rules.
 	 * Returns {armorDealt, hullDealt}.
 	 */
 	float[] dealDamage(Ship3D attacker, Ship3D target, float dmg, float hitStrength, WeaponSpec3D w, Vec3 localOutside) {
@@ -1316,9 +1367,24 @@ public final class Combat {
 			return new float[] {0f, 0f};
 		}
 		dmg *= target.sysDamageTakenMult; // Damper Field
-		if (attacker != null && attacker != target) {
+		float empDmg = dmg;
+		boolean other = attacker != null && attacker != target;
+		if (other) {
 			target.lastHitBy = attacker;
 			if (target == numbersFor) attacker.lastHitPlayerAt = clock;
+		}
+		CombatStats ts = target.stats;
+		boolean ram = w == RAM;
+		float armorTaken = target.armorTakenMult;
+		if (!ram) {
+			float vs = other ? attacker.stats.vsTarget(target) : 1f;
+			dmg *= vs * ts.hullTaken(w, arcInProgress);
+			hitStrength *= vs;
+			if ("KINETIC".equals(w.damageType)) armorTaken *= ts.kineticArmorTaken;
+		}
+		if (!ram) {
+			hitStrength *= armorTaken; // vanilla: armor damage taken also weakens the hit against armor
+			if (other) hitStrength = attacker.stats.hitStrength(hitStrength);
 		}
 		int surface = target.volume != null ? target.volume.surfaceClass(localOutside.x, localOutside.y, localOutside.z) : 1;
 		int sector = ArmorShell.sector(localOutside.x, localOutside.z, surface);
@@ -1326,19 +1392,26 @@ public final class Combat {
 		ArmorShell armor = target.armor;
 		float armorHere = armor != null ? armor.armorAt(sector) : 0f;
 		float armorRating = armor != null ? armor.rating : 0f;
-		float reduction = armorDamageMult(hitStrength, armorHere, armorRating);
-		float toArmor = dmg * w.armorMult * reduction * target.armorTakenMult;
+		float reduction = ram ? armorDamageMult(hitStrength, armorHere, armorRating)
+				: armorDamageMult(hitStrength, ts.effectiveArmor(armorHere), armorRating,
+						Float.isNaN(ts.minArmorFraction) ? minArmorFraction : ts.minArmorFraction,
+						Float.isNaN(ts.maxArmorReduction) ? maxArmorDamageReduction : ts.maxArmorReduction);
+		float toArmor = dmg * w.armorMult * reduction * armorTaken;
 		if (armor != null && armorHere > 0f) {
 			armorDealt = Math.min(toArmor, armorHere);
 			armor.strip(sector, armorDealt);
 		}
 		float overflow = toArmor > 0f ? Math.max(0f, toArmor - armorDealt) / toArmor : 1f;
 		float hullDealt = dmg * overflow * w.hullMult * reduction * target.hullTakenMult * target.sysHullTakenMult; // Darkened Gaze: x2
+		if (!ram) {
+			if (other) hullDealt *= attacker.stats.toHull;
+			hullDealt = ts.damageControl(hullDealt, skills);
+		}
 		target.hull = Math.max(0f, target.hull - hullDealt);
 		// EMP rides along in proportion to the damage (beams: EMP/s over dps; partial blasts scale too).
 		if (w.emp > 0f && w.damage > 0f && !arcInProgress) {
-			float emp = dmg * (w.emp / w.damage) * (tuning.empArmorReduces ? reduction : 1f);
-			empHit(target, localOutside, emp, null);
+			float emp = empDmg * (w.emp / w.damage) * (tuning.empArmorReduces ? reduction : 1f);
+			empHit(attacker, target, localOutside, emp, null);
 		}
 		target.hitFlash = Math.max(target.hitFlash, 0.12f);
 		if (target.hull <= 0f && !target.destroyed) destroy(target);
@@ -1514,7 +1587,7 @@ public final class Combat {
 			Effect arc = new Effect(Effect.Kind.ARC, s.pos, Math.max(3f, 2.5f * s.scale), 0.3f).color(ac[0], ac[1], ac[2]);
 			if (o instanceof Missile3D) {
 				Missile3D m = (Missile3D) o;
-				m.hp -= spec.damage;
+				m.hp -= spec.damage * vsMissiles(s);
 				arc.end.set(m.pos);
 			} else {
 				Ship3D t = (Ship3D) o;
@@ -1557,7 +1630,7 @@ public final class Combat {
 				float[] dealt = dealDamage(source, t, damage, damage, EMITTER, local);
 				tally(source, t, hit, dealt[0] + dealt[1], dealt[1] > 0.5f, dealt[0] > 0.5f);
 			}
-			if (emp > 0f) empHit(t, local, emp, from);
+			if (emp > 0f) empHit(source, t, local, emp, from);
 			arc.end.set(hit);
 			if (t.hull <= 0f && !t.destroyed) destroy(t);
 		} else {
@@ -1591,16 +1664,18 @@ public final class Combat {
 
 	/**
 	 * EMP reaching a ship at a local (unscaled) point jumps to the nearest working weapon or engine
-	 * within reach; enough of it disables that component until repaired. Drawn as an arc.
+	 * within reach; enough of it disables that component until repaired. Drawn as an arc. The
+	 * target's weapon / engine damage taken and the attacker's (may be null) damage to them scale it.
 	 */
-	void empHit(Ship3D target, Vec3 local, float emp, Vec3 arcFromWorld) {
-		empHit(target, local, emp, arcFromWorld, Math.max(tuning.empArcMin, target.baseRadius * tuning.empArcFrac));
+	void empHit(Ship3D attacker, Ship3D target, Vec3 local, float emp, Vec3 arcFromWorld) {
+		empHit(attacker, target, local, emp, arcFromWorld, Math.max(tuning.empArcMin, target.baseRadius * tuning.empArcFrac));
 	}
 
 	/** As above with an explicit reach (unscaled units); piercing arcs seek the nearest component anywhere. */
-	void empHit(Ship3D target, Vec3 local, float emp, Vec3 arcFromWorld, float reach) {
+	void empHit(Ship3D attacker, Ship3D target, Vec3 local, float emp, Vec3 arcFromWorld, float reach) {
 		if (emp <= 0f || target.destroyed || target.phased) return;
 		emp *= target.empTakenMult;
+		boolean other = attacker != null && attacker != target;
 		float best = reach * reach;
 		WeaponMount bestM = null;
 		int bestE = -1;
@@ -1630,6 +1705,7 @@ public final class Combat {
 				: target.rot.rotate(local.x * target.scale, local.y * target.scale, local.z * target.scale, new Vec3()).add(target.pos);
 		boolean knockedOut = false;
 		if (bestM != null) {
+			emp *= target.stats.weaponTaken * (other ? attacker.stats.toWeapons : 1f);
 			bestM.hp -= emp;
 			if (bestM.hp <= 0f) {
 				bestM.hp = 0f;
@@ -1637,6 +1713,7 @@ public final class Combat {
 				knockedOut = true;
 			}
 		} else {
+			emp *= target.stats.engineTaken * (other ? attacker.stats.toEngines : 1f);
 			target.engineHp[bestE] -= emp;
 			if (target.engineHp[bestE] <= 0f) {
 				target.engineHp[bestE] = 0f;
@@ -1671,7 +1748,7 @@ public final class Combat {
 			arcInProgress = false;
 		}
 		tally(attacker, target, hit, dealt[0] + dealt[1], dealt[1] > 0.5f, dealt[0] > 0.5f);
-		empHit(target, local, emp, fromWorld, Float.MAX_VALUE / 4f);
+		empHit(attacker, target, local, emp, fromWorld, Float.MAX_VALUE / 4f);
 		if (target.hull <= 0f && !target.destroyed) destroy(target);
 	}
 
@@ -1778,7 +1855,7 @@ public final class Combat {
 		for (Missile3D ms : missiles) {
 			if (ms == spare || ms.owner == owner) continue;
 			float d = (float) Math.sqrt(dist2(ms.pos, at)) - ms.spec.missileRadius;
-			if (d <= radius) ms.hp -= damage * falloff(d, core, radius);
+			if (d <= radius) ms.hp -= damage * falloff(d, core, radius) * vsMissiles(source);
 		}
 		Vec3 hit = new Vec3(), local = new Vec3(), sHit = new Vec3(), sDir = new Vec3();
 		float[] sT = new float[1];
@@ -1916,6 +1993,9 @@ public final class Combat {
 	 */
 	float shieldDamage(Ship3D attacker, Ship3D target, float dmg, WeaponSpec3D w, boolean soft, Vec3 at, Vec3 localDir, boolean text) {
 		float sd = dmg * w.shieldMult * target.sysShieldDamageTakenMult * shieldMarkMult(target); // Fortress Shield, graviton beams
+		// Skills and hullmods: the attacker's damage vs this size and to shields, the target's shield damage by delivery and type.
+		if (attacker != null && attacker != target) sd *= attacker.stats.vsTarget(target) * attacker.stats.toShields;
+		sd *= target.stats.shieldTaken(w, soft);
 		boolean wasOverloaded = target.flux.overloaded();
 		target.flux.absorb(sd, soft || w.softOnShields, localDir, tuning); // Voidblaster: soft flux
 		if (!soft && w.empArcs && w.emp > 0f && rnd.nextFloat() < pierceChance(target)) piercingArc(attacker, target, at, dmg, w.emp, w);
@@ -2055,12 +2135,12 @@ public final class Combat {
 				}
 			}
 			if (bestMissile == null && shielded != null) {
-				shieldDamage(p.source, shielded, p.spec.damage * p.damageMult, p.spec, false, sHit, sDir, true);
+				shieldDamage(p.source, shielded, p.spec.damage * p.damageMult * rangeBonus(p.source, p.spec, sHit.distance(p.origin)), p.spec, false, sHit, sDir, true);
 				push(shielded, sHit, p.vel, shotImpulse(p.spec, p.spec.damage * p.damageMult));
 				onHitEffects(p.source, shielded, p.spec, sHit, null, true);
 				it.remove();
 			} else if (bestMissile != null) {
-				bestMissile.hp -= p.spec.damage;
+				bestMissile.hp -= p.spec.damage * vsMissiles(p.source) * rangeBonus(p.source, p.spec, bestMissile.pos.distance(p.origin));
 				effects.add(new Effect(Effect.Kind.SPARK, bestMissile.pos, 12f, 0.2f)
 						.color(p.spec.fringeColor[0], p.spec.fringeColor[1], p.spec.fringeColor[2]));
 				it.remove();
@@ -2133,7 +2213,8 @@ public final class Combat {
 	private void applyHit(Ship3D target, Projectile p, Vec3 hitWorld, Vec3 localOutside) {
 		WeaponSpec3D w = p.spec;
 		push(target, hitWorld, p.vel, shotImpulse(w, w.damage * p.damageMult));
-		float[] dealt = dealDamage(p.source, target, w.damage * p.damageMult, w.damage * p.damageMult * w.armorMult, w, localOutside);
+		float rb = rangeBonus(p.source, w, hitWorld.distance(p.origin)); // Energy Weapon Mastery, Ranged Specialization
+		float[] dealt = dealDamage(p.source, target, w.damage * p.damageMult * rb, w.damage * p.damageMult * rb * w.armorMult, w, localOutside);
 		onHitEffects(p.source, target, w, hitWorld, localOutside, false);
 		Effect spark = new Effect(Effect.Kind.SPARK, hitWorld, Math.max(10f, w.projWidth * 4f) + w.damage * 0.04f, 0.25f)
 				.color(w.fringeColor[0], w.fringeColor[1], w.fringeColor[2]);

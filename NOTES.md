@@ -5,6 +5,133 @@ known issues and next steps. Newest status first.
 
 ## Status
 
+- **2026-10-14 — Officer skills and hullmods in 3D (user asked "do officer skills work in 3D yet?", then "start on
+  this" for the gaps: damage vs targets, per-ship armor rules, the skills vanilla runs as combat listeners, Gunnery
+  Implants' recoil and autofire leading). New bench group `S3D_ONLY=skillStats` (11 checks). Not committed, jar not
+  rebuilt. Awaiting in-game test.**
+  - `core/CombatStats` on every ship (`Ship3D.stats`, defaults change nothing): damage dealt vs fighters / each hull size
+    (a module counts as its station) / missiles, to shields, hull, weapons, engines; hit strength bonus; the target's
+    effective armor bonus, least armor fraction, most armor reduction, kinetic armor damage taken; hull/armor and shield
+    damage taken by delivery (beam / missile / projectile) and damage type; EMP to weapons / engines taken; recoil
+    multipliers; autofire aim accuracy and IPDAI's perfect PD leading.
+  - `host/SkillStats` copies these from the puppet's MutableShipStats every frame (fighters twice a second; Session3D
+    `refreshSkillStats`), and now also re-reads armor / hull / EMP damage taken and shield flux per damage live (they
+    were read once at deployment). Polarized Armor's flux-based part is vanilla's own listener on the puppet: it sets the
+    puppet's effective armor bonus and EMP taken from the hard flux we write back; the log line "effective armor now
+    +X%" confirms it works in game. Each ship logs one "skills/hullmods in 3D for ..." line listing what isn't default.
+  - Listener skills rebuilt in core, spotted with `ShipAPI.hasListenerOfClass` (numbers in `core/SkillRules`, copied
+    from vanilla's public statics when a battle starts): Energy Weapon Mastery (bonus = magnitude x flux level above
+    the minimum level, the same linear rule as vanilla's ship method; full at 600 and closer, none from 1000), Ranged
+    Specialization (none to 800, +30% from 1600; crit mode if a mod switches CRITS on), Damage Control elite (at most
+    once per 2 s, hull damage past 500 from one hit cut by 60%; any hull/armor hit spends it, as in vanilla), Combat
+    Endurance regen (0.5% of max hull per second, at most max(2000, half the hull) per battle). Distances are compared
+    in vanilla units (3D distance / weapons.rangeMult).
+  - Where it applies (`Combat`): `dealDamage` (vs-size and taken multipliers on the damage; hit strength x armor
+    damage taken x kinetic armor taken, then the attacker's bonus, in vanilla's order; the target's effective armor,
+    least armor and most reduction; damage to hull after armor; then Damage Control), `shieldDamage` (vs size x to
+    shields x shield taken), `empHit` (now takes the attacker: weapon / engine taken x damage to weapons / engines),
+    every missile-HP hit (damage to missiles), projectile and beam hits (`rangeBonus`). Collisions keep the plain rules.
+  - Gunnery Implants: spread floor and cap x max recoil mult, buildup x per-shot mult (small weapons also their own
+    mult), recovery x decay mult (vanilla's spread tracker). Autofire leading: vanilla's autofire aims at the true lead
+    divided by (2 - accuracy): no skill = half the lead, Gunnery Implants = all of it; a weapon's autofireAccBonus and
+    IPDAI PD take it to all of it too (`Sim.underLead`, `CombatStats.leadFactor`, `weapons.unskilledLeadFactor`).
+  - Measured (AiArena, 30 mixed battles, 6 seeds, `S3D_ARENA_TUNE=unskilledLeadFactor=1|1.5|2`; nobody has the
+    skill there): perfect lead 347 ships destroyed, decided battles 151 s on average; vanilla's half lead 337, 168 s;
+    1.5 in between (349, 160 s). Kiting at long range suffers most: the bench's cautious Wolf standing off an Enforcer
+    deals 764 instead of 3394. **User chose the vanilla rule** (`weapons.unskilledLeadFactor` 2; 1 = everyone leads
+    perfectly as before). That caution check now gives both its ships full leading (it tests positioning, not aim).
+  - How vanilla does it was read from the API sources (skills) and javap of the obfuscated damage, spread-tracker and
+    autofire classes (understanding only, nothing copied).
+  - Not done: Polarized Armor's jitter (vanilla tints the ship above 75% hard flux); officer personality (separate step;
+    the AI session's hook is ShipAI3D's per-pilot aggression / caution).
+- **2026-10-14 — Enemy AI rebuilt after AI Tweaks, plus +15% manoeuvrability (user: "the AI is still not there yet,
+  it should be more aggressive, some ships just stand idle; they should either pursue, attack or retreat. A flat 15%
+  boost to manoeuvrability of all ships. Grind the gears on this one", then "the AI Tweaks folder is the gold standard
+  for me; it's fine if they are idle somewhat"). Full bench 140/140 (4 new checks, `S3D_ONLY=aiTweaks`). Jar NOT
+  rebuilt yet (peers active). Awaiting in-game test.**
+  - New dev tool `src-tools/s3d/tools/AiArena.java` (main class, run like the bench with `MAIN=s3d.tools.AiArena`):
+    five battle types (12v12 line battle, the same with the enemy admiral's escort and capture orders, 10 v boss + 4
+    escorts, fast frigates v slow capitals, 8v8 brawl), measuring **idle time** (no shot at an enemy for 3 s, not
+    closing, not backing off) and its cause (`ShipAI3D.activity`). `S3D_ARENA_AB="caution=0.5"` fights mirrored
+    battles with per-pilot settings on one side (each seed twice, sides swapped); `S3D_ARENA_TRACE`, `S3D_ARENA_WATCH=<id>`.
+  - What made ships idle before (14.7% of ship-time, one capture ship 139 s): admiral escort/capture orders (sitting
+    by the flagship / on a taken objective), the fleet-cohesion pull dragging ships off chases, broadside ships circling
+    just out of reach, slow ships chasing faster targets forever, ships stuck at 98% flux backing off in slow reverse
+    for 25 s+ without venting, capitals flying away at full throttle while their 4 deg/s turn came round.
+  - **AI Tweaks** (`~/Downloads/starsector-ai-tweaks-master`, Halke's mod, public domain; read for ideas, nothing
+    copied, rebuilt for 3D; summary in the ShipAI3D class comment): target scoring (`attackScore`: turning time, guns'
+    reach and dps share at range, target flux, Damper bricks, big-v-big for slow capitals, friends already on it, helpless,
+    stickiness, never behind a friendly hull), fleet segmentation (big slow ships go for the enemy's main group, not lone
+    frigates), range = shortest primary gun (here x0.92 and to the target's centre: our guns fire once the centre is in
+    range, vanilla's at the hull, so "range + target radius" parked frigates outside their own guns), threat-vector attack
+    spot + attack coordination (friends on one target spread round it) + orbit/strafe one on one, flown on thrusters
+    (`orbitCourse`/`drive`), broadsides held on the target the same way, the vent module (back off on hard flux > 75% or
+    flux heading past 93%, away from the threats until safe, then park out of its own reach and vent; vent when safe at
+    50% / 30% idle; safety = fire inbound + guns reaching during the vent v hull x level^4, frigates only with nothing
+    near; finish a badly hurt target first), fire to 93% flux.
+  - Own additions: pursue flat out (throttle by alignment, thrusters toward the target while turning), stall breaker
+    (in reach but no shot for 3 s: range pulled in, then a flank), hopeless chase given up after 6 s, `hunt` with nothing
+    to fight, a back-off that can't shake its chaser fights on after 10 s (in 3D reverse/strafe are slow, so running from
+    an equal is hopeless), station sections vent only when needed, `Tuning.aiAggression` (ai.aggression, default 1).
+  - Orders: `Order3D.admiral` (enemy's or an ally's, set in BattleSession): escort/hold = where to fight first (any
+    target, pulled back past 2.5x the leash), capture ends once the point is ours. **Your own orders are unchanged.**
+  - A/B, 24 mirrored battles each (6 seeds x brawl/lines x sides): new v previous AI ahead in 18-20, about 1.3M v 0.8M
+    damage, half the losses; every AI Tweaks part won or tied on its own (back-off movement 23/1, targeting 19/5, vent
+    rules 17/7, range 16/8, orbit 14/10, broadside 12/12). Caution still pays (caution 0 loses 9/15), opportunism too
+    (16/8); aggression 0/1/2 are within noise (2 trades more ships). Arena: idle 14.7% -> 4.6%, longest 139 s -> 23 s,
+    firing 41% -> 48%, first kill 52 s -> 39 s. Pure-AI sim cost unchanged (15v15 check passes).
+  - **Manoeuvrability**: `flight.maneuverMult` 1.15 (`FlightParams.derive`): turn rate, turn acceleration (spin-up time
+    kept), acceleration, deceleration, strafe acceleration; not top speed. Onslaught yaw 3.9 -> 4.5 deg/s.
+  - Bench changes: AI omni shield fixture uses a real hull (a 1e9-hull ship vents through fire under the new safety
+    rule); canister flak Manticore holds its spot; station assault no longer requires damage to attackers (they now pick
+    modules off from angles the others can't cover: 12 station shots, none hit); caution kite counts a careless Wolf that
+    dies early as in reach; opportunism check runs with aggression 0. Bench edits applied as idempotent hunks
+    (scratchpad `sync_bench.py`) because CombatBench is shared.
+  - To watch in game: enemy fleets now push in and focus fire; ships at high hard flux break off and come back after
+    venting (that's the AI Tweaks back-off, not idling); slow capitals still can't catch frigates; whether admiral escorts
+    leave their flagship too readily (pulled back past 2.5x the leash).
+
+- **2026-10-14 — Retro filter for ships, optional (user, with two PS1-era reference shots: "the current voxel look
+  seems janky... make the filters optional"). Compiles; offline look check `S3D_PREVIEW_ONLY=retro` ->
+  build/preview/retro_sheet.png, retro_zoom.png, retro_<view>_<variant>.png. Awaiting in-game test.**
+  - Tuning `retro` section: `filter` "ships" (default) / "scene" / "off"; `pixelSize` 3 (screen pixels per retro
+    pixel); `colorBits` 5 (PS1 15-bit colour; 8 = no quantising); `dither` 1.0 (4x4 Bayer, in retro pixels);
+    `wobble` 0 (PS1 vertex snap to a grid of N retro pixels; 1 = authentic). K reloads it mid-battle.
+  - "ships": hulls + turrets (incl. phased ghosts) render into `render/RetroTarget` (screen/pixelSize colour + depth
+    textures, no MSAA), then a full-screen composite (`Shaders.RETRO_FS`) writes them into the scene target, nearest-
+    sampled and dithered, with `gl_FragDepth` from the low-res depth so missiles, shields, beams and other effects
+    still sort against hulls. Premultiplied blend keeps phased ships see-through. Effects, sky, stars, HUD stay sharp.
+  - "scene": the scene target itself is screen/pixelSize without MSAA, composited nearest + dithered; stars keep their
+    on-screen size (point size scaled, sub-pixel ones dim instead). HUD stays sharp.
+  - Missile bodies are not filtered (too small at low res). System looks (jitter copies, glows) draw at full res over
+    the low-res hull; looked fine in the systemFx preview.
+- **2026-10-14 — Your ship panel in vanilla's HUD font, with weapon icons and vanilla's status list (user, with a
+  vanilla screenshot: "replace the font with the vanilla ones, have the little weapon icons beside the weapon name, and
+  the other info in vertical (ECM rating, peak time etc. with their icons); keep the same blue colorway"). Compiles;
+  offline look check `S3D_PREVIEW_ONLY=shipPanel` -> build/preview/ship_panel.png. Awaiting in-game test.**
+  - Font: vanilla's combat HUD uses Victor's Pixel Font (`graphics/fonts/victor14.fnt`, found in its combat UI
+    classes). New `render/BitmapFont` reads AngelCode .fnt + page through new `render/GameFiles` (host: the game's
+    `openStream`, so mods' files too; preview: the install), nearest-filtered at whole pixels, +1 px between letters as
+    vanilla draws it (measured off the user's screenshot: 7 px letters on an 8 px step). 2x from 1800 px tall. Only your
+    ship panel and the status list use it; the rest of the HUD keeps its font. Falls back to the HUD font if it fails.
+  - Weapon icons: `WeaponSpec3D.iconSprites` = the weapon's turret sprite layers (under, base, barrel; hardpoint ones if
+    it has no turret sprite), from ShipBridge. `render/HudIcons` stacks them into a white-by-brightness silhouette with
+    the sprite's alpha, tinted in the row's cyan (fx mode 10). Slot shape as before if a weapon has no sprite. Gotcha:
+    the icon textures are created before the panel's glBegin (GL drops texture uploads inside glBegin/glEnd: first
+    attempt drew some other texture as blue blocks).
+  - Status list: `host/VanillaStatus` reads vanilla's own list back every frame (CombatState.getShipInfo()
+    .getStatusList(): its first List field, each entry's icon `getSpriteName()` and two `LabelAPI` lines, red data line
+    = debuff, `getFader().getBrightness()` for its fade). So it shows exactly what vanilla would: Command Network, ECM,
+    Coordinated Maneuvers, peak time, CR, terrain (ion storms), skills, hullmods, other mods' statuses. The game's
+    script class loader refuses `java.lang.reflect` to mods, so fields/methods are held as Objects and used through
+    `java.lang.invoke` handles; only public method names and public interfaces are relied on. Any failure: logged once
+    ("can't read vanilla's status list"), no list. First success logs "reading vanilla's status list: N entries...".
+    Drawn above your hologram, bottom entry first, at most 9 (the throttle scale is above), titles bright cyan, data
+    cyan, debuff data red (the panel's own warning red).
+  - Unverified until played: that vanilla keeps its (faded-out) ship panel's status list updating while the 3D view
+    is up (hideShipInfo only fades it, per the bytecode); label order (title first) on the live widget; the offline
+    preview's GL prints a one-off "texture unloadable" warning that the game may or may not show.
+
 - **2026-10-13 23:55 — Bug-report files for playtesters (user: "how will a player report bugs?", then "implement 3D
   specific error logging"; testers will post to a Discord channel or a separate public issues repo). Compiles; a
   throwaway harness with a fake SettingsAPI passed 12/12 (it isn't part of the bench: BattleLog needs Global). Jar NOT
@@ -1370,7 +1497,7 @@ Bench (`./build.sh bench`, default tuning):
    ([ / ] other ships), P pause, Tab command map, F9 twice = finish in vanilla 2D, G / F10 / \ hide HUD,
    I perf readout, O hide 3D view (debug), K reload tuning. Sandbox: [ / ] hull, N repair, B incoming fire.
    Tune feel in `data/config/s3d_tuning.json`, press `K` in game to reload (the perf readout shows the file hash,
-   so you can tell whether the reload picked up your edit).
+   so you can tell whether the reload picked up your edit). Retro filter: `retro.filter` "ships" / "scene" / "off".
 4. Log: `Starsector.app/logs/starsector.log`, lines starting with `S3D`.
 5. Dev tools: `./build.sh` (jar), `./build.sh bench`, `./build.sh preview [hullIds…]`
    (writes `build/preview/*.png`, flight strip, benchmark, mission icon).

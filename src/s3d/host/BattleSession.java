@@ -776,6 +776,7 @@ final class BattleSession extends Session3D {
 					}
 				}
 				Order3D o = s.ai != null ? readOrder(ship, s) : null;
+				if (o != null) o.admiral = ship.getOwner() != 0 || ship.isAlly(); // the enemy's or an ally's admiral, not yours
 				if (o == null ? s.order != null : !o.sameAs(s.order)) {
 					log.info("S3D: " + s.name + (o != null ? " ordered: " + o : " has no orders: fights freely"));
 					s.order = o;

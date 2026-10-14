@@ -28,6 +28,12 @@ public final class Tuning implements Cloneable {
 	/** Multiplies hull turn acceleration (after the curve keeps the hull's spin-up time). Higher = snappier. */
 	public float turnAccelMult = 2f;
 	/**
+	 * Flat manoeuvrability bonus for every ship (turn rate, turn acceleration, acceleration, deceleration and strafing;
+	 * top speed unchanged), like vanilla's Maneuvering Jets. User (2026-10-14): "a flat 15% boost to manoeuvrability of
+	 * all ships".
+	 */
+	public float maneuverMult = 1.15f;
+	/**
 	 * User (2026-10-12): "a tad faster", +15% top speed (0.5 -> 0.575); later the same day +50% on top
 	 * (0.575 -> 0.8625), with weapon ranges halved. Acceleration and turning unchanged.
 	 */
@@ -102,6 +108,24 @@ public final class Tuning implements Cloneable {
 	/** Shield glow strength (additive; lower = easier to see through). */
 	public float shieldBrightness = 0.45f;
 
+	// ---- retro filter (optional; user request 2026-10-14) ----
+	/** "off", "ships" (hulls and turrets only; effects and HUD stay sharp) or "scene" (the whole 3D view; HUD stays sharp). */
+	public String retroFilter = "ships";
+	/** Screen pixels per retro pixel (1 = full resolution). */
+	public int retroPixelSize = 3;
+	/** Bits per colour channel after the filter: 5 = PS1-style 15-bit colour, 8 or more = no banding. */
+	public int retroColorBits = 5;
+	/** Ordered (4x4 Bayer) dither strength, 0..1; 0 = plain rounding (visible banding). */
+	public float retroDither = 1f;
+	/** PS1 vertex wobble: hull corners snap to a grid this many retro pixels wide (0 = off). */
+	public float retroWobble = 0f;
+
+	/** The filter's mode as one of "off", "ships", "scene". */
+	public String retroMode() {
+		String f = retroFilter == null ? "off" : retroFilter.trim().toLowerCase();
+		return f.equals("ships") || f.equals("scene") ? f : "off";
+	}
+
 	// ---- weapons ----
 	/** Global multiplier on vanilla weapon ranges (1 = vanilla). User: halved 2 -> 1 (2026-10-12), then +20% flat, 1.2 (2026-10-13). */
 	public float weaponRangeMult = 1.2f;
@@ -110,6 +134,12 @@ public final class Tuning implements Cloneable {
 	 * maxArmorDamageReduction) times this. User (2026-10-12): 30% less, so 0.7 (the 85% cap becomes 59.5%).
 	 */
 	public float armorReductionMult = 0.7f;
+	/**
+	 * Autofire target leading of a ship with no leading skill: it aims at the true lead over this
+	 * (vanilla 2 = half the lead; Gunnery Implants brings it to 1). 1 = every ship leads perfectly,
+	 * as the 3D sim did before skills were read (2026-10-14).
+	 */
+	public float unskilledLeadFactor = 2f;
 	/** Radius of the mouse reticle circle, pixels. */
 	public float reticleRadiusPx = 11f;
 	/** Lead circle radius relative to the reticle (1.1 = 10% bigger). Reticle inside it = shots go to the lead. */
@@ -343,6 +373,16 @@ public final class Tuning implements Cloneable {
 	 * fighters instead of flashing past them.
 	 */
 	public float aiOpportunism = 1f;
+	/**
+	 * How hard AI ships press the fight (0 = the old, standoffish pilots; 1 = default; 2 = reckless). User
+	 * (2026-10-14): "more aggressive, some ships just stand idle; they should never be idle, they should either
+	 * pursue, attack or retreat." Aggression pulls the fighting range in when a ship is ahead in the duel (flux,
+	 * hull, guns on it), keeps it firing to higher flux before it backs off to vent, and softens caution
+	 * (others' guns, crowded targets) while it has the upper hand. Whatever the setting, a ship with a target
+	 * out of reach pursues it, one in reach that isn't getting shots off closes in and finds another angle, a
+	 * hopeless chase is given up for a nearer enemy, and one with nothing to shoot at hunts the nearest enemy.
+	 */
+	public float aiAggression = 1f;
 
 	// ---- keys (LWJGL Keyboard names) ----
 	public final Map<String, String> keys = new LinkedHashMap<>();
@@ -398,6 +438,7 @@ public final class Tuning implements Cloneable {
 			t.rollRateMult = num(f, "rollRateMult", t.rollRateMult);
 			t.rollRateMinDeg = num(f, "rollRateMinDeg", t.rollRateMinDeg);
 			t.turnAccelMult = num(f, "turnAccelMult", t.turnAccelMult);
+			t.maneuverMult = num(f, "maneuverMult", t.maneuverMult);
 			t.speedMult = num(f, "speedMult", t.speedMult);
 			t.accelMult = num(f, "accelMult", t.accelMult);
 			t.decelMult = num(f, "decelMult", t.decelMult);
@@ -456,10 +497,19 @@ public final class Tuning implements Cloneable {
 			t.engineFlameScale = num(r, "engineFlameScale", t.engineFlameScale);
 			t.shieldBrightness = num(r, "shieldBrightness", t.shieldBrightness);
 		}
+		JSONObject rf = root.optJSONObject("retro");
+		if (rf != null) {
+			t.retroFilter = rf.optString("filter", t.retroFilter);
+			t.retroPixelSize = Math.max(1, rf.optInt("pixelSize", t.retroPixelSize));
+			t.retroColorBits = Math.max(1, rf.optInt("colorBits", t.retroColorBits));
+			t.retroDither = Math.max(0f, Math.min(1f, num(rf, "dither", t.retroDither)));
+			t.retroWobble = Math.max(0f, num(rf, "wobble", t.retroWobble));
+		}
 		JSONObject wp = root.optJSONObject("weapons");
 		if (wp != null) {
 			t.weaponRangeMult = num(wp, "rangeMult", t.weaponRangeMult);
 			t.armorReductionMult = num(wp, "armorReductionMult", t.armorReductionMult);
+			t.unskilledLeadFactor = Math.max(1f, num(wp, "unskilledLeadFactor", t.unskilledLeadFactor));
 			t.weaponConvergence = num(wp, "convergence", t.weaponConvergence);
 			t.reticleRadiusPx = num(wp, "reticleRadiusPx", t.reticleRadiusPx);
 			t.leadCircleScale = num(wp, "leadCircleScale", t.leadCircleScale);
@@ -604,6 +654,7 @@ public final class Tuning implements Cloneable {
 			t.aiFlankChance = num(ai, "flankChance", t.aiFlankChance);
 			t.aiCaution = num(ai, "caution", t.aiCaution);
 			t.aiOpportunism = num(ai, "opportunism", t.aiOpportunism);
+			t.aiAggression = num(ai, "aggression", t.aiAggression);
 		}
 		JSONObject k = root.optJSONObject("keys");
 		if (k != null) {
