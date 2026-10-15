@@ -151,8 +151,25 @@ final class BattleLog extends AppenderSkeleton {
 		b.refreshShips();
 	}
 
+	/**
+	 * Inside append on the thread holding doAppend's lock. Some game builds' script class loader logs every
+	 * class it loads, and this mod's jar comes from that loader: the classes append touches the first time
+	 * log a line that comes straight back here. Checked before anything else (no class to load: own field).
+	 */
+	private boolean inside;
+
 	@Override
 	protected void append(LoggingEvent e) {
+		if (inside) return;
+		inside = true;
+		try {
+			take(e);
+		} finally {
+			inside = false;
+		}
+	}
+
+	private void take(LoggingEvent e) {
 		if (Thread.currentThread() == writer) return;
 		String name = e.getLoggerName() != null ? e.getLoggerName() : "?";
 		boolean ours = name.startsWith("s3d.");

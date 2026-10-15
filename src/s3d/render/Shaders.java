@@ -91,6 +91,7 @@ final class Shaders {
 			uniform float u_dead;
 			uniform sampler2D u_nrm;
 			uniform float u_bump;
+			uniform float u_crisp; // "crisp" relief profile: crease shading strength (0 = other profiles)
 			varying vec3 v_nrm;
 			varying vec2 v_uv;
 			varying float v_side;
@@ -111,7 +112,8 @@ final class Shaders {
 					bumpW = 1.0 - wallW;
 				} else if (v_side > 1.5) {
 					// edge wall: hull colour from the sprite's edge texels, slightly darkened
-					base = mix(base, u_tint, 0.4) * 0.8;
+					// (crisp: the sprite's rim folded down over the wall, kept as it is)
+					base = u_crisp > 0.0 ? base * 0.85 : mix(base, u_tint, 0.4) * 0.8;
 				} else if (v_side > 0.5) {
 					// underside: same panels, desaturated and darker, pulled toward the hull tint
 					base = mix(vec3(lum), base, 0.55) * 0.8;
@@ -133,7 +135,16 @@ final class Shaders {
 				float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.12;
 				vec3 amb = u_ambient * (0.75 + 0.25 * n.y);
 				float fill = max(dot(n, u_fillDir), 0.0);
+				float edge = 0.0;
+				if (u_crisp > 0.0 && v_side < 2.5) {
+					// matte plating (the sprite already has its light painted in) + baked crease shading
+					edge = clamp((fract(v_side) - 0.25) / 0.2, -1.0, 1.0) * u_crisp;
+					spec = pow(max(dot(n, H), 0.0), 24.0) * (0.04 + 0.14 * lum);
+					rim *= 0.5;
+				}
 				vec3 col = base * (amb + u_lightColor * ndl + u_fillColor * fill) + u_lightColor * spec + (u_ambient + u_fillColor) * rim;
+				if (edge < 0.0) col *= 1.0 + 0.45 * edge;
+				else col += (base * 0.6 + vec3(0.05)) * edge * (0.35 + 0.65 * ndl);
 				col = mix(col, col * vec3(0.22, 0.2, 0.2), u_dead);
 				col += vec3(1.0, 0.55, 0.25) * u_hitFlash;
 				gl_FragColor = vec4(col, 1.0);

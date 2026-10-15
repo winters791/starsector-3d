@@ -390,7 +390,8 @@ public final class Renderer3D {
 				.set("u_snap", snapX, snapY)
 				.set("u_tex", 0)
 				.set("u_nrm", 1)
-				.set("u_bump", t.bumpStrength)
+				.set("u_bump", t.shipBump())
+				.set("u_crisp", t.crispMesh() ? t.meshCrispEdge : 0f)
 				.set("u_lightDir", sun.x, sun.y, sun.z)
 				.set("u_lightColor", t.sunColor)
 				.set("u_ambient", t.ambient)
@@ -471,8 +472,8 @@ public final class Renderer3D {
 			if (mt.model == null && mt.modelSource instanceof ShipModel.Source) mt.model = ShipModel.get((ShipModel.Source) mt.modelSource, t);
 			if (mt.gunModel == null && mt.gunModelSource instanceof ShipModel.Source) mt.gunModel = ShipModel.get((ShipModel.Source) mt.gunModelSource, t);
 			if (!(mt.model instanceof ShipModel)) continue;
-			mt.worldPos(s, wp);
-			mt.worldRot(s, wr);
+			mt.drawPos(s, wp);
+			mt.drawRot(s, wr);
 			drawPart((ShipModel) mt.model, wr, wp, s, cam);
 			if (mt.gunModel instanceof ShipModel) {
 				Vec3 up = wr.up(new Vec3()).scale(0.6f * s.scale);
@@ -545,14 +546,14 @@ public final class Renderer3D {
 				EngineMount e = s.engines.get(ei);
 				if (s.engineDown != null && ei < s.engineDown.length && s.engineDown[ei] > 0f) continue;
 				if (look[0] <= 0.01f || look[1] <= 0.01f) continue;
-				s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
+				s.visualRot().rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
 				float r = e.width * 0.75f * (0.5f + 0.6f * thrust) * t.engineFlameScale * s.scale * (float) Math.sqrt(look[1]);
 				GL11.glColor4f(mixc(e.r, look, 3), mixc(e.g, look, 4), mixc(e.b, look, 5), (0.22f + 0.33f * thrust) * glowA);
 				quad(p, camR, camU, r);
 			}
 			if (look[7] > 0f && !s.destroyed) {
 				for (EngineMount e : s.systemEngines) {
-					s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
+					s.visualRot().rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, p).add(s.pos);
 					GL11.glColor4f(mixc(e.r, look, 3), mixc(e.g, look, 4), mixc(e.b, look, 5), 0.55f * look[7] * glowA);
 					quad(p, camR, camU, e.width * 0.85f * t.engineFlameScale * s.scale);
 				}
@@ -568,8 +569,9 @@ public final class Renderer3D {
 		float len = e.length * (0.25f + 0.85f * thrust) * t.engineFlameScale * s.scale * look[0] * level;
 		float wid = e.width * 0.55f * t.engineFlameScale * s.scale * look[1];
 		if (len < 0.5f || wid < 0.2f) return;
-		s.rot.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, fp).add(s.pos);
-		s.rot.rotate(e.dir, fd);
+		Quat vr = s.visualRot();
+		vr.rotate(e.pos.x * s.scale, e.pos.y * s.scale, e.pos.z * s.scale, fp).add(s.pos);
+		vr.rotate(e.dir, fd);
 		fToCam.set(cam.pos).sub(fp).normalize();
 		fSide.set(fd).cross(fToCam);
 		if (fSide.lengthSq() < 1e-6f) return;
@@ -754,12 +756,12 @@ public final class Renderer3D {
 		auraShader.set("u_col", col[0], col[1], col[2]).set("u_alpha", col[3] * level).set("u_bands", 0f).set("u_textured", 1f).set("u_inflate", 0f);
 		for (WeaponMount mt : s.weapons) {
 			if (l != null && !glows(l, mt)) continue;
-			mt.worldPos(s, wp);
+			mt.drawPos(s, wp);
 			float px = "LARGE".equals(mt.spec.size) ? 18f : "MEDIUM".equals(mt.spec.size) ? 12f : 8f;
 			glowSpots.add(new float[] {wp.x, wp.y, wp.z, px * 2f * s.scale, col[0], col[1], col[2], 0.8f * Math.min(1f, col[3] * 1.4f) * level});
 			if (!(mt.model instanceof ShipModel)) continue;
 			wp.addScaled(camF, -s.scale); // a hair in front so it reads over the gun
-			mt.worldRot(s, wr);
+			mt.drawRot(s, wr);
 			weaponPart(sim, (ShipModel) mt.model, wr, wp, s);
 			if (mt.gunModel instanceof ShipModel) {
 				Vec3 up = wr.up(new Vec3()).scale(0.6f * s.scale);
@@ -800,7 +802,7 @@ public final class Renderer3D {
 			Vec3 aim = s == sim.player && sim.hasAimPoint ? sim.aimPoint
 					: s.ai != null && s.ai.target != null && !s.ai.target.destroyed ? s.ai.target.pos : null;
 			for (WeaponMount d : s.lidarDishes) {
-				d.worldPos(s, a);
+				d.drawPos(s, a);
 				float reach = d.spec.range * sim.tuning.weaponRangeMult;
 				if (aim != null) b.set(aim).sub(a);
 				else s.rot.forward(b);
@@ -869,7 +871,8 @@ public final class Renderer3D {
 		if (sim.combat.missiles.isEmpty()) return;
 		Vec3 sun = new Vec3(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize();
 		Vec3 fill = new Vec3(t.fillDir[0], t.fillDir[1], t.fillDir[2]).normalize();
-		shipShader.use().set("u_snap", 0f, 0f).set("u_tex", 0).set("u_nrm", 1).set("u_bump", t.bumpStrength)
+		shipShader.use().set("u_snap", 0f, 0f).set("u_tex", 0).set("u_nrm", 1).set("u_bump", t.shipBump())
+				.set("u_crisp", t.crispMesh() ? t.meshCrispEdge : 0f)
 				.set("u_lightDir", sun.x, sun.y, sun.z).set("u_lightColor", t.sunColor)
 				.set("u_ambient", t.ambient).set("u_fillDir", fill.x, fill.y, fill.z).set("u_fillColor", t.fillColor)
 				.set("u_camPos", cam.pos.x, cam.pos.y, cam.pos.z).set("u_hitFlash", 0f).set("u_dead", 0f);
@@ -1035,12 +1038,12 @@ public final class Renderer3D {
 			for (WeaponMount m : s.weapons) {
 				if (m.beamLevel <= 0f) continue;
 				WeaponSpec3D w = m.spec;
-				beamRibbon(cam, m.worldPos(s, o), m.beamEnd, w.beamWidth * (0.35f + 0.65f * m.beamLevel), w.fringeColor, w.coreColor, m.beamLevel);
+				beamRibbon(cam, m.drawPos(s, o), m.beamEnd, w.beamWidth * (0.35f + 0.65f * m.beamLevel), w.fringeColor, w.coreColor, m.beamLevel);
 			}
 			for (WeaponMount m : s.gazeBeams) { // Darkened Gaze
 				if (m.beamLevel <= 0f) continue;
 				WeaponSpec3D w = m.spec;
-				beamRibbon(cam, m.worldPos(s, o), m.beamEnd, w.beamWidth * (0.35f + 0.65f * m.beamLevel), w.fringeColor, w.coreColor, m.beamLevel);
+				beamRibbon(cam, m.drawPos(s, o), m.beamEnd, w.beamWidth * (0.35f + 0.65f * m.beamLevel), w.fringeColor, w.coreColor, m.beamLevel);
 			}
 		}
 		for (Combat.PayloadBeam pb : payloads) {
@@ -1060,7 +1063,7 @@ public final class Renderer3D {
 		for (Ship3D s : sim.ships) {
 			for (WeaponMount m : s.weapons) {
 				if (m.beamLevel <= 0f) continue;
-				beamGlows(m.worldPos(s, o), m, camR, camU);
+				beamGlows(m.drawPos(s, o), m, camR, camU);
 			}
 		}
 		for (Combat.PayloadBeam pb : payloads) {

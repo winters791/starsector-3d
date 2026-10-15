@@ -51,6 +51,7 @@ abstract class Session3D {
 	protected boolean overlay = true;
 	private boolean showPerf, showHud = true;
 	private final boolean[] groupKeyDown = new boolean[7];
+	private boolean hudKeyDown;
 	/** Top-row and numpad 1-7 (both select weapon groups). */
 	private static final int[] NUMPAD = {Keyboard.KEY_NUMPAD1, Keyboard.KEY_NUMPAD2, Keyboard.KEY_NUMPAD3, Keyboard.KEY_NUMPAD4,
 			Keyboard.KEY_NUMPAD5, Keyboard.KEY_NUMPAD6, Keyboard.KEY_NUMPAD7};
@@ -212,7 +213,6 @@ abstract class Session3D {
 		else if (key == cfg.key("tactical")) input.toggleTactical = true;
 		else if (key != Keyboard.KEY_NONE && key == cfg.key("pause")) togglePause(); // an optional extra key; the Cmd/Ctrl tap always works
 		else if (key == cfg.key("perfHud")) showPerf = !showPerf;
-		else if (cfg.isKey("toggleHud", key)) showHud = !showHud;
 		else if (key == cfg.key("reloadTuning")) reloadTuning();
 		else if (key == cfg.key("target")) input.selectTarget = true;
 		else if (key == cfg.key("vent")) {
@@ -263,6 +263,14 @@ abstract class Session3D {
 			}
 			groupKeyDown[i] = down;
 		}
+		// Hide UI is polled too: its keys are vanilla's Toggle UI, whose key events vanilla may take first.
+		boolean hudDown = false;
+		for (int k : cfg.keys("toggleHud")) hudDown |= Keyboard.isKeyDown(k);
+		if (hudDown && !hudKeyDown) {
+			showHud = !showHud;
+			log.info("S3D: 3D UI " + (showHud ? "shown" : "hidden"));
+		}
+		hudKeyDown = hudDown;
 		input.mouseX = Mouse.getX();
 		input.mouseY = Mouse.getY();
 		input.screenW = Math.max(1, Display.getWidth());

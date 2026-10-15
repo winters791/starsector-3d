@@ -70,6 +70,22 @@ public final class WeaponMount {
 		return s.rot.rotate(localPos.x * s.scale, localPos.y * s.scale, localPos.z * s.scale, out).add(s.pos);
 	}
 
+	/** Position as drawn: on the banked hull (visualRot). The sim fires from worldPos; the two differ only while the ship banks. */
+	public Vec3 drawPos(Ship3D s, Vec3 out) {
+		return s.visualRot().rotate(localPos.x * s.scale, localPos.y * s.scale, localPos.z * s.scale, out).add(s.pos);
+	}
+
+	/**
+	 * Orientation as drawn: the barrel points where shots go (rot x aimDir), the mount's up follows
+	 * the banked hull (visualRot), so the turret sits flush on the deck.
+	 */
+	public Quat drawRot(Ship3D s, Quat out) {
+		Vec3 dir = s.rot.rotate(aimDir, new Vec3());
+		Vec3 up = s.visualRot().up(new Vec3());
+		if (Math.abs(dir.dot(up)) > 0.99f) up = s.visualRot().forward(new Vec3()).scale(-1f);
+		return out.setLookRotation(dir, up);
+	}
+
 	/** Orientation of the barrel in world space (forward = barrel). */
 	public Quat worldRot(Ship3D s, Quat out) {
 		Quat local = new Quat().setLookRotation(aimDir, Math.abs(aimDir.y) > 0.99f ? new Vec3(0, 0, -1) : new Vec3(0, 1, 0));
