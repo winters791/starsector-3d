@@ -49,6 +49,17 @@ public final class Ship3D {
 
 	// Cosmetic state, render only
 	public float visualBank;
+	private final Quat visRot = new Quat(), bankRot = new Quat();
+
+	/**
+	 * The hull's orientation as drawn: rot plus the cosmetic bank into turns (visualBank). Everything
+	 * drawn bolted to the hull (weapon mounts, muzzle flashes, beam starts, engines) uses this, so
+	 * nothing floats off the hull while it banks; the sim keeps using rot. Returns a shared instance:
+	 * use it before the next call.
+	 */
+	public Quat visualRot() {
+		return visRot.mul(rot, bankRot.setAxisAngle(0f, 0f, 1f, visualBank));
+	}
 	public float thrustVisual;
 	public float strafeVisualX, strafeVisualY;
 

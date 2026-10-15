@@ -11,3 +11,8 @@ __pycache__/
 
 # Local working notes
 /NOTES.md
+
+# Hull models made from other people's assets (not ours to publish); ./models.sh switches models on/off
+/models_off/
+/data/meshes/hulls/apex.obj
+/data/meshes/hulls/fulgent.obj

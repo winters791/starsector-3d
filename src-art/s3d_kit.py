@@ -63,6 +63,7 @@ class Hull:
         self.w, self.h = img.size
         px = np.array(img.pixels[:], dtype=np.float32).reshape(self.h, self.w, 4)
         self.alpha = px[::-1, :, 3].copy()  # Blender stores rows bottom-up; row 0 = top here
+        self.lum = (px[::-1, :, :3] @ np.array([0.299, 0.587, 0.114], dtype=np.float32)).copy()
         bpy.data.images.remove(img)
         self.parts = []
         clear_scene()
@@ -220,6 +221,79 @@ class Hull:
             bmesh.ops.bevel(bm, geom=list(bm.edges), offset=bevel, segments=2, profile=0.5, affect='EDGES', clamp_overlap=True)
         return self._new(name, bm, smooth=False)
 
+    def region_plate(self, region, inset=0.0, top=6.0, bottom=-1.0, bevel=0.8, threshold=0.45, tolerance=0.6,
+                     name="slab", min_area=12.0, blur=1.0):
+        """An armour slab: the sprite's own outline inside a region (a polygon of (col, row) points),
+        shrunk inward by inset pixels, extruded from bottom to top with a bevelled top edge. Stack
+        them with growing inset and height for stepped plating that always stays on the art."""
+        mask = (self.alpha >= threshold) & _poly_mask(region, self.w, self.h)
+        if inset > 0:
+            mask = _erode(mask, inset)
+        # smooth the pixel mask first: a staircase outline makes a comb of tiny walls facing along the
+        # edge, which the light never reaches (black bars down every wall)
+        field = _blur(mask.astype(np.float32), blur) if blur > 0 else mask.astype(np.float32)
+        loops = [_simplify(l, tolerance) for l in _contours(field, 0.5)]
+        loops = [l for l in loops if len(l) >= 3 and abs(_area(l)) > min_area]
+        if not loops:
+            return None
+        bm = bmesh.new()
+        edges = []
+        for loop in loops:
+            vs = [bm.verts.new(self.P(c, r, bottom)) for c, r in loop]
+            for i in range(len(vs)):
+                edges.append(bm.edges.new((vs[i], vs[(i + 1) % len(vs)])))
+        bmesh.ops.triangle_fill(bm, use_beauty=True, use_dissolve=False, edges=edges)
+        faces = list(bm.faces)
+        for f in faces:
+            if f.normal.z > 0:
+                f.normal_flip()
+        ext = bmesh.ops.extrude_face_region(bm, geom=faces)
+        moved = [g for g in ext["geom"] if isinstance(g, bmesh.types.BMVert)]
+        bmesh.ops.translate(bm, vec=(0, 0, top - bottom), verts=moved)
+        if not any(f.calc_center_median().z < bottom + 1e-4 for f in bm.faces):
+            rim0 = [e for e in bm.edges if e.is_boundary]
+            bmesh.ops.triangle_fill(bm, use_beauty=True, use_dissolve=False, edges=rim0)
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        if bevel > 0:
+            rim = [e for e in bm.edges if all(v.co.z > top - 1e-4 for v in e.verts)
+                   and len(e.link_faces) == 2 and abs(e.link_faces[0].normal.z - e.link_faces[1].normal.z) > 0.5]
+            bmesh.ops.bevel(bm, geom=rim, offset=bevel, segments=1, profile=0.5, affect='EDGES', clamp_overlap=True)
+        return self._new(name, bm, smooth=False)
+
+    def sprite_body(self, col0, col1, rows, up, down, z=0.0, power=4.0, shrink=0.94, min_hw=1.5, segs=32,
+                    name="body", threshold=0.45):
+        """A hull body that fills the sprite's width row by row: for each row, the art's extent between
+        col0 and col1 gives the centre and half width (x shrink, so the sides stay on the art). up/down:
+        a number, or a function of the row, or a list per row. Boxy superellipse sections (power 4 =
+        flat top, chamfered flanks)."""
+        def val(v, i, r):
+            return v(r) if callable(v) else (v[i] if isinstance(v, (list, tuple)) else v)
+        stations = []
+        for i, r in enumerate(rows):
+            ri = min(self.h - 1, max(0, int(r)))
+            line = np.where(self.alpha[ri, max(0, int(col0)):min(self.w, int(col1) + 1)] >= threshold)[0]
+            if len(line) == 0:
+                continue
+            left, right = line[0] + max(0, int(col0)), line[-1] + max(0, int(col0)) + 1
+            hw = max(min_hw, (right - left) * 0.5 * shrink)
+            stations.append(((left + right) * 0.5, r, z, hw, val(up, i, r), val(down, i, r)))
+        return self.loft(stations, power=power, segs=segs, name=name)
+
+    def pipe(self, points, r, segs=10, name="pipe"):
+        """A round tube through (col, row, z) points."""
+        return self.loft([(c, rw, z, r, r, r) for c, rw, z in points], power=2.0, segs=segs, name=name)
+
+    def top_at(self, col, row, default=0.0):
+        """Height of the highest surface of the parts built so far over (col, row)."""
+        from mathutils import Vector
+        x, y, _ = self.P(col, row)
+        best = None
+        for ob in self.parts:
+            hit, loc, _, _ = ob.ray_cast(Vector((x, y, 1000.0)), Vector((0.0, 0.0, -1.0)))
+            if hit and (best is None or loc.z > best):
+                best = loc.z
+        return default if best is None else best
+
     def mirrored(self, ob, axis_col=None):
         """Copy of a part mirrored across a column (default: the rotation centre)."""
         a = (self.cx if axis_col is None else axis_col) - self.cx
@@ -233,19 +307,24 @@ class Hull:
 
     # ---- output ----
 
-    def export(self, mod_dir, sharp_angle_deg=40.0):
+    def export(self, mod_dir, sharp_angle_deg=40.0, uv=False):
         """Writes <out>/<id>.obj, where <out> is $S3D_MODEL_DIR if set (a staging folder the game
         doesn't read, for work in progress) or the mod's data/meshes/hulls; and build/art/<id>.blend."""
         out = os.path.join(mod_dir, os.environ.get("S3D_MODEL_DIR") or os.path.join("data", "meshes", "hulls"))
-        return self.write(os.path.join(out, self.id + ".obj"), os.path.join(mod_dir, "build", "art", self.id + ".blend"), sharp_angle_deg)
+        return self.write(os.path.join(out, self.id + ".obj"), os.path.join(mod_dir, "build", "art", self.id + ".blend"), sharp_angle_deg, uv)
 
-    def write(self, obj_path, blend_path=None, sharp_angle_deg=40.0):
+    def write(self, obj_path, blend_path=None, sharp_angle_deg=40.0, uv=False):
+        """uv: False (default) writes no UVs, the game projects the sprite straight down; "fold" writes sprite
+        UVs with the steep faces' paint folded down from the top surface (see paint_uvs); True writes the
+        parts' own UV map (v counted from the image bottom)."""
         for o in bpy.data.objects:
             o.select_set(o in self.parts)
         bpy.context.view_layer.objects.active = self.parts[0]
         bpy.ops.object.join()
         ob = bpy.context.view_layer.objects.active
         ob.name = self.id
+        if uv == "fold":
+            paint_uvs(ob, self)
         me = ob.data
         # Smooth inside parts, hard where faces meet at a crease.
         smooth = [p.use_smooth for p in me.polygons]
@@ -254,7 +333,7 @@ class Hull:
             p.use_smooth = s or p.use_smooth
         os.makedirs(os.path.dirname(obj_path), exist_ok=True)
         bpy.ops.wm.obj_export(filepath=obj_path, export_selected_objects=True, forward_axis='NEGATIVE_Z', up_axis='Y',
-                              export_uv=False, export_normals=True, export_materials=False,
+                              export_uv=bool(uv), export_normals=True, export_materials=False,
                               export_triangulated_mesh=True, apply_modifiers=True)
         with open(obj_path, "r", encoding="utf-8") as f:
             body = [l for l in f.read().splitlines() if not l.startswith("#")]
@@ -334,6 +413,34 @@ def _blur(a, sigma):
     p = np.apply_along_axis(lambda m: np.convolve(m, k, mode="same"), 0, p)
     p = np.apply_along_axis(lambda m: np.convolve(m, k, mode="same"), 1, p)
     return p[r:-r, r:-r]
+
+
+def _poly_mask(poly, w, h):
+    """Pixels (row, col) whose centres lie inside the polygon of (col, row) points."""
+    yy, xx = np.mgrid[0:h, 0:w]
+    px, py = xx + 0.5, yy + 0.5
+    inside = np.zeros((h, w), dtype=bool)
+    n = len(poly)
+    for i in range(n):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % n]
+        cross = ((y0 > py) != (y1 > py)) & (px < (x1 - x0) * (py - y0) / ((y1 - y0) if y1 != y0 else 1e-9) + x0)
+        inside ^= cross
+    return inside
+
+
+def _erode(mask, r):
+    """Shrinks a boolean mask by r pixels (round, via a distance check on a padded grid)."""
+    ri = int(math.ceil(r))
+    p = np.pad(mask, ri, constant_values=False)
+    out = np.ones_like(mask)
+    h, w = mask.shape
+    for dy in range(-ri, ri + 1):
+        for dx in range(-ri, ri + 1):
+            if dx * dx + dy * dy > r * r:
+                continue
+            out &= p[ri + dy:ri + dy + h, ri + dx:ri + dx + w]
+    return out
 
 
 def _contours(a, thr):
@@ -418,3 +525,141 @@ def _dp(pts, tol):
     if d[i] <= tol:
         return np.vstack([a, b])
     return np.vstack([_dp(pts[: i + 1], tol)[:-1], _dp(pts[i:], tol)])
+
+
+# ---- painting ----
+
+def surface_samples(verts, tris, per_tri=6, seed=1):
+    """Vertices plus random points on every triangle, so the silhouette has no holes."""
+    rng = np.random.default_rng(seed)
+    a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    out = [verts]
+    for _ in range(per_tri):
+        u = rng.random((len(tris), 1))
+        v = rng.random((len(tris), 1))
+        flip = (u + v) > 1
+        u = np.where(flip, 1 - u, u)
+        v = np.where(flip, 1 - v, v)
+        out.append(a + (b - a) * u + (c - a) * v)
+    return np.concatenate(out)
+
+
+def paint_uvs(ob, hull, fold=1.0):
+    """Sprite UVs per face corner. Faces that look up or down take the sprite straight from above
+    (what the game does for faces without UVs). Steep faces would only stretch one edge pixel that
+    way, so they get the sprite folded down over them: a point that sits dz below the model's top
+    surface samples the sprite dz further in from its face, against the face's direction, as if the
+    plating at the top had been bent down the side."""
+    w, h = hull.w, hull.h
+    me = ob.data
+    n = len(me.vertices)
+    V = np.empty(n * 3); me.vertices.foreach_get("co", V); V = V.reshape(n, 3)
+    me.calc_loop_triangles()
+    T = np.empty(len(me.loop_triangles) * 3, dtype=np.int64); me.loop_triangles.foreach_get("vertices", T)
+    S = surface_samples(V, T.reshape(-1, 3), per_tri=4)
+    # top surface height over each sprite pixel (highest sample), holes filled from neighbours
+    col = np.floor(S[:, 0] + hull.cx).astype(int)
+    row = np.floor(hull.cy_top - S[:, 1]).astype(int)
+    ok = (col >= 0) & (col < w) & (row >= 0) & (row < h)
+    ztop = np.full((h, w), -np.inf)
+    np.maximum.at(ztop, (row[ok], col[ok]), S[ok, 2])
+    for _ in range(6):
+        hole = ~np.isfinite(ztop)
+        if not hole.any():
+            break
+        pad = np.pad(ztop, 1, constant_values=-np.inf)
+        nb = np.max(np.stack([pad[:-2, 1:-1], pad[2:, 1:-1], pad[1:-1, :-2], pad[1:-1, 2:]]), 0)
+        ztop = np.where(hole, nb, ztop)
+    ztop = np.where(np.isfinite(ztop), ztop, 0.0)
+
+    # Fold direction per vertex: the area-weighted horizontal normal of its steep faces, so neighbouring
+    # faces of one wall fold the same way and the paint runs on across them instead of breaking into stripes.
+    steep = []
+    vdir = np.zeros((n, 2))
+    for p in me.polygons:
+        nx, ny, nz = p.normal
+        is_side = abs(nz) < 0.6 and math.hypot(nx, ny) > 1e-4
+        steep.append(is_side)
+        if is_side:
+            for vi in p.vertices:
+                vdir[vi, 0] += nx * p.area
+                vdir[vi, 1] -= ny * p.area  # row grows down
+    vlen = np.linalg.norm(vdir, axis=1)
+    inside = hull.alpha >= 0.45
+
+    # Plating map: for every pixel, the nearest pixel (within 4) whose brightness is close to its
+    # neighbourhood's median, i.e. plain plating rather than a vent slot, seam or light. Steep faces
+    # sample there, so a row of dark slots across an edge doesn't turn into black bars down the wall.
+    calm = calm_lookup(hull.lum, inside)
+
+    def on_art(c, r):
+        ci, ri = int(c), int(r)
+        return 0 <= ci < w and 0 <= ri < h and inside[ri, ci]
+
+    uv = me.uv_layers.new(name="sprite")
+    loops = me.loops
+    data = np.empty(len(loops) * 2, dtype=np.float32)
+    folded = 0
+    for p in me.polygons:
+        side = steep[p.index]
+        folded += side
+        for li in p.loop_indices:
+            vi = loops[li].vertex_index
+            x, y, z = V[vi]
+            c, r = x + hull.cx, hull.cy_top - y
+            if side and vlen[vi] > 1e-9:
+                dx, dy = vdir[vi] / vlen[vi]
+                ci = min(w - 1, max(0, int(c - dx)))
+                ri = min(h - 1, max(0, int(r - dy)))
+                dz = max(0.0, ztop[ri, ci] - z) * fold
+                # never fold off the art (gaps between hull parts are transparent, i.e. black)
+                for _ in range(8):
+                    if dz < 0.5 or on_art(c - dx * dz, r - dy * dz):
+                        break
+                    dz *= 0.6
+                if dz >= 0.5:
+                    c -= dx * dz
+                    r -= dy * dz
+            if side:
+                ci = min(w - 1, max(0, int(c)))
+                ri = min(h - 1, max(0, int(r)))
+                cc, rr = calm[ri, ci]
+                if cc >= 0:
+                    c, r = cc + 0.5, rr + 0.5
+            c = min(w - 0.5, max(0.5, c))
+            r = min(h - 0.5, max(0.5, r))
+            data[li * 2] = c / w
+            data[li * 2 + 1] = 1.0 - r / h
+    uv.data.foreach_set("uv", data)
+    print("S3DKIT UVs: %d of %d faces folded (steep), the rest projected from above" % (folded, len(me.polygons)))
+
+
+def calm_lookup(lum, inside, radius=4, window=4, tol=0.07):
+    """(h, w, 2) int array: for each pixel the (col, row) of the nearest pixel within radius that
+    is on the art and within tol of the median brightness of its (2 window + 1)^2 neighbourhood;
+    (-1, -1) where there is none."""
+    h, w = lum.shape
+    pad = np.pad(np.where(inside, lum, np.nan), window, constant_values=np.nan)
+    stack = [pad[window + dy:window + dy + h, window + dx:window + dx + w]
+             for dy in range(-window, window + 1) for dx in range(-window, window + 1)]
+    with np.errstate(all="ignore"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            med = np.nanmedian(np.stack(stack), axis=0)
+    ok = inside & (np.abs(lum - np.nan_to_num(med, nan=-9.0)) < tol)
+    out = np.full((h, w, 2), -1, dtype=np.int32)
+    found = np.zeros((h, w), dtype=bool)
+    offs = sorted(((dx, dy) for dy in range(-radius, radius + 1) for dx in range(-radius, radius + 1)
+                   if dx * dx + dy * dy <= radius * radius), key=lambda o: o[0] * o[0] + o[1] * o[1])
+    rows, cols = np.mgrid[0:h, 0:w]
+    for dx, dy in offs:
+        r2, c2 = rows + dy, cols + dx
+        valid = (r2 >= 0) & (r2 < h) & (c2 >= 0) & (c2 < w)
+        hit = np.zeros((h, w), dtype=bool)
+        hit[valid] = ok[r2[valid], c2[valid]]
+        new = hit & ~found
+        out[new, 0] = c2[new]
+        out[new, 1] = r2[new]
+        found |= new
+    return out

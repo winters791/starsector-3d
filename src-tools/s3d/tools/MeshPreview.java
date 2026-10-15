@@ -45,6 +45,8 @@ public final class MeshPreview {
 	private static File modDir;
 	/** S3D_MESH=relief draws every hull as the sprite relief, ignoring hand-made models. */
 	private static final boolean USE_MODELS = !"relief".equals(System.getenv("S3D_MESH"));
+	/** S3D_PREVIEW_ONLY=crisp compares the tuning file's profile against this one (S3D_COMPARE=plated; default crisp). */
+	private static final String COMPARE = System.getenv("S3D_COMPARE") != null ? System.getenv("S3D_COMPARE") : "crisp";
 
 	public static void main(String[] args) throws Exception {
 		File game = new File(args[0]);
@@ -102,6 +104,21 @@ public final class MeshPreview {
 		}
 		if ("controls".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=controls ./build.sh preview
 			controlsScene(game, hulls, t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("panels".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=panels ./build.sh preview [ids]: plated profile's plate levels
+			panelMaps(game, hulls, args.length > 2 ? ids : List.of("wolf", "eagle", "paragon", "onslaught", "hammerhead"), dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("bank".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=bank ./build.sh preview [hullId variantId]
+			bankScene(game, hulls, args.length > 3 ? ids.get(0) : "dominator", args.length > 3 ? ids.get(1) : "dominator_Assault", t, renderer, dir);
+			if (!pbuffer) Display.destroy();
+			return;
+		}
+		if ("crisp".equals(System.getenv("S3D_PREVIEW_ONLY"))) { // S3D_PREVIEW_ONLY=crisp ./build.sh preview [ids]
+			crispComparison(game, hulls, args.length > 2 ? ids : List.of("wolf", "eagle", "paragon", "onslaught", "hammerhead"), renderer, dir);
 			if (!pbuffer) Display.destroy();
 			return;
 		}
@@ -1913,6 +1930,155 @@ public final class MeshPreview {
 		g.dispose();
 		ImageIO.write(sheet, "png", new File(dir, "profile_compare.png"));
 		System.out.println("wrote profile_compare.png");
+	}
+
+	/** Sprite next to the plated profile's plate height field (brighter = higher plate): panels_<id>.png. */
+	private static void panelMaps(File game, Map<String, GameData.Hull> hulls, List<String> ids, File dir) throws Exception {
+		for (String id : ids) {
+			GameData.Hull hl = hulls.get(id);
+			if (hl == null) continue;
+			GameData.readShipFile(game, hl);
+			BufferedImage spr = ImageIO.read(new File(game, hl.spritePath));
+			Tuning t = GameData.modTuning(dir.getParentFile());
+			t.meshProfile = "plated";
+			s3d.render.ReliefMeshBuilder.build(new SpriteImage(spr), hl.centerX, spr.getHeight() - hl.centerYFromBottom,
+					s3d.render.ReliefMeshBuilder.Params.from(t));
+			float[] f = s3d.render.ReliefMeshBuilder.lastPlateField;
+			int W = s3d.render.ReliefMeshBuilder.lastPlateW, H = s3d.render.ReliefMeshBuilder.lastPlateH, pad = (W - spr.getWidth()) / 2;
+			float max = 1e-3f;
+			for (float v : f) max = Math.max(max, v);
+			int sc = Math.max(1, 600 / Math.max(spr.getWidth(), spr.getHeight()));
+			BufferedImage out = new BufferedImage(spr.getWidth() * sc * 2, spr.getHeight() * sc, BufferedImage.TYPE_INT_RGB);
+			for (int y = 0; y < spr.getHeight() * sc; y++) {
+				for (int x = 0; x < spr.getWidth() * sc; x++) {
+					int sx = x / sc, sy = y / sc;
+					int a = spr.getRGB(sx, sy);
+					float al = ((a >>> 24) & 255) / 255f;
+					int r = Math.round(((a >> 16) & 255) * al), g = Math.round(((a >> 8) & 255) * al), b = Math.round((a & 255) * al);
+					out.setRGB(x, y, (r << 16) | (g << 8) | b);
+					float v = f[(sy + pad) * W + sx + pad] / max;
+					int gr = al > 0.45f ? 40 + Math.round(215 * v) : 0;
+					out.setRGB(x + spr.getWidth() * sc, y, (gr << 16) | (gr << 8) | gr);
+				}
+			}
+			ImageIO.write(out, "png", new File(dir, "panels_" + id + ".png"));
+			System.out.println("wrote panels_" + id + ".png: " + s3d.render.ReliefMeshBuilder.lastPlateStats);
+		}
+	}
+
+	/**
+	 * An armed ship held at full visual bank (left and right) from the front and the side: guns,
+	 * turrets and engine flames should stay seated on the tilted hull: bank_<hullId>.png.
+	 */
+	private static void bankScene(File game, Map<String, GameData.Hull> hulls, String id, String variant, Tuning t, Renderer3D renderer, File dir) throws Exception {
+		int vw = 640, vh = 420;
+		int[] target = createCaptureTarget(vw, vh);
+		float[] banks = {0f, (float) Math.toRadians(t.visualBankDeg), -(float) Math.toRadians(t.visualBankDeg)};
+		String[] bl = {"level", "banked right", "banked left"};
+		BufferedImage sheet = new BufferedImage(vw * banks.length, vh * 2, BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = sheet.createGraphics();
+		for (int b = 0; b < banks.length; b++) {
+			Ship3D s = makeShip(game, hulls.get(id), t, id);
+			arm(game, s, id, variant);
+			Sim sim = new Sim(t);
+			sim.addShip(s);
+			sim.setPlayer(s);
+			s.thrustVisual = 0.7f;
+			s.visualBank = banks[b];
+			float r = s.radius;
+			Vec3[] eyes = {new Vec3(r * 0.15f, r * 0.35f, -r * 1.5f), new Vec3(r * 1.1f, r * 0.45f, r * 0.7f)};
+			for (int v = 0; v < 2; v++) {
+				lookAt(sim.camera, eyes[v], new Vec3(), t, vw / (float) vh);
+				renderer.renderScene(sim, vw, vh, target[0]);
+				BufferedImage img = read(vw, vh);
+				Graphics2D ig = img.createGraphics();
+				ig.setColor(java.awt.Color.WHITE);
+				ig.drawString(id + "  " + bl[b] + (v == 0 ? "  front" : "  rear 3/4"), 8, vh - 10);
+				ig.dispose();
+				g.drawImage(img, b * vw, v * vh, null);
+			}
+		}
+		g.dispose();
+		ImageIO.write(sheet, "png", new File(dir, "bank_" + id + ".png"));
+		System.out.println("wrote bank_" + id + ".png");
+	}
+
+	/**
+	 * Current profile vs the opt-in "crisp" profile (same tuning otherwise): crisp_compare.png, one row
+	 * per hull, current | crisp from above-front and below-rear; crisp_close_<id>.png for the first hull.
+	 */
+	private static void crispComparison(File game, Map<String, GameData.Hull> hulls, List<String> ids, Renderer3D renderer, File dir) throws Exception {
+		int vw = 560, vh = 360;
+		int[] target = createCaptureTarget(vw, vh);
+		BufferedImage sheet = new BufferedImage(vw * 4, vh * ids.size(), BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = sheet.createGraphics();
+		for (int row = 0; row < ids.size(); row++) {
+			String id = ids.get(row);
+			if (hulls.get(id) == null) {
+				System.out.println("unknown hull " + id);
+				continue;
+			}
+			for (int prof = 0; prof < 2; prof++) {
+				Tuning t = GameData.modTuning(dir.getParentFile());
+				String current = t.meshProfile;
+				if (prof == 1) t.meshProfile = COMPARE;
+				Ship3D s = makeShip(game, hulls.get(id), t, id, false);
+				Sim sim = new Sim(t);
+				sim.addShip(s);
+				sim.setPlayer(s);
+				s.thrustVisual = 0.4f;
+				ShipModel m = Renderer3D.modelFor(s, t);
+				System.out.println(id + " " + t.meshProfile + ": " + m.info.summary());
+				float r = s.radius;
+				Vec3[] eyes = {new Vec3(r * 1.05f, r * 0.7f, -r * 0.9f), new Vec3(-r * 0.95f, -r * 0.55f, r * 0.95f)};
+				String[] labels = {"3/4 front, above", "3/4 rear, below"};
+				for (int v = 0; v < 2; v++) {
+					lookAt(sim.camera, eyes[v], new Vec3(), t, vw / (float) vh);
+					renderer.renderScene(sim, vw, vh, target[0]);
+					BufferedImage img = read(vw, vh);
+					Graphics2D ig = img.createGraphics();
+					ig.setColor(java.awt.Color.WHITE);
+					ig.drawString(id + (prof == 0 ? "  CURRENT (" + current + ")  " : "  " + COMPARE.toUpperCase() + "  ") + labels[v], 8, vh - 10);
+					ig.dispose();
+					g.drawImage(img, (v * 2 + prof) * vw, row * vh, null);
+				}
+			}
+		}
+		g.dispose();
+		ImageIO.write(sheet, "png", new File(dir, COMPARE + "_compare.png"));
+		System.out.println("wrote " + COMPARE + "_compare.png");
+
+		// close-ups of the first hull: current (top row) vs crisp (bottom row)
+		String id = ids.get(0);
+		int cw = 760, ch = 500;
+		int[] big = createCaptureTarget(cw, ch);
+		String[] labels = {"front, above", "side", "rear, above"};
+		BufferedImage close = new BufferedImage(cw * labels.length, ch * 2, BufferedImage.TYPE_INT_RGB);
+		Graphics2D cg = close.createGraphics();
+		for (int prof = 0; prof < 2; prof++) {
+			Tuning t = GameData.modTuning(dir.getParentFile());
+			if (prof == 1) t.meshProfile = COMPARE;
+			Ship3D s = makeShip(game, hulls.get(id), t, id, false);
+			Sim sim = new Sim(t);
+			sim.addShip(s);
+			sim.setPlayer(s);
+			s.thrustVisual = 0.3f;
+			float r = s.radius;
+			Vec3[] eyes = {new Vec3(r * 0.75f, r * 0.5f, -r * 0.8f), new Vec3(r * 1.3f, r * 0.12f, -r * 0.05f), new Vec3(-r * 0.55f, r * 0.55f, r * 0.9f)};
+			for (int v = 0; v < labels.length; v++) {
+				lookAt(sim.camera, eyes[v], new Vec3(), t, cw / (float) ch);
+				renderer.renderScene(sim, cw, ch, big[0]);
+				BufferedImage img = read(cw, ch);
+				Graphics2D ig = img.createGraphics();
+				ig.setColor(java.awt.Color.WHITE);
+				ig.drawString(id + (prof == 0 ? "  CURRENT  " : "  " + COMPARE.toUpperCase() + "  ") + labels[v], 8, ch - 10);
+				ig.dispose();
+				cg.drawImage(img, v * cw, prof * ch, null);
+			}
+		}
+		cg.dispose();
+		ImageIO.write(close, "png", new File(dir, COMPARE + "_close_" + id + ".png"));
+		System.out.println("wrote " + COMPARE + "_close_" + id + ".png");
 	}
 
 	/** 3/4 view of each hull with different plate styles, to pick the most mechanical-looking default. */

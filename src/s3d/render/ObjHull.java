@@ -74,7 +74,7 @@ public final class ObjHull {
 	public static ObjHull parse(String name, String text) {
 		FloatList pv = new FloatList(), pt = new FloatList(), pn = new FloatList();
 		IntList cv = new IntList(), ct = new IntList(), cn = new IntList();
-		java.io.ByteArrayOutputStream sides = new java.io.ByteArrayOutputStream();
+		IntList sides = new IntList(); // not java.io: Starsector's script sandbox refuses the whole package
 		int sw = 0, sh = 0;
 		byte material = -1;
 		int[] fv = new int[64], ft = new int[64], fn = new int[64];
@@ -116,7 +116,7 @@ public final class ObjHull {
 							ct.add(ft[c]);
 							cn.add(fn[c]);
 						}
-						sides.write(material);
+						sides.add(material);
 					}
 				}
 				case "#" -> {
@@ -128,7 +128,8 @@ public final class ObjHull {
 				default -> { /* o, g, s, mtllib, l: not needed */ }
 			}
 		}
-		byte[] side = sides.toByteArray();
+		byte[] side = new byte[sides.size];
+		for (int i = 0; i < side.length; i++) side[i] = (byte) sides.a[i];
 		return new ObjHull(name, text.hashCode(), sw, sh, pv.toArray(), pt.toArray(), pn.toArray(),
 				cv.toArray(), ct.toArray(), cn.toArray(), side, side.length);
 	}

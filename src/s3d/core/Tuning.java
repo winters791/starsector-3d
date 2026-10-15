@@ -187,7 +187,7 @@ public final class Tuning implements Cloneable {
 	/** Thickness of the hull-coloured edge wall, as a fraction of the sprite's larger dimension. */
 	public float meshEdgeThickness = 0.012f;
 	public float meshSdfBlur = 0.8f;
-	/** "hard" (bevelled stepped plates, default) or "round" (the original inflated look). */
+	/** "hard" (bevelled stepped plates, default), "crisp" (hard + sharp creases, clean outline, calmer shading) or "round". */
 	public String meshProfile = "hard";
 	public float meshBevelFrac = 0.14f;
 	public float meshBaseHeight = 0.32f;
@@ -199,6 +199,38 @@ public final class Tuning implements Cloneable {
 	public float meshUnderHeight = 0.28f;
 	public float meshKeelHeight = 0.18f;
 	public float meshWallFrac = 0.03f;
+	// "crisp" profile only
+	/** SDF blur before the outline is traced (the other profiles use meshSdfBlur). */
+	public float meshCrispSdfBlur = 0.35f;
+	/** Outline straightening tolerance, in grid cells (0 = off). */
+	public float meshCrispOutlineTol = 0.6f;
+	/** Faces meeting at more than this angle get a hard edge instead of a smoothed one. */
+	public float meshCrispCreaseDeg = 35f;
+	/** Deck chamfer width / deck height (1 = 45 degrees). */
+	public float meshCrispChamfer = 1f;
+	/** Tier riser width / tier height (small = near-vertical steps; never under 1.5 grid cells). */
+	public float meshCrispRiser = 0.4f;
+	/** Smoothing of the inner tier outlines, as a fraction of the tier inset (0 = follow the outline exactly). */
+	public float meshCrispTierSmooth = 0.5f;
+	// "plated" profile only (crisp + panels found in the sprite's panel lines)
+	/** Roughly how many colour patches the hull is first split into (before similar neighbours merge). */
+	public int meshPlatedPatches = 120;
+	/** Patch shape: higher = rounder, more even patches; lower = they follow colour edges more. */
+	public float meshPlatedCompact = 0.12f;
+	/** Neighbouring patches whose mean colours differ by less than this merge into one plate. */
+	public float meshPlatedMerge = 0.07f;
+	/** Plates smaller than this fraction of the hull merge into their neighbours. */
+	public float meshPlatedMinPanel = 0.004f;
+	/** Plates this many standard deviations brighter (darker x1.5) than the hull step up (down) one level. */
+	public float meshPlatedLumStep = 0.7f;
+	/** Smoothing of the plate height field, in grid cells (softens step outlines between vertices). */
+	public float meshPlatedSmooth = 0.6f;
+	/** Plate levels are cleaned with an octagon of this radius (x R): no spikes, straight chamfered edges. 0 = off. */
+	public float meshPlatedOpen = 0.06f;
+	/** Sprite detail normal map strength (replaces bumpStrength). */
+	public float meshCrispBump = 0.12f;
+	/** Strength of the crease shading (dark inner corners, light outer edges). */
+	public float meshCrispEdge = 1f;
 	/** Strength of the surface detail (normal map) generated from the sprite; 0 = off. */
 	public float bumpStrength = 0.4f;
 
@@ -425,7 +457,7 @@ public final class Tuning implements Cloneable {
 		keys.put("target", "R");
 		keys.put("resetTargets", "N");
 		keys.put("incomingFire", "B");
-		keys.put("toggleHud", "F11"); // vanilla's Toggle UI default
+		keys.put("toggleHud", "F11"); // plus whatever is bound to vanilla's Toggle UI (default F11), see VanillaControls
 		keys.put("handBack", "F9");
 		keys.put("vent", "V");
 		keys.put("wings", "Z");
@@ -572,6 +604,21 @@ public final class Tuning implements Cloneable {
 			t.meshKeelHeight = num(mesh, "keelHeight", t.meshKeelHeight);
 			t.meshWallFrac = num(mesh, "wallFrac", t.meshWallFrac);
 			t.bumpStrength = num(mesh, "bumpStrength", t.bumpStrength);
+			t.meshCrispSdfBlur = num(mesh, "crispSdfBlur", t.meshCrispSdfBlur);
+			t.meshCrispOutlineTol = num(mesh, "crispOutlineTol", t.meshCrispOutlineTol);
+			t.meshCrispCreaseDeg = num(mesh, "crispCreaseDeg", t.meshCrispCreaseDeg);
+			t.meshCrispChamfer = num(mesh, "crispChamfer", t.meshCrispChamfer);
+			t.meshCrispRiser = num(mesh, "crispRiser", t.meshCrispRiser);
+			t.meshCrispTierSmooth = num(mesh, "crispTierSmooth", t.meshCrispTierSmooth);
+			t.meshPlatedPatches = mesh.optInt("platedPatches", t.meshPlatedPatches);
+			t.meshPlatedCompact = num(mesh, "platedCompact", t.meshPlatedCompact);
+			t.meshPlatedMerge = num(mesh, "platedMerge", t.meshPlatedMerge);
+			t.meshPlatedMinPanel = num(mesh, "platedMinPanel", t.meshPlatedMinPanel);
+			t.meshPlatedLumStep = num(mesh, "platedLumStep", t.meshPlatedLumStep);
+			t.meshPlatedSmooth = num(mesh, "platedSmooth", t.meshPlatedSmooth);
+			t.meshPlatedOpen = num(mesh, "platedOpen", t.meshPlatedOpen);
+			t.meshCrispBump = num(mesh, "crispBump", t.meshCrispBump);
+			t.meshCrispEdge = num(mesh, "crispEdge", t.meshCrispEdge);
 		}
 		JSONObject sb = root.optJSONObject("sandbox");
 		if (sb != null) {
@@ -681,7 +728,23 @@ public final class Tuning implements Cloneable {
 		return meshProfile + "|" + meshBevelFrac + "|" + meshBaseHeight + "|" + meshTiers + "|" + meshTierInsetFrac + "|"
 				+ meshTierHeight + "|" + meshTierLumInfluence + "|" + meshTierLumSteps + "|" + meshUnderHeight + "|" + meshKeelHeight + "|" + meshWallFrac + "|"
 				+ meshCellsAcross + "|" + meshAlphaThreshold + "|" + meshRoundRadiusFrac + "|" + meshTopHeight + "|"
-				+ meshBottomHeight + "|" + meshKeel + "|" + meshDetailAmp + "|" + meshEdgeThickness + "|" + meshSdfBlur;
+				+ meshBottomHeight + "|" + meshKeel + "|" + meshDetailAmp + "|" + meshEdgeThickness + "|" + meshSdfBlur
+				+ (crispMesh() ? "|" + meshCrispSdfBlur + "|" + meshCrispOutlineTol + "|" + meshCrispCreaseDeg + "|" + meshCrispChamfer + "|" + meshCrispRiser + "|" + meshCrispTierSmooth : "")
+				+ (platedMesh() ? "|" + meshPlatedPatches + "|" + meshPlatedCompact + "|" + meshPlatedMerge + "|" + meshPlatedMinPanel + "|" + meshPlatedLumStep + "|" + meshPlatedSmooth + "|" + meshPlatedOpen : "");
+	}
+
+	/** "crisp" and "plated" share the crisp outline, creases, walls and shading. */
+	public boolean crispMesh() {
+		return "crisp".equalsIgnoreCase(meshProfile) || platedMesh();
+	}
+
+	public boolean platedMesh() {
+		return "plated".equalsIgnoreCase(meshProfile);
+	}
+
+	/** Ship shader detail-map strength for the current profile. */
+	public float shipBump() {
+		return crispMesh() ? meshCrispBump : bumpStrength;
 	}
 
 	/** The "systems" section, over t's values (also another mod's per-system numbers, see withSystems). */

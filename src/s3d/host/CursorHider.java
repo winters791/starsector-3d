@@ -21,12 +21,19 @@ final class CursorHider {
 	private static boolean unsupported;
 	private static Cursor saved;
 	private static boolean hidden;
+	/**
+	 * Hide again only this long after the last restore. Leaving the refit simulator closes its exit
+	 * dialog and the battle ends a frame later, so hiding at once would leave the refit screen with
+	 * no cursor and no battle frame left to bring it back.
+	 */
+	private static final long HIDE_DELAY_NANOS = 500_000_000L;
+	private static long restoredAt;
 
 	private CursorHider() {}
 
 	/** Call every frame the 3D view is visible. Re-applies if the game swapped its cursor back in. */
 	static void hide() {
-		if (unsupported) return;
+		if (unsupported || System.nanoTime() - restoredAt < HIDE_DELAY_NANOS) return;
 		try {
 			Cursor b = blank();
 			if (b == null) return;
@@ -43,6 +50,7 @@ final class CursorHider {
 	}
 
 	static void restore() {
+		restoredAt = System.nanoTime();
 		if (!hidden) return;
 		hidden = false;
 		try {
