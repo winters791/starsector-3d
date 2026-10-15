@@ -7,8 +7,17 @@ import com.fs.starfarer.api.Global;
 
 public class S3DModPlugin extends BaseModPlugin {
 	public static final String MOD_ID = "starsector3d";
-	public static final String VERSION = "0.1.0";
+	/** From mod_info.json, so the logs and bug-report files never name a stale version. */
+	public static final String VERSION = version();
 	private static final Logger log = Global.getLogger(S3DModPlugin.class);
+
+	private static String version() {
+		try {
+			return Global.getSettings().getModManager().getModSpec(MOD_ID).getVersion();
+		} catch (Throwable t) {
+			return "?";
+		}
+	}
 
 	@Override
 	public void onApplicationLoad() {
