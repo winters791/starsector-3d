@@ -17,7 +17,9 @@ doesn't need Starsector 3D to be installed: without it, the game never reads the
   versions. A weapon whose script 3D doesn't know still fires and does its normal damage: only the
   script's extra effect is missing.
 - **Hull models**: `data/meshes/hulls/<hullId>.obj` in your mod replaces the relief mesh made from the
-  sprite (it must be made for that sprite's size; see the log if it isn't used).
+  sprite (it must be made for that sprite's size; see the log if it isn't used). It is painted with the
+  sprite, unless a `<hullId>.png` sits beside it: then its UVs map into that image, drawn as it is, for
+  the hull and its (D) versions (skins that borrow the model still get their own sprite).
 
 ## Finding the gaps: the compatibility report
 

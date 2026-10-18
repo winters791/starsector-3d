@@ -102,7 +102,10 @@ final class Shaders {
 				vec3 base = texture2D(u_tex, v_uv).rgb;
 				float lum = dot(base, vec3(0.299, 0.587, 0.114));
 				float bumpW = 1.0;
-				if (v_side > 2.5) {
+				if (v_side > 3.5) {
+					// hand-made model with its own paint: drawn as painted; the sprite's panel bumps don't line up with it
+					bumpW = 0.0;
+				} else if (v_side > 2.5) {
 					// hand-made model: the same three looks, blended by which way the surface faces the ship
 					float wallW = 1.0 - smoothstep(0.3, 0.7, abs(v_ny));
 					float underW = 1.0 - smoothstep(-0.5, -0.1, v_ny);

@@ -3,6 +3,7 @@
 #   ./models.sh                list every model and whether the game uses it
 #   ./models.sh off <id|all>   stop using a model (moved to models_off/, which the game never reads)
 #   ./models.sh on  <id|all>   use it again (moved back to data/meshes/hulls/)
+# A model's own paint (<id>.png beside <id>.obj) moves with it.
 # A hull without an enabled model uses the sprite relief. Restart the battle (or press K in one) to see a change.
 # models_off/ is kept out of git and out of release zips; third-party models stay out of git either way
 # (see .gitignore).
@@ -14,22 +15,29 @@ mkdir -p "$ON" "$OFF"
 
 list() {
 	local any=0
-	for f in "$ON"/*.obj; do [[ -e "$f" ]] && { printf "  on   %s\n" "$(basename "$f" .obj)"; any=1; }; done
-	for f in "$OFF"/*.obj; do [[ -e "$f" ]] && { printf "  off  %s\n" "$(basename "$f" .obj)"; any=1; }; done
+	for f in "$ON"/*.obj; do [[ -e "$f" ]] && { printf "  on   %s%s\n" "$(basename "$f" .obj)" "$(painted "$f")"; any=1; }; done
+	for f in "$OFF"/*.obj; do [[ -e "$f" ]] && { printf "  off  %s%s\n" "$(basename "$f" .obj)" "$(painted "$f")"; any=1; }; done
 	[[ $any == 1 ]] || echo "  (no hull models)"
+}
+
+painted() { [[ -e "${1%.obj}.png" ]] && echo "  (own paint)" || true; }
+
+mv_model() { # mv_model <obj file> <to dir>: the model and its paint, if any
+	mv "$1" "$2/"
+	if [[ -e "${1%.obj}.png" ]]; then mv "${1%.obj}.png" "$2/"; fi
 }
 
 move() { # move <from dir> <to dir> <id|all> <verb>
 	local from="$1" to="$2" id="$3" verb="$4" n=0
 	if [[ "$id" == "all" ]]; then
-		for f in "$from"/*.obj; do [[ -e "$f" ]] && { mv "$f" "$to/"; echo "$verb $(basename "$f" .obj)"; n=$((n + 1)); }; done
+		for f in "$from"/*.obj; do [[ -e "$f" ]] && { mv_model "$f" "$to"; echo "$verb $(basename "$f" .obj)"; n=$((n + 1)); }; done
 		[[ $n -gt 0 ]] || echo "nothing to $verb"
 	elif [[ -e "$from/$id.obj" ]]; then
 		if [[ -e "$to/$id.obj" ]]; then
 			echo "error: $id.obj is in both folders; remove one first ($to/$id.obj)" >&2
 			exit 1
 		fi
-		mv "$from/$id.obj" "$to/"
+		mv_model "$from/$id.obj" "$to"
 		echo "$verb $id"
 	elif [[ -e "$to/$id.obj" ]]; then
 		echo "$id is already $verb"

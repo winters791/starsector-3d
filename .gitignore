@@ -14,5 +14,20 @@ __pycache__/
 
 # Hull models made from other people's assets (not ours to publish); ./models.sh switches models on/off
 /models_off/
+/data/meshes/hulls/*.png
 /data/meshes/hulls/apex.obj
 /data/meshes/hulls/fulgent.obj
+/data/meshes/hulls/onslaught.obj
+/data/meshes/hulls/invictus.obj
+/data/meshes/hulls/radiant.obj
+/data/meshes/hulls/retribution.obj
+/data/meshes/hulls/atlas2.obj
+/data/meshes/hulls/conquest.obj
+/data/meshes/hulls/odyssey.obj
+/data/meshes/hulls/paragon.obj
+/data/meshes/hulls/pegasus.obj
+/data/meshes/hulls/prometheus.obj
+/data/meshes/hulls/ziggurat.obj
+/data/meshes/hulls/guardian.obj
+/data/meshes/hulls/astral.obj
+/data/meshes/hulls/legion.obj

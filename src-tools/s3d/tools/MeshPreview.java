@@ -232,7 +232,7 @@ public final class MeshPreview {
 		return f.isAbsolute() ? f : new File(modDir, d);
 	}
 
-	/** The hull's hand-made model from the mod folder (as the game would find it), or null. */
+	/** The hull's hand-made model from the mod folder (as the game would find it), with its own paint if any, or null. */
 	private static ObjHull hullModel(String hullId, SpriteImage img) throws Exception {
 		File f = new File(modelDir(), hullId + ".obj");
 		if (!f.isFile()) return null;
@@ -240,6 +240,11 @@ public final class MeshPreview {
 		if (!obj.fits(img)) {
 			System.out.println(f.getName() + " was made for a " + obj.spriteW + "x" + obj.spriteH + " sprite; " + hullId + "'s is " + img.w + "x" + img.h);
 			return null;
+		}
+		File png = new File(modelDir(), hullId + ".png");
+		if (png.isFile()) {
+			SpriteImage paint = new SpriteImage(ImageIO.read(png));
+			obj = obj.withPaint(paint, java.util.Arrays.hashCode(paint.argb));
 		}
 		return obj;
 	}

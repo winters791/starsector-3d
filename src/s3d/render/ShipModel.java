@@ -10,7 +10,7 @@ import com.fs.starfarer.api.Global;
 import s3d.core.Tuning;
 
 /**
- * GPU-side hull: relief mesh (or a hand-made {@link ObjHull} model) + sprite texture. Built once per
+ * GPU-side hull: relief mesh (or a hand-made {@link ObjHull} model) + sprite texture (or the model's own paint). Built once per
  * sprite and cached for the session.
  */
 public final class ShipModel {
@@ -112,12 +112,17 @@ public final class ShipModel {
 		ReliefMeshBuilder.Result r = build(key, src, t);
 		Mesh mesh = Mesh.upload(r.verts, r.indices, ReliefMeshBuilder.STRIDE,
 				new int[][] {{0, 3, 0}, {1, 3, 3}, {2, 2, 6}, {3, 1, 8}});
-		int tex = TextureUtil.upload(src.image.dilatedOpaque(12), src.image.w, src.image.h, true, t.anisotropy);
+		SpriteImage paint = src.obj != null && src.obj.paint != null ? src.obj.paint : null;
+		int tex = paint != null
+				? TextureUtil.upload(paint.dilatedOpaque(4), paint.w, paint.h, true, t.anisotropy)
+				: TextureUtil.upload(src.image.dilatedOpaque(12), src.image.w, src.image.h, true, t.anisotropy);
+		// (the sprite's normal map stays bound for painted models too; the shader doesn't use it there)
 		int nrm = TextureUtil.upload(src.image.normalMap(4f), src.image.w, src.image.h, true, t.anisotropy);
 		int[] rgb = src.image.averageTintRgb();
 		m = new ShipModel(key, mesh, tex, nrm, new float[] {rgb[0] / 255f, rgb[1] / 255f, rgb[2] / 255f}, r);
 		CACHE.put(key, m);
-		log.info("S3D: built " + (src.obj != null ? "model " + src.obj.name + " textured with " : "relief mesh for ") + src.spritePath + ": " + r.summary());
+		log.info("S3D: built " + (src.obj == null ? "relief mesh for " + src.spritePath : "model " + src.obj.name
+				+ (paint != null ? " with its own " + paint.w + "x" + paint.h + " paint" : " textured with " + src.spritePath)) + ": " + r.summary());
 		return m;
 	}
 
