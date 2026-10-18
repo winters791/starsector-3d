@@ -13,7 +13,8 @@
 set -euo pipefail
 ART="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOD_DIR="$(dirname "$ART")"
-GAME_DIR="$MOD_DIR/../../Contents/Resources/Java"
+# the game's data folder: starsector-core (Windows, Linux) or Starsector.app/Contents/Resources/Java (macOS)
+GAME_DIR="${S3D_GAME_DIR:-$MOD_DIR/../../Contents/Resources/Java}"
 BLENDER="${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}"
 [[ $# -ge 2 ]] || { echo "usage: $0 <hullId> <model.stl|.obj|.glb> [triangles]" >&2; exit 2; }
 mkdir -p "$MOD_DIR/build/art"
