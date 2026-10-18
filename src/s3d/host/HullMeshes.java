@@ -1,9 +1,14 @@
 package s3d.host;
 
+import java.awt.image.BufferedImage;
+import java.io.InputStream;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+
+import javax.imageio.ImageIO;
 
 import org.apache.log4j.Logger;
 
@@ -17,6 +22,9 @@ import s3d.render.SpriteImage;
  * Finds hand-made hull models: {@code data/meshes/hulls/<hullId>.obj}, looked up through the game's
  * resource loader (so another mod can ship models for its own hulls, or replace ours). A skin or
  * (D) hull without its own file uses its base hull's model, painted with its own sprite.
+ *
+ * <p>A {@code <hullId>.png} beside the model is its own paint (the model's UVs map into it). The hull
+ * and its (D) versions draw that; a skin, whose sprite is painted differently, projects its sprite instead.
  */
 final class HullMeshes {
 	private static final Logger log = Global.getLogger(HullMeshes.class);
@@ -40,6 +48,7 @@ final class HullMeshes {
 			if (id == null || id.isEmpty()) continue;
 			ObjHull obj = load(DIR + id + ".obj");
 			if (obj == null) continue;
+			if (obj.paint != null && !id.equals(spec.getHullId()) && !id.equals(spec.getDParentHullId())) obj = obj.spriteOnly();
 			if (!obj.fits(sprite)) {
 				if (LOGGED.add(spec.getHullId() + "|unfit"))
 					log.warn("S3D: " + obj.name + " was made for a " + obj.spriteW + "x" + obj.spriteH + " sprite but "
@@ -68,6 +77,8 @@ final class HullMeshes {
 				if (obj.triangles() == 0) {
 					log.warn("S3D: " + path + " has no faces; ignored");
 					obj = null;
+				} else {
+					obj = withPaint(obj, path.substring(0, path.length() - 4) + ".png");
 				}
 			} catch (RuntimeException e) {
 				log.warn("S3D: can't read " + path + " (" + e + "); using the relief");
@@ -75,6 +86,22 @@ final class HullMeshes {
 		}
 		FILES.put(path, obj);
 		return obj;
+	}
+
+	/** The model with its own paint from {@code pngPath}, or as it is when there is none. */
+	private static ObjHull withPaint(ObjHull obj, String pngPath) {
+		BufferedImage bi;
+		try (InputStream in = Global.getSettings().openStream(pngPath)) {
+			bi = ImageIO.read(in);
+		} catch (Throwable missing) {
+			return obj; // no paint: the sprite paints it
+		}
+		if (bi == null) {
+			log.warn("S3D: can't decode " + pngPath + "; painting " + obj.name + " with the sprite");
+			return obj;
+		}
+		SpriteImage paint = new SpriteImage(bi);
+		return obj.withPaint(paint, Arrays.hashCode(paint.argb));
 	}
 
 	/**

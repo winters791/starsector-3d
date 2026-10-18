@@ -17,6 +17,9 @@ import s3d.core.HullVolume;
  * <li>Texture: the ship's own sprite. Faces with UVs use them (OBJ v counts from the image
  *     bottom, as Blender writes it); faces without are projected straight down, so the top view
  *     shows the sprite exactly and skins repaint the model for free.</li>
+ * <li>Unless the model has its own paint ({@link #withPaint}): an image beside the model whose
+ *     UVs map into it, drawn as it is (no sprite-based top/side/underside looks). Hulls that only
+ *     borrow such a model ({@link #spriteOnly}) ignore its UVs and get their sprite projected down.</li>
  * <li>Material names pick the shading: "under..."/"bottom..." underside, "wall..."/"side..." side
  *     plating, "top..."/"deck..." top; anything else blends between them by the surface normal.</li>
  * <li>Optional header comment {@code # s3d sprite <w> <h>} records the sprite size the model was
@@ -30,12 +33,18 @@ public final class ObjHull {
 
 	/** Shading class for faces without a forced one: the shader blends top/side/underside by the normal. */
 	static final int SIDE_AUTO = 3;
+	/** Shading class for a model with its own paint: the shader draws the texture as it is. */
+	static final int SIDE_PAINTED = 4;
 
 	public final String name;
 	/** Hash of the file text: the cache key changes when the file does. */
 	public final int hash;
 	/** Sprite size from the header, or 0 when the file has none. */
 	public final int spriteW, spriteH;
+	/** The model's own texture (its UVs map into it), or null to paint it with the sprite. */
+	public final SpriteImage paint;
+	/** True when the UVs belong to a paint this copy doesn't use: project the sprite instead. */
+	private final boolean ignoreUv;
 
 	// Parsed, triangulated: per corner indices into the pools (-1 = absent).
 	private final float[] v, vt, vn;
@@ -46,10 +55,17 @@ public final class ObjHull {
 
 	private ObjHull(String name, int hash, int spriteW, int spriteH, float[] v, float[] vt, float[] vn,
 					int[] cv, int[] ct, int[] cn, byte[] side, int tris) {
+		this(name, hash, spriteW, spriteH, v, vt, vn, cv, ct, cn, side, tris, null, false);
+	}
+
+	private ObjHull(String name, int hash, int spriteW, int spriteH, float[] v, float[] vt, float[] vn,
+					int[] cv, int[] ct, int[] cn, byte[] side, int tris, SpriteImage paint, boolean ignoreUv) {
 		this.name = name;
 		this.hash = hash;
 		this.spriteW = spriteW;
 		this.spriteH = spriteH;
+		this.paint = paint;
+		this.ignoreUv = ignoreUv;
 		this.v = v;
 		this.vt = vt;
 		this.vn = vn;
@@ -58,6 +74,17 @@ public final class ObjHull {
 		this.cornerN = cn;
 		this.triSide = side;
 		this.triCount = tris;
+	}
+
+	/** This model painted with its own texture; {@code paintHash} goes into {@link #hash} so edits to the image reload. */
+	public ObjHull withPaint(SpriteImage paint, int paintHash) {
+		return new ObjHull(name, hash * 31 + paintHash, spriteW, spriteH, v, vt, vn, cornerV, cornerT, cornerN, triSide, triCount, paint, false);
+	}
+
+	/** For a hull that borrows this model with its own sprite (a skin): drops the paint and its UVs. */
+	public ObjHull spriteOnly() {
+		if (paint == null) return this;
+		return new ObjHull(name, hash ^ 0x5bd1e995, spriteW, spriteH, v, vt, vn, cornerV, cornerT, cornerN, triSide, triCount, null, true);
 	}
 
 	public int triangles() {
@@ -183,14 +210,14 @@ public final class ObjHull {
 			if (facing == 0) top++;
 			else if (facing == 1) bottom++;
 			else wall++;
-			int side = triSide[t] >= 0 ? triSide[t] : SIDE_AUTO;
+			int side = paint != null ? SIDE_PAINTED : triSide[t] >= 0 ? triSide[t] : SIDE_AUTO;
 			for (int k = 0; k < 3; k++) {
 				int c = c0 + k;
-				int vi = cornerV[c], ti = cornerT[c], ni = cornerN[c];
+				int vi = cornerV[c], ti = ignoreUv ? -1 : cornerT[c], ni = cornerN[c];
 				// Corners are shared when position, uv, normal and shading all match. Without a
 				// normal each face keeps its own corners (flat shading).
 				boolean share = ni >= 0 && vi < (1 << 22) && ti + 1 < (1 << 21) && ni + 1 < (1 << 19);
-				long key = share ? vi | (long) (ti + 1) << 22 | (long) (ni + 1) << 43 | (long) side << 62 : -1L;
+				long key = share ? vi | (long) (ti + 1) << 22 | (long) (ni + 1) << 43 | (long) (side & 3) << 62 : -1L;
 				Integer id = share ? unique.get(key) : null;
 				if (id == null) {
 					id = out.size / ReliefMeshBuilder.STRIDE;
