@@ -5,6 +5,7 @@
 #   ./build.sh preview [variantSprite...]   render relief-mesh previews to build/preview/*.png
 #   ./build.sh bench      headless flight-model numbers for a few hulls
 #   ./build.sh combat     headless weapon/damage rule checks on real hull shapes
+#   ./build.sh shots      cinematic battle stills (no HUD) to build/forum_shots/battles
 set -euo pipefail
 
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,5 +54,6 @@ case "${1:-}" in
 	preview) shift; build_mod; build_tools; run_tool s3d.tools.MeshPreview "$@" ;;
 	bench) build_mod; build_tools; run_tool s3d.tools.FlightBench ;;
 	combat) build_mod; build_tools; run_tool s3d.tools.CombatBench ;;
-	*) echo "usage: $0 [tools|preview|bench|combat]" >&2; exit 2 ;;
+	shots) build_mod; build_tools; run_tool s3d.tools.ForumShots ;;
+	*) echo "usage: $0 [tools|preview|bench|combat|shots]" >&2; exit 2 ;;
 esac

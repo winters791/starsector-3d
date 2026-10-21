@@ -2,7 +2,7 @@
 	"id":"starsector3d",
 	"name":"Starsector 3D",
 	"author":"udaysingh",
-	"version":"0.3.6",
+	"version":"0.3.8",
 	"description":"Replaces combat with true 3D space combat. Campaign battles, missions and the simulator play out in 3D (campaign results go back to the campaign).",
 	"gameVersion":"0.98a-RC8",
 	"jars":["jars/Starsector3D.jar"],

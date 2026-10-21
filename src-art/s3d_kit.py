@@ -33,10 +33,27 @@ def args():
 
 def ship_file(game_dir, hull_id):
     """The hull's sprite path and rotation centre (from the top-left) from its .ship file."""
+    import glob
     import json
     import re
-    with open(os.path.join(game_dir, "data", "hulls", hull_id + ".ship"), encoding="utf-8") as f:
-        d = json.loads(re.sub(r"#.*", "", f.read()))
+
+    def read(path):
+        with open(path, encoding="utf-8") as f:
+            return json.loads(re.sub(r"#.*", "", f.read()))
+
+    hulls = os.path.join(game_dir, "data", "hulls")
+    path = os.path.join(hulls, hull_id + ".ship")
+    if os.path.isfile(path):
+        d = read(path)
+    else:  # a few files keep an old name (cerberus is warhound.ship): find the one with this hullId
+        d = None
+        for p in sorted(glob.glob(os.path.join(hulls, "*.ship"))):
+            with open(p, encoding="utf-8") as f:
+                if re.search(r'"hullId"\s*:\s*"%s"' % re.escape(hull_id), f.read()):
+                    d = read(p)
+                    break
+        if d is None:
+            raise SystemExit("no .ship file in %s has hullId %r" % (hulls, hull_id))
     return os.path.join(game_dir, d["spriteName"]), d["center"][0], d["height"] - d["center"][1]
 
 
