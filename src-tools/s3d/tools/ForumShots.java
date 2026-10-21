@@ -43,7 +43,7 @@ import s3d.render.SpriteImage;
  * Each battle is fought once; at set times every camera of the shot list renders a frame at
  * SS x 1920x1080 and is scaled down: build/forum_shots/battles/<battle>/<time>s_<camera>.png.
  *
- * Run: S3D_SHOTS_ONLY=<battle> (optional), MAIN=s3d.tools.ForumShots via build.sh's run_tool.
+ * Run: S3D_SHOTS_ONLY=<battle>[,<battle>...] (optional), MAIN=s3d.tools.ForumShots via build.sh's run_tool.
  */
 public final class ForumShots {
 	private static final int W = 1920, H = 1080;
@@ -75,7 +75,7 @@ public final class ForumShots {
 		File out = new File(build, "forum_shots/battles");
 		String only = System.getenv("S3D_SHOTS_ONLY");
 		for (Battle b : battles()) {
-			if (only != null && !only.equals(b.name)) continue;
+			if (only != null && !java.util.Arrays.asList(only.split(",")).contains(b.name)) continue;
 			fight(b, t, renderer, new File(out, b.name));
 		}
 	}
@@ -92,12 +92,24 @@ public final class ForumShots {
 		final String[][] fleets;
 		final float[] times;
 		final long seed;
+		/** Each line's distance from the middle, the gap between ships in a rank, ships per rank. */
+		float start = 2900f, spacing = 720f;
+		int perRank = 10;
+		/** Close-ups of every ship (small fights). */
+		boolean features;
 
 		Battle(String name, long seed, float[] times, String[] a, String[] b) {
 			this.name = name;
 			this.seed = seed;
 			this.times = times;
 			fleets = new String[][] {a, b};
+		}
+
+		Battle small() {
+			start = 1500f;
+			spacing = 650f;
+			features = true;
+			return this;
 		}
 	}
 
@@ -122,6 +134,20 @@ public final class ForumShots {
 						"brilliant_Support", "brilliant_Standard", "scintilla_Strike", "scintilla_Support", "scintilla_Strike", "scintilla_Support",
 						"glimmer_Assault", "glimmer_Support", "glimmer_Assault", "glimmer_Support", "glimmer_Assault", "lumen_Standard",
 						"lumen_Standard", "lumen_Standard", "lumen_Standard"}));
+		// Small fights, three a side, so single ships read.
+		float[] small = {5f, 9f, 13f, 17f, 22f, 28f, 35f, 44f};
+		out.add(new Battle("onslaught_vs_odyssey", 21L, small,
+				new String[] {"onslaught_Standard", "sunder_Assault", "monitor_Escort"},
+				new String[] {"odyssey_Balanced", "aurora_Assault", "omen_PD"}).small());
+		out.add(new Battle("conquest_vs_retribution", 23L, small,
+				new String[] {"conquest_Elite", "medusa_Attack", "wolf_Assault"},
+				new String[] {"retribution_Standard", "mule_Standard", "brawler_Assault"}).small());
+		out.add(new Battle("phase_strike", 25L, small,
+				new String[] {"doom_Strike", "afflictor_Strike", "shade_Assault"},
+				new String[] {"fury_Attack", "medusa_Attack", "kite_Interceptor"}).small());
+		out.add(new Battle("escort_skirmish", 27L, small,
+				new String[] {"fury_Support", "shrike_Attack", "kite_Interceptor"},
+				new String[] {"brawler_Assault", "monitor_Escort", "wolf_Assault"}).small());
 		return out;
 	}
 
@@ -141,9 +167,9 @@ public final class ForumShots {
 				s.ai = new ShipAI3D(i + side * 31 + (int) b.seed * 977);
 				s.ai.homeDir.set(0f, 0f, side == 0 ? 1f : -1f);
 				// Two ranks of ten, big ships in the middle of the front one, heights staggered.
-				int rank = i < 10 ? 0 : 1, k = i % 10;
-				float slot = (k % 2 == 0 ? 1f : -1f) * ((k + 1) / 2) * 720f - 360f;
-				float z = 2900f + rank * 700f;
+				int rank = i / b.perRank, k = i % b.perRank;
+				float slot = (k % 2 == 0 ? 1f : -1f) * ((k + 1) / 2) * b.spacing - b.spacing * 0.5f;
+				float z = b.start + rank * 700f;
 				s.pos.set(slot * (side == 0 ? 1f : -1f), ((i * 7) % 5 - 2) * 90f + rank * 120f, side == 0 ? z : -z);
 				if (side == 1) s.rot.setAxisAngle(0, 1, 0, (float) Math.PI);
 				sim.addShip(s);
@@ -176,7 +202,7 @@ public final class ForumShots {
 				for (WeaponMount m : ftr.weapons) m.ammo = m.spec.maxAmmo;
 			}
 			if (next < b.times.length && time >= b.times[next]) {
-				shoot(sim, t, renderer, target[0], dir, b.times[next]);
+				shoot(sim, t, renderer, target[0], dir, b.times[next], b.features);
 				next++;
 			}
 		}
@@ -185,7 +211,7 @@ public final class ForumShots {
 	// ---- cameras ----
 
 	/** Every camera of the shot list at this moment. */
-	static void shoot(Sim sim, Tuning t, Renderer3D renderer, int fbo, File dir, float time) throws Exception {
+	static void shoot(Sim sim, Tuning t, Renderer3D renderer, int fbo, File dir, float time, boolean features) throws Exception {
 		Vec3[] centre = {sim.fleetCentre(0), sim.fleetCentre(1)};
 		int[] alive = new int[2];
 		for (Ship3D s : sim.ships) if (!s.destroyed && !s.fighter) alive[s.owner]++;
@@ -274,6 +300,23 @@ public final class ForumShots {
 			cams.add(new Object[] {"target", eye2, new Vec3(hot.pos).addScaled(los, -dist * 0.4f), 46f});
 		}
 
+		// Every ship on its own: from behind and beside it toward the enemy it's after, and 3/4 from ahead.
+		if (features) for (Ship3D sh : sim.ships) {
+			if (sh.destroyed || sh.fighter) continue;
+			Ship3D foe = null;
+			for (Ship3D o : sim.ships) if (!o.destroyed && !o.fighter && o.owner != sh.owner && (foe == null || o.pos.distance(sh.pos) < foe.pos.distance(sh.pos))) foe = o;
+			if (foe == null) continue;
+			Vec3 to = new Vec3(foe.pos).sub(sh.pos).normalize();
+			Vec3 right = new Vec3(up).cross(to).normalize();
+			float r = sh.radius;
+			String label = sh.hullName + "_" + sh.owner + sh.id.substring(sh.id.lastIndexOf('_') + 1);
+			cams.add(new Object[] {"chase_" + label, new Vec3(sh.pos).addScaled(to, -r * 3.4f).addScaled(right, r * 1.5f).addScaled(up, r * 0.8f),
+					new Vec3(sh.pos).addScaled(to, r * 6f), 42f});
+			Vec3 fwd = sh.rot.forward(new Vec3());
+			Vec3 fr = new Vec3(up).cross(fwd).normalize();
+			cams.add(new Object[] {"front_" + label, new Vec3(sh.pos).addScaled(fwd, r * 2.6f).addScaled(fr, -r * 1.8f).addScaled(up, r * 0.7f),
+					new Vec3(sh.pos).addScaled(fwd, -r * 0.3f), 40f});
+		}
 		// A contact sheet of the moment (labelled thumbnails) to pick from: sheets/<time>.png.
 		int tw = W / 4, th = H / 4;
 		BufferedImage sheet = new BufferedImage(tw * 4, th * ((cams.size() + 3) / 4), BufferedImage.TYPE_INT_RGB);
@@ -488,6 +531,7 @@ public final class ForumShots {
 			s.flux.ringColor = rgb(style.optJSONArray("shieldRingColor"), s.flux.ringColor);
 		}
 		s.system = system(cell(shipHead, row, "system id"));
+		s.cloak = cloak(cell(shipHead, row, "defense id"), row, s.flux.maxFlux);
 		arm(s, hullId, v);
 		return s;
 	}
@@ -515,7 +559,7 @@ public final class ForumShots {
 		ShipSystem3D.Kind kind = ShipSystem3D.kindFor(id, false);
 		switch (kind) {
 			case BURN_DRIVE: case MANEUVERING_JETS: case PLASMA_JETS: case MICROBURN: case COMBAT_BURN: case FORTRESS_SHIELD: case DAMPER:
-			case AMMO_FEED: case HIGH_ENERGY_FOCUS: case TEMPORAL_SHELL: case FAST_MISSILE_RACKS: case FLARES:
+			case AMMO_FEED: case HIGH_ENERGY_FOCUS: case TEMPORAL_SHELL: case FAST_MISSILE_RACKS: case FLARES: case DISPLACER:
 				break;
 			default:
 				return null;
@@ -539,6 +583,33 @@ public final class ForumShots {
 		s.shieldAllowed = !"TRUE".equalsIgnoreCase(cell(systemHead, r, "noShield"));
 		s.dissipationAllowed = !"TRUE".equalsIgnoreCase(cell(systemHead, r, "noDissipation"));
 		return s;
+	}
+
+	/**
+	 * A phase ship's cloak: activation and upkeep are ship_data's phase cost / upkeep (fractions of max
+	 * flux), the rest the cloak's ship_systems.csv row; coil stress as vanilla's PhaseCloakStats.
+	 */
+	static ShipSystem3D cloak(String defenseId, List<String> shipRow, float maxFlux) {
+		if (defenseId.isEmpty() || ShipSystem3D.kindFor(defenseId, true) != ShipSystem3D.Kind.PHASE_CLOAK) return null;
+		ShipSystem3D c = system(defenseId);
+		if (c == null) {
+			List<String> r = systemRows.get(defenseId);
+			if (r == null) return null;
+			c = new ShipSystem3D(defenseId, cell(systemHead, r, "name"), ShipSystem3D.Kind.PHASE_CLOAK);
+			c.chargeUp = num(systemHead, r, "charge up", 0f);
+			c.chargeDown = num(systemHead, r, "down", 0f);
+			c.cooldown = num(systemHead, r, "cooldown", 0f);
+			c.firingAllowed = !"TRUE".equalsIgnoreCase(cell(systemHead, r, "noFiring"));
+			c.shieldAllowed = false;
+			c.hardFlux = "TRUE".equalsIgnoreCase(cell(systemHead, r, "hardFlux"));
+			c.hardDissipationAllowed = !"TRUE".equalsIgnoreCase(cell(systemHead, r, "noHardDissipation"));
+		}
+		c.toggle = true;
+		c.fluxPerUse = num(shipHead, shipRow, "phase cost", 0f) * maxFlux;
+		c.fluxPerSecond = num(shipHead, shipRow, "phase upkeep", 0f) * maxFlux;
+		c.coilMinSpeed = 0.5f;
+		c.coilStressLevel = 0.5f;
+		return c;
 	}
 
 	/** The variant's weapons, from weapon_data.csv and the weapon / projectile files. */

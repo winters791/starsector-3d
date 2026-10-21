@@ -9,6 +9,10 @@
 #                                                  (for generated models whose outline drifts; ends up ~1.7x triangles)
 #   S3D_PRESS=<mounts.json> src-art/import_stl.sh ...   press modelled guns flat onto the deck (cut shapes per
 #                                                  mount in sprite pixels; see press_mounts in import_stl.py)
+#   S3D_TRIM=<boxes.json> src-art/import_stl.sh ...   fold forward-pointing barrels back into the hull face
+#                                                  (boxes in sprite pixels; see trim_forward in import_stl.py)
+#   S3D_FLATTEN=0.35 S3D_SQUASH=0.7 src-art/import_stl.sh ...   tame a swollen model: FLATTEN keeps that share of
+#                                                  whatever bulges past the main hull, SQUASH scales the height
 # Also writes build/art/<hullId>_fit.png (sprite alpha green, model red, overlap yellow).
 set -euo pipefail
 ART="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

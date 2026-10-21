@@ -158,6 +158,13 @@ def main():
         clamp_to_outline(NV, alpha, hull.cx, hull.cy_top)
     if os.environ.get("S3D_PRESS"):
         press_mounts(NV, T, os.environ["S3D_PRESS"], w, h, hull.cx, hull.cy_top)
+    if os.environ.get("S3D_TRIM"):
+        trim_forward(NV, os.environ["S3D_TRIM"], hull.cx, hull.cy_top)
+    if os.environ.get("S3D_FLATTEN"):
+        flatten_bulges(NV, float(os.environ["S3D_FLATTEN"]))
+    if os.environ.get("S3D_SQUASH"):
+        NV[:, 2] *= float(os.environ["S3D_SQUASH"])  # height about the mid-plane
+        print("S3DKIT squashed to %.0f%% height: z %.1f..%.1f" % (100 * float(os.environ["S3D_SQUASH"]), NV[:, 2].min(), NV[:, 2].max()))
     me.vertices.foreach_set("co", NV.ravel().astype(np.float32))
     me.update()  # a pure rotation + scale: face winding stays outward
     if os.environ.get("S3D_CLAMP_OUTLINE"):
@@ -381,6 +388,35 @@ def press_mounts(NV, T, spec_path, w, h, cx, cy_top, s=3):
     drop = NV[:, 2] > tgt
     NV[drop, 2] = tgt[drop]
     print("S3DKIT pressed %d mounts flat (%d vertices lowered)" % (len(spec["shapes"]), drop.sum()))
+
+
+def trim_forward(NV, spec_path, cx, cy_top):
+    """Folds forward-pointing barrels back into the hull, in place. The JSON spec lists boxes in sprite
+    pixels, {"box": [col0, row0, col1, row1], "to_row": r}: every vertex inside a box that lies in front of
+    row r (a smaller row) is moved back onto row r, so a barrel collapses into the face it sticks out of and
+    the mesh stays closed. Runs before the paint bake."""
+    import json
+    col = NV[:, 0] + cx
+    row = cy_top - NV[:, 1]
+    moved = 0
+    for t in json.load(open(spec_path))["trim"]:
+        c0, r0, c1, r1 = t["box"]
+        sel = (col >= c0) & (col <= c1) & (row >= r0) & (row <= r1) & (row < t["to_row"])
+        NV[sel, 1] = cy_top - t["to_row"]
+        moved += int(sel.sum())
+    print("S3DKIT trimmed forward barrels (%d vertices folded back)" % moved)
+
+
+def flatten_bulges(NV, keep, knee_pct=60):
+    """Turns swollen domes into flatter plates, in place: whatever stands further from the mid-plane than
+    the [knee_pct] percentile of all heights keeps only [keep] (0..1) of the rest of its height, above and
+    below. The hull's main mass stays as it is; only what bulges out of it is compressed."""
+    a = np.abs(NV[:, 2])
+    knee = float(np.percentile(a, knee_pct))
+    out = a > knee
+    NV[out, 2] = np.sign(NV[out, 2]) * (knee + (a[out] - knee) * keep)
+    print("S3DKIT flattened bulges beyond %.1f of the mid-plane to %.0f%% (z %.1f..%.1f)"
+          % (knee, 100 * keep, NV[:, 2].min(), NV[:, 2].max()))
 
 
 def grow(m, n):
