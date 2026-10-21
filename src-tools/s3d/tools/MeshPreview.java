@@ -42,7 +42,7 @@ import s3d.render.SpriteImage;
 public final class MeshPreview {
 	private static final int VW = 640, VH = 400;
 	/** The mod folder, where hand-made hull models live (data/meshes/hulls). */
-	private static File modDir;
+	static File modDir;
 	/** S3D_MESH=relief draws every hull as the sprite relief, ignoring hand-made models. */
 	private static final boolean USE_MODELS = !"relief".equals(System.getenv("S3D_MESH"));
 	/** S3D_PREVIEW_ONLY=crisp compares the tuning file's profile against this one (S3D_COMPARE=plated; default crisp). */
@@ -204,7 +204,7 @@ public final class MeshPreview {
 		else Display.destroy();
 	}
 
-	private static Ship3D makeShip(File game, GameData.Hull h, Tuning t, String id) throws Exception {
+	static Ship3D makeShip(File game, GameData.Hull h, Tuning t, String id) throws Exception {
 		return makeShip(game, h, t, id, USE_MODELS);
 	}
 
@@ -2187,7 +2187,7 @@ public final class MeshPreview {
 		GL11.glFinish();
 	}
 
-	private static boolean createContext() throws Exception {
+	static boolean createContext() throws Exception {
 		try {
 			if ((Pbuffer.getCapabilities() & Pbuffer.PBUFFER_SUPPORTED) != 0) {
 				Pbuffer pb = new Pbuffer(16, 16, new PixelFormat(8, 24, 0), null);
@@ -2203,7 +2203,7 @@ public final class MeshPreview {
 		return false;
 	}
 
-	private static int[] createCaptureTarget(int w, int h) {
+	static int[] createCaptureTarget(int w, int h) {
 		int tex = GL11.glGenTextures();
 		GL11.glBindTexture(GL11.GL_TEXTURE_2D, tex);
 		GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
@@ -2216,7 +2216,7 @@ public final class MeshPreview {
 		return new int[] {fbo, tex};
 	}
 
-	private static BufferedImage read(int w, int h) {
+	static BufferedImage read(int w, int h) {
 		ByteBuffer px = BufferUtils.createByteBuffer(w * h * 4);
 		GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, px);
 		BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
