@@ -72,3 +72,5 @@ __pycache__/
 /data/meshes/hulls/cerberus.obj
 /data/meshes/hulls/gremlin.obj
 /data/meshes/hulls/hound.obj
+/data/meshes/hulls/fabricator_unit.obj
+/data/meshes/hulls/tesseract.obj
