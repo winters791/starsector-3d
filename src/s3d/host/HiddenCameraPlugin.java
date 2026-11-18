@@ -9,6 +9,7 @@ import org.lwjgl.util.vector.Vector2f;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.combat.BaseEveryFrameCombatPlugin;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
+import com.fs.starfarer.api.combat.CombatUIAPI;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.combat.ViewportAPI;
 import com.fs.starfarer.api.input.InputEventAPI;
@@ -25,17 +26,22 @@ import com.fs.starfarer.api.input.InputEventAPI;
  * the camera over every ship, so none of them is off-screen and no markers are drawn. The 2D world is
  * also faded out (viewport alpha 0); the opaque 3D view covers it anyway. The next frame's advance
  * parks the camera again before anything else reads it (the 3D sounds use its centre).
+ *
+ * It also keeps vanilla's ship info widget (flux and hull bars, "FRIENDLY  CR", added in 0.98.5a-RC6/RC7)
+ * hidden: vanilla draws it next to your 2D puppet ship, which with the camera framed like this lands on
+ * top of the 3D view. The widget fades itself back in on its own, so its brightness is zeroed every
+ * frame just before vanilla's HUD draws, and it is fanned out again when the 3D view goes away.
  */
 public class HiddenCameraPlugin extends BaseEveryFrameCombatPlugin {
 	private static final Logger log = Global.getLogger(HiddenCameraPlugin.class);
 
 	private CombatEngineAPI engine;
-	private boolean alphaZeroed, failed, logged;
+	private boolean alphaZeroed, failed, logged, shipInfoHidden, shipInfoFailed;
 
 	@Override
 	public void init(CombatEngineAPI engine) {
 		this.engine = engine;
-		alphaZeroed = failed = logged = false;
+		alphaZeroed = failed = logged = shipInfoHidden = shipInfoFailed = false;
 	}
 
 	@Override
@@ -59,6 +65,7 @@ public class HiddenCameraPlugin extends BaseEveryFrameCombatPlugin {
 				return;
 			}
 			frameAllShips(vp);
+			hideShipInfo();
 			vp.setAlphaMult(0f);
 			alphaZeroed = true;
 			if (!logged) {
@@ -100,6 +107,33 @@ public class HiddenCameraPlugin extends BaseEveryFrameCombatPlugin {
 	private void restoreAlpha() {
 		engine.getViewport().setAlphaMult(1f);
 		alphaZeroed = false;
+		showShipInfo();
+	}
+
+	/** Vanilla's ship info widget: faded out and held at zero brightness while the 3D view is up. */
+	private void hideShipInfo() {
+		if (shipInfoFailed) return;
+		try {
+			CombatUIAPI ui = engine.getCombatUI();
+			if (ui == null) return;
+			ui.hideShipInfo();
+			ui.setShipInfoFanOutBrightness(0f);
+			shipInfoHidden = true;
+		} catch (Throwable t) { // an older game without these calls: only the widget shows, the rest still works
+			shipInfoFailed = true;
+			log.warn("S3D: can't hide vanilla's ship info widget; it may show over the 3D view", t);
+		}
+	}
+
+	private void showShipInfo() {
+		if (!shipInfoHidden) return;
+		shipInfoHidden = false;
+		try {
+			CombatUIAPI ui = engine.getCombatUI();
+			if (ui != null) ui.reFanOutShipInfo();
+		} catch (Throwable t) {
+			log.warn("S3D: can't show vanilla's ship info widget again", t);
+		}
 	}
 
 	private void fail(Throwable t) {
