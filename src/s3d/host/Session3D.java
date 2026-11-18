@@ -296,6 +296,10 @@ abstract class Session3D {
 		try {
 			com.fs.starfarer.api.SoundPlayerAPI sp = Global.getSoundPlayer();
 			org.lwjgl.util.vector.Vector2f centre = engine.getViewport().getCenter();
+			// Vanilla moves its listener to the camera centre after it renders, and HiddenCameraPlugin has
+			// re-framed the camera over the battle by then, while these sounds sit around the parked centre.
+			// Vanilla drops sounds over 1800 from the listener, so pin it here every frame (it lasts one frame).
+			sp.setListenerPosOverrideOneFrame(new org.lwjgl.util.vector.Vector2f(centre));
 			s3d.math.Vec3 right = sim.camera.rot.right(new s3d.math.Vec3()), fwd = sim.camera.rot.forward(new s3d.math.Vec3());
 			org.lwjgl.util.vector.Vector2f zero = new org.lwjgl.util.vector.Vector2f();
 			float scale = cfg.tuning.soundDistanceScale, range = cfg.tuning.soundRange, vol = cfg.tuning.soundVolume;

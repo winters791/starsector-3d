@@ -106,6 +106,56 @@ final class VanillaStatus {
 		}
 	}
 
+	private static boolean reticleFailed;
+	private static int reticleLogs;
+
+	/**
+	 * Empties vanilla's target reticle renderer (CombatState.getTargetReticleRenderer()): the flux / hull /
+	 * "FRIENDLY  CR" boxes it draws beside your ship, your target and the ship under the mouse, which land on
+	 * the 3D view. Its List fields hold the boxes; with them empty there is nothing to draw, and vanilla
+	 * handles an empty renderer (no target). The first few times it held anything, what it held is logged.
+	 */
+	static void clearReticles(CombatEngineAPI engine) {
+		if (reticleFailed || engine == null) return;
+		try {
+			init();
+			Object ui = engine.getCombatUI();
+			Object renderer = ui != null ? call(ui, "getTargetReticleRenderer") : null;
+			if (renderer == null) return;
+			for (Object f : fields(renderer.getClass())) {
+				if (!List.class.isAssignableFrom((Class<?>) fieldType.invoke(f))) continue;
+				Object v = fieldGet.invoke(f, renderer);
+				if (!(v instanceof List) || ((List<?>) v).isEmpty()) continue;
+				if (reticleLogs < 3) {
+					reticleLogs++;
+					log.info("S3D: cleared vanilla's target reticles: " + describe((List<?>) v));
+				}
+				((List<?>) v).clear();
+			}
+		} catch (Throwable t) {
+			reticleFailed = true;
+			log.warn("S3D: can't clear vanilla's target reticles; their flux/hull boxes may show over the 3D view", t);
+		}
+	}
+
+	private static String describe(List<?> reticles) throws Throwable {
+		StringBuilder sb = new StringBuilder().append(reticles.size()).append(':');
+		for (Object r : reticles) {
+			com.fs.starfarer.api.combat.ShipAPI ship = null;
+			for (Object f : fields(r.getClass())) {
+				Object v = fieldGet.invoke(f, r);
+				if (v instanceof com.fs.starfarer.api.combat.ShipAPI) {
+					ship = (com.fs.starfarer.api.combat.ShipAPI) v;
+					break;
+				}
+			}
+			sb.append(' ');
+			if (ship == null) sb.append(r.getClass().getSimpleName());
+			else sb.append(ship.getName()).append(" (").append(ship.getHullSpec().getHullId()).append(')');
+		}
+		return sb.toString();
+	}
+
 	/** The status widget's first List field: its entries in display order (the second is a per-frame scratch list). */
 	private static List<?> shownEntries(Object list) throws Throwable {
 		for (Object f : fields(list.getClass())) {

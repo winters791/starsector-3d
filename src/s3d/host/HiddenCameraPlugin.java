@@ -31,6 +31,11 @@ import com.fs.starfarer.api.input.InputEventAPI;
  * hidden: vanilla draws it next to your 2D puppet ship, which with the camera framed like this lands on
  * top of the 3D view. The widget fades itself back in on its own, so its brightness is zeroed every
  * frame just before vanilla's HUD draws, and it is fanned out again when the 3D view goes away.
+ *
+ * Vanilla's target reticle (the flux / hull / "FRIENDLY  CR" box it draws beside your own ship, your
+ * target and the ship under the mouse) is kept off too: its list is emptied every frame while the 3D
+ * view is up (VanillaStatus.clearReticles). Tagging hulls module_no_status_bar doesn't stop it on RC7:
+ * your ship's box still showed with the tag on.
  */
 public class HiddenCameraPlugin extends BaseEveryFrameCombatPlugin {
 	private static final Logger log = Global.getLogger(HiddenCameraPlugin.class);
@@ -50,6 +55,7 @@ public class HiddenCameraPlugin extends BaseEveryFrameCombatPlugin {
 		try {
 			// The 3D view was switched off or the battle handed back: show the 2D world again.
 			if (!parkedBy3D(engine.getViewport())) restoreAlpha();
+			else VanillaStatus.clearReticles(engine);
 		} catch (Throwable t) {
 			fail(t);
 		}
@@ -66,6 +72,7 @@ public class HiddenCameraPlugin extends BaseEveryFrameCombatPlugin {
 			}
 			frameAllShips(vp);
 			hideShipInfo();
+			VanillaStatus.clearReticles(engine);
 			vp.setAlphaMult(0f);
 			alphaZeroed = true;
 			if (!logged) {
@@ -109,6 +116,7 @@ public class HiddenCameraPlugin extends BaseEveryFrameCombatPlugin {
 		alphaZeroed = false;
 		showShipInfo();
 	}
+
 
 	/** Vanilla's ship info widget: faded out and held at zero brightness while the 3D view is up. */
 	private void hideShipInfo() {
