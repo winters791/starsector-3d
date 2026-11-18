@@ -74,3 +74,4 @@ __pycache__/
 /data/meshes/hulls/hound.obj
 /data/meshes/hulls/fabricator_unit.obj
 /data/meshes/hulls/tesseract.obj
+dist/

@@ -3,5 +3,7 @@
 	# "plugins" is added to every battle; CombatHostPlugin decides per battle whether to take over.
 	"plugins":{
 		"s3d_combatHost":"s3d.host.CombatHostPlugin",
+		# Re-frames the hidden 2D camera at render time so vanilla draws no off-screen ship markers over the 3D view.
+		"s3d_hiddenCamera":"s3d.host.HiddenCameraPlugin",
 	},
 }

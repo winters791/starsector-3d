@@ -21,19 +21,45 @@ public final class GLStateGuard implements AutoCloseable {
 	private static final FloatBuffer texM = BufferUtils.createFloatBuffer(16);
 
 	private int program, fbo, arrayBuf, elemBuf, activeTex, matrixMode;
+	/** False when the GL can't read matrices back; then they were saved with one glPushMatrix per stack. */
+	private boolean matricesByValue;
+
+	/**
+	 * glGetInteger that answers {@code fallback} when it can't be read. Some mods put a command-recording
+	 * bridge in front of LWJGL (com.genir.renderer) that throws UnsupportedOperationException on queries.
+	 */
+	private static int getInt(int pname, int fallback) {
+		try {
+			return GL11.glGetInteger(pname);
+		} catch (RuntimeException e) {
+			return fallback;
+		}
+	}
 
 	public static GLStateGuard push() {
 		GLStateGuard g = new GLStateGuard();
-		g.program = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
-		g.fbo = GLCaps.fbo ? GL11.glGetInteger(EXTFramebufferObject.GL_FRAMEBUFFER_BINDING_EXT) : 0;
-		g.arrayBuf = GL11.glGetInteger(GL15.GL_ARRAY_BUFFER_BINDING);
-		g.elemBuf = GL11.glGetInteger(GL15.GL_ELEMENT_ARRAY_BUFFER_BINDING);
-		g.activeTex = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
-		g.matrixMode = GL11.glGetInteger(GL11.GL_MATRIX_MODE);
+		g.program = getInt(GL20.GL_CURRENT_PROGRAM, 0);
+		g.fbo = GLCaps.fbo ? getInt(EXTFramebufferObject.GL_FRAMEBUFFER_BINDING_EXT, 0) : 0;
+		g.arrayBuf = getInt(GL15.GL_ARRAY_BUFFER_BINDING, 0);
+		g.elemBuf = getInt(GL15.GL_ELEMENT_ARRAY_BUFFER_BINDING, 0);
+		g.activeTex = getInt(GL13.GL_ACTIVE_TEXTURE, GL13.GL_TEXTURE0);
+		g.matrixMode = getInt(GL11.GL_MATRIX_MODE, GL11.GL_MODELVIEW);
 
-		GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, projM);
-		GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, modelM);
-		GL11.glGetFloat(GL11.GL_TEXTURE_MATRIX, texM);
+		try {
+			GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, projM);
+			GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, modelM);
+			GL11.glGetFloat(GL11.GL_TEXTURE_MATRIX, texM);
+			g.matricesByValue = true;
+		} catch (RuntimeException e) {
+			// One level per stack is always available (GL guarantees depth >= 2 for projection/texture).
+			GL13.glActiveTexture(GL13.GL_TEXTURE0);
+			GL11.glMatrixMode(GL11.GL_TEXTURE);
+			GL11.glPushMatrix();
+			GL11.glMatrixMode(GL11.GL_PROJECTION);
+			GL11.glPushMatrix();
+			GL11.glMatrixMode(GL11.GL_MODELVIEW);
+			GL11.glPushMatrix();
+		}
 
 		GL11.glPushAttrib(GL11.GL_ALL_ATTRIB_BITS);
 		GL11.glPushClientAttrib(GL11.GL_ALL_CLIENT_ATTRIB_BITS);
@@ -70,12 +96,16 @@ public final class GLStateGuard implements AutoCloseable {
 		GL11.glPopClientAttrib();
 		GL11.glPopAttrib();
 
+		GL13.glActiveTexture(GL13.GL_TEXTURE0);
 		GL11.glMatrixMode(GL11.GL_TEXTURE);
-		GL11.glLoadMatrix(texM);
+		if (matricesByValue) GL11.glLoadMatrix(texM);
+		else GL11.glPopMatrix();
 		GL11.glMatrixMode(GL11.GL_PROJECTION);
-		GL11.glLoadMatrix(projM);
+		if (matricesByValue) GL11.glLoadMatrix(projM);
+		else GL11.glPopMatrix();
 		GL11.glMatrixMode(GL11.GL_MODELVIEW);
-		GL11.glLoadMatrix(modelM);
+		if (matricesByValue) GL11.glLoadMatrix(modelM);
+		else GL11.glPopMatrix();
 		GL11.glMatrixMode(matrixMode);
 		GL13.glActiveTexture(activeTex);
 	}

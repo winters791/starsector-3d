@@ -243,6 +243,8 @@ final class BattleSession extends Session3D {
 		checkPending();
 		if (overlay) {
 			// Point the hidden 2D camera off the map so vanilla draws (and plays) as little as possible.
+			// HiddenCameraPlugin recognises exactly this spot and re-frames the camera at render time so
+			// vanilla draws no off-screen markers over the 3D view: keep the two in step if this changes.
 			engine.getViewport().set(mapW, mapH, 1000f, 1000f);
 		}
 	}
